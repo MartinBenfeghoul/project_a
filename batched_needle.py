@@ -5,19 +5,25 @@
 #   c. Update KV cache
 #   d. Compute the loss + perf on that batch
 #   e. Accumulate the loss + perf
-
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
-import torch.nn.functional as F
-from utils.metrics import avg_nll, clean
-from utils.kv_cache import generate_kv
-from datasets import load_dataset, load_from_disk
 import json
 import time
-from torch import nn
-import os
 
-HF_API_KEY = os.getenv("HF_API_KEY")
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+from datasets import load_dataset, load_from_disk
+
+from utils import (
+    get_model_and_tokenizer,
+    generate_kv_batched,
+    avg_nll,
+    clean,
+)
+
+# load all environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 class VectorizedIndependentHeadMLP(nn.Module):
     def __init__(self, num_heads, head_dim, hidden_factor=2):
@@ -117,22 +123,8 @@ if __name__ == "__main__":
             ds.save_to_disk(f"./datasets/passkey_seq_len_{split}")
             datasets.append(ds)
 
-    if local_dir:
-        print("Loading model from local")
-        tokenizer = AutoTokenizer.from_pretrained(
-            local_dir,
-            fix_mistral_regex=True
-        )
-        model = AutoModelForCausalLM.from_pretrained(local_dir)
-    else:
-        local_dir = './llama_3.1_8b_instruct_local'
-        print("Loading model from HuggingFace")
-        tokenizer = AutoTokenizer.from_pretrained(model, token=HF_API_KEY)
-        model = AutoModelForCausalLM.from_pretrained(model, token=HF_API_KEY) 
-        tokenizer.save_pretrained(local_dir)
-        model.save_pretrained(local_dir) 
+    model, tokenizer = get_model_and_tokenizer(model, device)
 
-    model.to(device)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = 'left'
     model.eval()
@@ -210,7 +202,7 @@ if __name__ == "__main__":
             all_preds = []
 
             with torch.no_grad():
-                past_key_values, original_input_id = generate_kv([seq], model, eval_batch_size, tokenizer, device)
+                past_key_values, original_input_id = generate_kv_batched([seq], model, eval_batch_size, tokenizer, device)
 
                 for perc_idx, target_perc in enumerate(target_percentages):
                     input_id = original_input_id.clone()

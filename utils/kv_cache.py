@@ -1,6 +1,13 @@
 import torch
 
-def generate_kv(ds, model, batch_size, tokenizer, device):
+def generate_outputs_single_pass(ds, model, tokenizer, device):
+    texts = [ds[i]["prompt"] for i in range(len(ds))]
+    inputs = tokenizer(texts, return_tensors='pt', padding=True).to(device)
+    with torch.no_grad():
+        out = model(**inputs, use_cache=True)
+    return inputs["input_ids"], out
+
+def generate_kv_batched(ds, model, batch_size, tokenizer, device):
     texts = [ds[i]["prompt"] for i in range(len(ds))]
     inputs = tokenizer(texts, return_tensors='pt', padding=True).to(device)
     input_ids = inputs["input_ids"]
