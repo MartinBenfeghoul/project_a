@@ -15,6 +15,9 @@ from datasets import load_dataset, load_from_disk
 import json
 import time
 from torch import nn
+import os
+
+HF_API_KEY = os.getenv("HF_API_KEY")
 
 class VectorizedIndependentHeadMLP(nn.Module):
     def __init__(self, num_heads, head_dim, hidden_factor=2):
@@ -124,8 +127,8 @@ if __name__ == "__main__":
     else:
         local_dir = './llama_3.1_8b_instruct_local'
         print("Loading model from HuggingFace")
-        tokenizer = AutoTokenizer.from_pretrained(model, token="")
-        model = AutoModelForCausalLM.from_pretrained(model, token="") 
+        tokenizer = AutoTokenizer.from_pretrained(model, token=HF_API_KEY)
+        model = AutoModelForCausalLM.from_pretrained(model, token=HF_API_KEY) 
         tokenizer.save_pretrained(local_dir)
         model.save_pretrained(local_dir) 
 
