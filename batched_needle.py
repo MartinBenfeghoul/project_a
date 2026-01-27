@@ -124,8 +124,8 @@ if __name__ == "__main__":
     else:
         local_dir = './llama_3.1_8b_instruct_local'
         print("Loading model from HuggingFace")
-        tokenizer = AutoTokenizer.from_pretrained(model, token="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")
-        model = AutoModelForCausalLM.from_pretrained(model, token="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") 
+        tokenizer = AutoTokenizer.from_pretrained(model, token="")
+        model = AutoModelForCausalLM.from_pretrained(model, token="") 
         tokenizer.save_pretrained(local_dir)
         model.save_pretrained(local_dir) 
 
