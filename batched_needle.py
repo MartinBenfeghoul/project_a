@@ -125,10 +125,6 @@ if __name__ == "__main__":
 
     model, tokenizer = get_model_and_tokenizer(model, device)
 
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = 'left'
-    model.eval()
-
     batch_size = 1
 
     for ds_idx, ds in enumerate(datasets):
