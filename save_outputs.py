@@ -23,8 +23,8 @@ def main(
     model_name,
     dataset,
     save_path="model_outputs.pt",
-    seq_len=2048,
-    micro_bs=8,
+    seq_len=1024,
+    micro_bs=4,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
@@ -43,13 +43,13 @@ def main(
     )
 
     inputs = next(iter(dl))
-    breakpoint()
     inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
-        outputs = model(**inputs, labels=inputs["input_ids"], use_cache=True)
+        outputs = model(**inputs, use_cache=True)
 
     # save outputs to a file
     save_inputs_outputs(inputs, outputs, save_path)
+
 
 if __name__ == "__main__":
     model_name = "meta-llama/Llama-3.2-1B-Instruct"
