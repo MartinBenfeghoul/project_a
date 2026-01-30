@@ -1,0 +1,13 @@
+model:
+  name: "Qwen/Qwen2.5-0.5B-Instruct"
+
+training:
+  seq_len: 512 # size of full sequence length during meta-learning
+  batch_size: 1
+  inner_steps: 5
+  meta_lr: 1.0e-4
+  inner_lr: 1.0e-2
+  support_ratio: 0.8
+  num_meta_epochs: 30
+  eval_batch_size: 32
+  checkpoint_path: "meta_learned_mlps_qwen.pt"

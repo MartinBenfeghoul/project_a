@@ -73,3 +73,35 @@ class PackedTokens(IterableDataset):
                 drop = buf_len - self.buffer_tokens
                 buf = buf[drop:]
                 buf_len = len(buf)
+
+
+class MetaLearningDataset(PackedTokens):
+    def __init__(self, hf_dataset, tokenizer, seq_len, eos_id, support_ratio=0.8, buffer_tokens=1_000_000):
+        super().__init__(hf_dataset, tokenizer, seq_len, eos_id, buffer_tokens)
+        self.support_ratio = support_ratio
+
+    def __iter__(self):
+        for sample in super().__iter__():
+            input_ids = sample["input_ids"]
+            seq_len = len(input_ids)
+            split_idx = int(seq_len * self.support_ratio)
+
+            yield {
+                "support_input_ids": input_ids[:split_idx],
+                "support_labels": input_ids[:split_idx].clone(),
+                "query_input_ids": input_ids[split_idx:],
+                "query_labels": input_ids[split_idx:].clone(),
+                "input_ids": input_ids,
+                "labels": input_ids.clone(),
+            }
+
+
+def meta_collate(batch):
+    return {
+        "support_input_ids": torch.stack([b["support_input_ids"] for b in batch]),
+        "support_labels": torch.stack([b["support_labels"] for b in batch]),
+        "query_input_ids": torch.stack([b["query_input_ids"] for b in batch]),
+        "query_labels": torch.stack([b["query_labels"] for b in batch]),
+        "input_ids": torch.stack([b["input_ids"] for b in batch]),
+        "labels": torch.stack([b["labels"] for b in batch]),
+    }
