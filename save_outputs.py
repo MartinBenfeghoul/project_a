@@ -18,8 +18,12 @@ def calculate_surprise(loss):
 def save_dict(dict_, save_path):
     """Save model inputs and outputs to a file."""
     print(f"Saving inputs and outputs to {save_path}")
-    dict_ = {k: v.clone().cpu() for k, v in dict_.items() if isinstance(v, torch.Tensor)}
-    torch.save(dict_, save_path)
+    tensors = {k: v.clone().cpu() for k, v in dict_.items() if isinstance(v, torch.Tensor)}
+    non_tensors = {k: v for k, v in dict_.items() if k not in tensors}
+    torch.save(
+        {**tensors, **non_tensors}, 
+        save_path,
+    )
 
 def main(
     model_name,
