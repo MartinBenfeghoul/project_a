@@ -1,4 +1,5 @@
 import itertools
+import os
 import torch
 from torch.utils.data import DataLoader
 
@@ -6,10 +7,9 @@ from utils import (
     PackedTokens,
     load_data,
     collate,
-    get_model_and_tokenizer, 
-    generate_outputs_single_pass,
+    get_model_and_tokenizer,
 )
-
+# testing
 
 def calculate_surprise(loss):
     """Calculate surprise from loss."""
@@ -31,22 +31,27 @@ def main(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
 
-    ds = load_data(dataset)
-    packed = PackedTokens(
-        ds, tokenizer, seq_len=seq_len, eos_id=tokenizer.eos_token_id,
-        buffer_tokens=2 * micro_bs * seq_len,
-    )
-    dl = DataLoader(
-        packed,
-        batch_size=micro_bs,
-        collate_fn=collate,
-        num_workers=0,
-        pin_memory=False,
-        persistent_workers=False,
-    )
+    if not os.path.exists('model_inputs.pt'):
+        ds = load_data(dataset)
+        packed = PackedTokens(
+            ds, tokenizer, seq_len=seq_len, eos_id=tokenizer.eos_token_id,
+            buffer_tokens=2 * micro_bs * seq_len,
+        )
+        dl = DataLoader(
+            packed,
+            batch_size=micro_bs,
+            collate_fn=collate,
+            num_workers=0,
+            pin_memory=False,
+            persistent_workers=False,
+        )
 
-    batches = list(itertools.islice(dl, micro_bs))
-    inputs = batches[0]  # Take first batch only for saving
+        batches = list(itertools.islice(dl, micro_bs))
+        inputs = batches[0]  # Take first batch only for saving
+    else:
+        inputs = torch.load('model_inputs.pt')
+
+
     inputs = {k: v.to(device) for k, v in inputs.items()}
     save_dict(inputs, "model_inputs.pt")
     with torch.no_grad():
@@ -57,7 +62,8 @@ def main(
 
 
 if __name__ == "__main__":
-    model_name = "meta-llama/Llama-3.2-1B-Instruct"
+    # model_name = "meta-llama/Llama-3.2-1B-Instruct"
+    model_name = "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
     dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset"
     save_path = "model_outputs.pt"
 
