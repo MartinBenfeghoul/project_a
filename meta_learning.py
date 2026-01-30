@@ -203,13 +203,11 @@ def main():
         device=device,
         config=training_config,
     )
-
-    torch.save(
-        {f"layer_{i}": mlp.state_dict() for i, mlp in enumerate(layer_mlps)},
-        config.checkpoint_path
-    )
+    
+    trained_params = {f"layer_{i}": mlp.state_dict() for i, mlp in enumerate(layer_mlps)}
+    torch.save(trained_params, config.checkpoint_path)
     print(f"Meta-learned parameters saved to {training_config.checkpoint_path}")
 
 
 if __name__ == "__main__":
-    main()
+    trained_paramss = main()
