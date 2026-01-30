@@ -1,3 +1,4 @@
+import itertools
 import torch
 from torch.utils.data import DataLoader
 
@@ -14,10 +15,11 @@ def calculate_surprise(loss):
     """Calculate surprise from loss."""
     return torch.exp(loss)
 
-def save_inputs_outputs(inputs, outputs, save_path):
+def save_dict(dict_, save_path):
     """Save model inputs and outputs to a file."""
     print(f"Saving inputs and outputs to {save_path}")
-    torch.save({**inputs, **outputs}, save_path)
+    dict_ = {k: v.clone().cpu() for k, v in dict_.items() if isinstance(v, torch.Tensor)}
+    torch.save(dict_, save_path)
 
 def main(
     model_name,
@@ -30,25 +32,28 @@ def main(
     model, tokenizer = get_model_and_tokenizer(model_name, device)
 
     ds = load_data(dataset)
-    eos_id = tokenizer.eos_token_id
-    packed = PackedTokens(ds, tokenizer, seq_len=seq_len, eos_id=eos_id)
+    packed = PackedTokens(
+        ds, tokenizer, seq_len=seq_len, eos_id=tokenizer.eos_token_id,
+        buffer_tokens=2 * micro_bs * seq_len,
+    )
     dl = DataLoader(
         packed,
         batch_size=micro_bs,
         collate_fn=collate,
-        num_workers=8,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=4,
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False,
     )
 
-    inputs = next(iter(dl))
+    batches = list(itertools.islice(dl, micro_bs))
+    inputs = batches[0]  # Take first batch only for saving
     inputs = {k: v.to(device) for k, v in inputs.items()}
+    save_dict(inputs, "model_inputs.pt")
     with torch.no_grad():
         outputs = model(**inputs, use_cache=True)
 
     # save outputs to a file
-    save_inputs_outputs(inputs, outputs, save_path)
+    save_dict({**outputs}, save_path)
 
 
 if __name__ == "__main__":
