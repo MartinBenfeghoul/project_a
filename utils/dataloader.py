@@ -93,6 +93,7 @@ class MetaLearningDataset(PackedTokens):
                 "query_labels": input_ids[split_idx:].clone(),
                 "input_ids": input_ids,
                 "labels": input_ids.clone(),
+                "attention_mask": torch.ones_like(input_ids),
             }
 
 
@@ -104,4 +105,5 @@ def meta_collate(batch):
         "query_labels": torch.stack([b["query_labels"] for b in batch]),
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "labels": torch.stack([b["labels"] for b in batch]),
+        "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
     }
