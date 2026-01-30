@@ -1,3 +1,5 @@
+import torch
+from torch import nn
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 def get_model_and_tokenizer(
@@ -10,3 +12,39 @@ def get_model_and_tokenizer(
     tokenizer.padding_side = pad_token_side
     model.eval()
     return model, tokenizer
+
+
+class VectorizedIndependentHeadMLP(nn.Module):
+    def __init__(self, num_heads, head_dim, hidden_factor=2):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        
+        total_in = num_heads * head_dim
+        total_hidden = num_heads * (head_dim * hidden_factor)
+        
+        self.net = torch.nn.Sequential(
+            torch.nn.Conv1d(total_in, total_hidden, kernel_size=1, groups=num_heads),
+            torch.nn.GELU(),
+            torch.nn.Conv1d(total_hidden, total_hidden, kernel_size=1, groups=num_heads),
+            torch.nn.GELU(),
+            torch.nn.Conv1d(total_hidden, total_hidden, kernel_size=1, groups=num_heads),
+            torch.nn.GELU(),
+            torch.nn.Conv1d(total_hidden, total_in, kernel_size=1, groups=num_heads),
+        )
+
+    def forward(self, x):
+        b, h, t, d = x.shape
+        x_reshaped = x.permute(0, 1, 3, 2).reshape(b, h * d, t)
+        out = self.net(x_reshaped)
+        return out.view(b, h, d, t).permute(0, 1, 3, 2)
+    
+def clone_mlp_params(layer_mlps):
+    return [[p.clone() for p in mlp.parameters()] for mlp in layer_mlps]
+
+
+def load_mlp_params(layer_mlps, params_list):
+    for mlp, params in zip(layer_mlps, params_list):
+        for p, saved_p in zip(mlp.parameters(), params):
+            p.data.copy_(saved_p.data)
+

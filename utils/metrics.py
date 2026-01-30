@@ -40,15 +40,16 @@ def update_cache(cache, updated_cache, num_head, token_idx, std=0, end=1):
         layer.values[std:end, :, token_idx, :] = updated_layer.values[std:end, :, token_idx, :]
     return cache
 
-def avg_nll(ds, model, batch_size, tokenizer, device, num_head=0, updated_cache=None):
+def avg_nll(ds, model, batch_size, tokenizer, device, num_head=0, updated_cache=None, already_tokenized=False):
     #texts = [ds["prompt"][i] + ds["answer"][i] for i in range(len(ds["prompt"]))]
-    texts = [ds[i]["prompt"] for i in range(len(ds))]
-    inputs = tokenizer(texts, return_tensors='pt', padding=True).to(device)
+    if not already_tokenized:
+        texts = [ds[i]["prompt"] for i in range(len(ds))]
+        ds = tokenizer(texts, return_tensors='pt', padding=True).to(device)
     
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
+    input_ids = ds["input_ids"]
+    attention_mask = ds["attention_mask"]
     num_seq, seq_len = input_ids.shape
-    
+
     all_seq_means = []
 
     for std in range(0, num_seq, batch_size):
@@ -90,3 +91,15 @@ def avg_nll(ds, model, batch_size, tokenizer, device, num_head=0, updated_cache=
 
     final_mean = torch.cat(all_seq_means).mean().item()
     return final_mean, cache
+
+
+def compute_kv_loss(layer_mlps, kv_cache, token_slice=None, loss_fn=F.mse_loss):
+    total_loss = 0
+    for layer_idx, (keys, values) in enumerate(kv_cache):
+        if token_slice is not None:
+            keys = keys[:, :, token_slice, :]
+            values = values[:, :, token_slice, :]
+        v_hat = layer_mlps[layer_idx](keys)
+        total_loss += loss_fn(v_hat, values)
+    return total_loss
+
