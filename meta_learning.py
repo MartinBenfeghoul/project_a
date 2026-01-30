@@ -113,7 +113,7 @@ def meta_train(
             support_slice = slice(0, split_idx)
             query_slice = slice(split_idx, seq_len)
 
-            _, kv_cache = avg_nll(batch, model, eval_batch_size, tokenizer, device, tokenized_already=True)
+            _, kv_cache = avg_nll(batch, model, eval_batch_size, tokenizer, device, already_tokenized=True)
 
             # functional to track gradients
             adapted_params = inner_loop_functional(
