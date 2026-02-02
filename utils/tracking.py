@@ -1,4 +1,5 @@
 import json
+import os
 
 from omegaconf import OmegaConf
 import wandb
@@ -23,6 +24,11 @@ def init_wandb(config):
     if not wandb_config.get("enabled", False):
         return False
 
+    wandb_key = os.getenv("WANDB_KEY")
+    if not wandb_key:
+        raise RuntimeError("WANDB_KEY environment variable is not set. Please add it to your .env file")
+
+    wandb.login(key=wandb_key)
     run_name = generate_run_name(config)
 
     wandb.init(

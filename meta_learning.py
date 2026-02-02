@@ -181,7 +181,7 @@ def meta_train(
             # Backpropagate through both loops to get meta-gradient
             query_loss.backward()
 
-            # grad_norm = torch.nn.utils.clip_grad_norm_(all_params, float('inf'))
+            grad_norm = torch.nn.utils.clip_grad_norm_(all_params, float('inf'))
 
             meta_optimizer.step()
 
