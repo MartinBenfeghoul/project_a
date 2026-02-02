@@ -45,7 +45,7 @@ def inner_loop_functional(layer_mlps, kv_cache, support_slice, inner_lr, inner_s
         if track_losses:
             inner_losses.append(total_loss.item())
 
-        grads = torch.autograd.grad(total_loss, adapted_params, create_graph=True)
+        grads = torch.autograd.grad(total_loss, adapted_params, create_graph=False)
 
         # functional, keeps graph
         adapted_params = [p - inner_lr * g for p, g in zip(adapted_params, grads)]
@@ -181,7 +181,7 @@ def meta_train(
             # Backpropagate through both loops to get meta-gradient
             query_loss.backward()
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(all_params, float('inf'))
+            # grad_norm = torch.nn.utils.clip_grad_norm_(all_params, float('inf'))
 
             meta_optimizer.step()
 
@@ -305,7 +305,6 @@ def main():
         tokenizer,
         seq_len=training_config.seq_len,
         eos_id=tokenizer.eos_token_id,
-        support_ratio=training_config.support_ratio,
     )
 
     dataloader = DataLoader(
@@ -333,6 +332,8 @@ def main():
     if use_wandb:
         wandb.save(checkpoint_path)
         wandb.finish()
+    
+    return trained_params
 
 
 if __name__ == "__main__":
