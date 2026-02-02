@@ -11,3 +11,8 @@ training:
   num_meta_epochs: 30
   eval_batch_size: 32
   checkpoint_path: "meta_learned_mlps_qwen.pt"
+  log_interval: 1  # log metrics every N batches
+
+wandb:
+  enabled: true
+  project: "gist-vs-details"
