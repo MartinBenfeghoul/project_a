@@ -2,6 +2,19 @@ import torch
 import re
 import torch.nn.functional as F
 
+
+def cosine_loss(v_hat, v_true):
+    """Cosine similarity loss between predicted and true values."""
+    return 1 - F.cosine_similarity(v_hat, v_true, dim=-1).mean()
+
+
+def get_loss_func(loss_func_name):
+    """Get loss function by name."""
+    if loss_func_name == "cosine":
+        return cosine_loss
+    return F.mse_loss
+
+
 def clean(text):
     pre_dot = text.split('.')[0]
     digits = "".join(re.findall(r'\d', pre_dot))
@@ -45,9 +58,9 @@ def avg_nll(ds, model, batch_size, tokenizer, device, num_head=0, updated_cache=
     if not already_tokenized:
         texts = [ds[i]["prompt"] for i in range(len(ds))]
         ds = tokenizer(texts, return_tensors='pt', padding=True).to(device)
-    
-    input_ids = ds["input_ids"]
-    attention_mask = ds["attention_mask"]
+
+    input_ids = ds["input_ids"].to(device)
+    attention_mask = ds["attention_mask"].to(device)
     num_seq, seq_len = input_ids.shape
 
     all_seq_means = []

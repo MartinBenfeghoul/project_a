@@ -58,12 +58,14 @@ def save_results(
     num_changed_kv,
     percentage_changed_kv,
     layer_decomposition=None,
+    seq_len=None,
 ):
     """Save experiment results to a JSONL file."""
     with open(file_name, "a") as f:
         f.write(
             json.dumps(
                 {
+                    "seq_len": seq_len,
                     "avg_nll": avg_nll,
                     "avg_nll_change_thresh": avg_nll_modified_cache,
                     "avg_nll_change_perc": new_avg_nll_change_perc,

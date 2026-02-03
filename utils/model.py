@@ -48,3 +48,14 @@ def load_mlp_params(layer_mlps, params_list):
         for p, saved_p in zip(mlp.parameters(), params):
             p.data.copy_(saved_p.data)
 
+
+def load_pretrained_mlps(checkpoint_path, layer_mlps, device):
+    """Load pre-trained MLP parameters from a checkpoint file."""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    for i, mlp in enumerate(layer_mlps):
+        layer_key = f"layer_{i}"
+        if layer_key in checkpoint:
+            mlp.load_state_dict(checkpoint[layer_key])
+    print(f"Loaded pre-trained MLP parameters from {checkpoint_path}")
+    return layer_mlps
+
