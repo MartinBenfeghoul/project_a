@@ -1,3 +1,4 @@
+import os
 import time
 
 import torch
@@ -23,13 +24,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def inner_loop_functional(layer_mlps, kv_cache, support_slice, inner_lr, inner_steps, loss_fn=F.mse_loss, track_losses=False):
-    params = [p for mlp in layer_mlps for p in mlp.parameters()]
-    adapted_params = [p.clone() for p in params] # to return adapted params as new tensor (not in-place)
+    theta = [p for mlp in layer_mlps for p in mlp.parameters()]
+    phi = [p.detach().clone().requires_grad_(True) for p in theta]
 
     inner_losses = [] if track_losses else None
 
     for _ in range(inner_steps):
-        total_loss = 0
+        total_loss = 0.0
         param_idx = 0
 
         for layer_idx, layer in enumerate(kv_cache.layers):
@@ -37,34 +38,33 @@ def inner_loop_functional(layer_mlps, kv_cache, support_slice, inner_lr, inner_s
             v = layer.values[:, :, support_slice, :].float()
 
             mlp = layer_mlps[layer_idx]
-            v_hat = functional_mlp_forward(mlp, k.float(), adapted_params, param_idx)
+            v_hat = functional_mlp_forward(mlp, k.float(), phi, param_idx)
             param_idx += sum(1 for _ in mlp.parameters())
 
             total_loss += loss_fn(v_hat, v)
 
         if track_losses:
-            inner_losses.append(total_loss.item())
+            inner_losses.append(float(total_loss.detach().cpu()))
 
-        grads = torch.autograd.grad(total_loss, adapted_params, create_graph=False)
+        grads = torch.autograd.grad(total_loss, phi, create_graph=False, retain_graph=False)
 
-        # functional, keeps graph
-        adapted_params = [p - inner_lr * g for p, g in zip(adapted_params, grads)]
+        phi = [p - inner_lr * g for p, g in zip(phi, grads)]
 
     final_support_loss = None
     if track_losses:
         with torch.no_grad():
-            final_loss = 0
+            total = 0.0
             param_idx = 0
             for layer_idx, layer in enumerate(kv_cache.layers):
                 k = layer.keys[:, :, support_slice, :].float()
                 v = layer.values[:, :, support_slice, :].float()
                 mlp = layer_mlps[layer_idx]
-                v_hat = functional_mlp_forward(mlp, k.float(), adapted_params, param_idx)
+                v_hat = functional_mlp_forward(mlp, k.float(), phi, param_idx)
                 param_idx += sum(1 for _ in mlp.parameters())
-                final_loss += loss_fn(v_hat, v).item()
-            final_support_loss = final_loss
+                total += loss_fn(v_hat, v).item()
+            final_support_loss = total
 
-    return adapted_params, {"inner_losses": inner_losses, "final_support_loss": final_support_loss}
+    return theta, phi, {"inner_losses": inner_losses, "final_support_loss": final_support_loss}
 
 
 def functional_mlp_forward(mlp, x, all_params, start_idx):
@@ -111,16 +111,15 @@ def compute_query_loss_functional(layer_mlps, kv_cache, query_slice, adapted_par
 def compute_weight_norm(params):
     total_norm = 0.0
     for p in params:
-        total_norm += p.data.norm(2).item() ** 2
+        total_norm += p.detach().norm(2).item() ** 2
     return total_norm ** 0.5
 
 
 def compute_update_norm(old_params, new_params):
     total_norm = 0.0
     for old_p, new_p in zip(old_params, new_params):
-        total_norm += (new_p.data - old_p).norm(2).item() ** 2
+        total_norm += (new_p.detach() - old_p).norm(2).item() ** 2
     return total_norm ** 0.5
-
 
 def meta_train(
     model,
@@ -139,9 +138,13 @@ def meta_train(
     num_meta_epochs = config.num_meta_epochs
     eval_batch_size = config.eval_batch_size
     log_interval = config.get("log_interval", 10)
+    batches_per_epoch = config.get("batches_per_epoch", None)
+    checkpoint_path = config.get("checkpoint_path", "meta_learned_mlps.pt")
 
-    all_params = [p for mlp in layer_mlps for p in mlp.parameters()]
-    meta_optimizer = torch.optim.Adam(all_params, lr=meta_lr)
+    theta = [p for mlp in layer_mlps for p in mlp.parameters()]
+    meta_optimizer = torch.optim.Adam(theta, lr=meta_lr)
+
+    model.eval() # TODO: I think this might already be set when instantiating model
 
     global_step = 0
 
@@ -151,9 +154,10 @@ def meta_train(
         epoch_start_time = time.time()
 
         for batch_idx, batch in enumerate(dataloader):
-            batch_start_time = time.time()
+            if batches_per_epoch is not None and batch_idx >= batches_per_epoch:
+                break
 
-            old_params = [p.data.clone() for p in all_params]
+            batch_start_time = time.time()
 
             meta_optimizer.zero_grad()
 
@@ -164,65 +168,64 @@ def meta_train(
             support_slice = slice(0, split_idx)
             query_slice = slice(split_idx, seq_len)
 
-            _, kv_cache = avg_nll(batch, model, eval_batch_size, tokenizer, device, already_tokenized=True)
+            with torch.no_grad(): # TODO: maybe redundant
+                _, kv_cache = avg_nll(batch, model, eval_batch_size, tokenizer, device, already_tokenized=True)
 
             should_log = (batch_idx % log_interval == 0)
 
-            adapted_params, inner_metrics = inner_loop_functional(
+            theta_list, phi, inner_metrics = inner_loop_functional(
                 layer_mlps, kv_cache, support_slice, inner_lr, inner_steps, loss_fn,
                 track_losses=should_log
             )
 
             query_loss, per_layer_losses = compute_query_loss_functional(
-                layer_mlps, kv_cache, query_slice, adapted_params, loss_fn,
+                layer_mlps, kv_cache, query_slice, phi, loss_fn,
                 track_per_layer=should_log
             )
 
-            # Backpropagate through both loops to get meta-gradient
-            query_loss.backward()
+            g_phi = torch.autograd.grad(query_loss, phi, create_graph=False, retain_graph=False)
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(all_params, float('inf'))
+            for p_theta, g in zip(theta_list, g_phi):
+                if g is None:
+                    continue
+                if p_theta.grad is None:
+                    p_theta.grad = g.detach().clone()
+                else:
+                    p_theta.grad.add_(g.detach())
 
             meta_optimizer.step()
 
-            query_loss_val = query_loss.item()
-            epoch_loss += query_loss_val
+            q = float(query_loss.detach().cpu())
+            epoch_loss += q
             num_batches += 1
             global_step += 1
 
             batch_time_ms = (time.time() - batch_start_time) * 1000
 
             del kv_cache
-            torch.cuda.empty_cache()
 
             if should_log:
-                weight_norm = compute_weight_norm(all_params)
-                update_norm = compute_update_norm(old_params, all_params)
-
-                initial_support_loss = inner_metrics["inner_losses"][0] if inner_metrics["inner_losses"] else 0
-                final_support_loss = inner_metrics["final_support_loss"] or 0
-                generalization_gap = query_loss_val - final_support_loss
+                initial_support_loss = inner_metrics["inner_losses"][0] if inner_metrics["inner_losses"] else 0.0
+                final_support_loss = inner_metrics["final_support_loss"] or 0.0
+                generalisation_gap = q - final_support_loss
 
                 print(
                     f"Epoch {epoch}, Batch {batch_idx}, "
-                    f"Query Loss: {query_loss_val:.6f}, "
-                    f"Gen Gap: {generalization_gap:.6f}, "
+                    f"Query Loss: {q:.6f}, "
+                    f"Gen Gap: {generalisation_gap:.6f}, "
                     f"Time: {batch_time_ms:.1f}ms"
                 )
 
                 if use_wandb:
                     log_dict = {
-                        "train/query_loss": query_loss_val,
-                        "train/grad_norm": grad_norm.item(),
+                        "train/query_loss": q,
                         "train/epoch": epoch,
                         "train/batch": batch_idx,
                         "train/global_step": global_step,
-                        "train/generalisation_gap": generalization_gap,
+                        "train/generalisation_gap": generalisation_gap,
                         "inner/support_loss_initial": initial_support_loss,
                         "inner/support_loss_final": final_support_loss,
                         "inner/adaptation_improvement": initial_support_loss - final_support_loss,
-                        "params/weight_norm": weight_norm,
-                        "params/update_norm": update_norm,
                         "perf/batch_time_ms": batch_time_ms,
                     }
 
@@ -236,7 +239,7 @@ def meta_train(
 
                     wandb.log(log_dict, step=global_step)
 
-            del old_params
+            del kv_cache
 
         epoch_time_sec = time.time() - epoch_start_time
         avg_loss = epoch_loss / max(num_batches, 1)
@@ -249,6 +252,15 @@ def meta_train(
                 "epoch/num_batches": num_batches,
                 "perf/epoch_time_sec": epoch_time_sec,
             }, step=global_step)
+
+        base, ext = os.path.splitext(checkpoint_path)
+        epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
+        epoch_params = {f"layer_{i}": mlp.state_dict() for i, mlp in enumerate(layer_mlps)}
+        torch.save(epoch_params, epoch_checkpoint_path)
+        print(f"Checkpoint saved to {epoch_checkpoint_path}")
+
+        if use_wandb:
+            wandb.save(epoch_checkpoint_path)
 
     return layer_mlps
 
@@ -313,7 +325,8 @@ def main():
         collate_fn=meta_collate,
     )
 
-    print("Starting meta-training...")
+    batches_per_epoch = training_config.get("batches_per_epoch", None)
+    print(f"Starting meta-training... (batches_per_epoch: {batches_per_epoch or 'unlimited'})")
     layer_mlps = meta_train(
         model=model,
         tokenizer=tokenizer,
@@ -337,4 +350,4 @@ def main():
 
 
 if __name__ == "__main__":
-    trained_paramss = main()
+    trained_params = main()

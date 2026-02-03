@@ -32,8 +32,8 @@ def init_wandb(config):
     run_name = generate_run_name(config)
 
     wandb.init(
-        project=wandb_config.get("project", "gist-vs-details"),
-        entity=wandb_config.get("entity", None),
+        project=wandb_config.get("project", "gist_vs_details"),
+        entity=wandb_config.get("entity", "mixture_of_titans"),
         name=run_name,
         config=OmegaConf.to_container(config, resolve=True),
     )
