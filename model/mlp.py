@@ -57,7 +57,3 @@ class MLP(nn.Module):
             if i < self.num_layers - 1:
                 x = self.intermediate_activation(x)
         return x
-
-    def train(self, epochs, key_value_pairs, loss_func, optimizer):
-        return
-        
