@@ -2,5 +2,6 @@ torch==2.10.0
 transformers==5.0.0
 datasets==4.5.0
 numpy==2.4.1
-
 dotenv==0.9.9
+html2text==2025.4.15
+bs4==0.0.2
