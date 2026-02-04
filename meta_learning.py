@@ -239,8 +239,6 @@ def meta_train(
 
                     wandb.log(log_dict, step=global_step)
 
-            del kv_cache
-
         epoch_time_sec = time.time() - epoch_start_time
         avg_loss = epoch_loss / max(num_batches, 1)
         print(f"Epoch {epoch} complete. Average Query Loss: {avg_loss:.6f}, Time: {epoch_time_sec:.1f}s")

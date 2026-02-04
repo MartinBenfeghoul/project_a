@@ -3,16 +3,17 @@ model:
 
 training:
   seq_len: 512 # size of full sequence length during meta-learning
-  batch_size: 1
-  inner_steps: 5
-  meta_lr: 1.0e-4
-  inner_lr: 1.0e-2
-  support_ratio: 0.8
-  num_meta_epochs: 30
+  batch_size: 5 # TODO: think about whether this should be 1
+  inner_steps: 1
+  meta_lr: 3e-4
+  inner_lr: 3e-2
+  support_ratio: 0.7
+  num_meta_epochs: 20
   eval_batch_size: 32
-  checkpoint_path: "meta_learned_mlps_qwen.pt"
+  checkpoint_path: "meta_learned_mlps_qwen.pt" # TODO: Change this to model/run_name
   log_interval: 1  # log metrics every N batches
+  batches_per_epoch: 500  # limit batches per epoch (null for unlimited)
 
 wandb:
   enabled: true
-  project: "gist-vs-details"
+  project: "gist_vs_details"
