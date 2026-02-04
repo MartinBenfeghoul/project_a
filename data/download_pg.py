@@ -33,7 +33,10 @@ h.escape_all = True
 h.reference_links = False
 h.mark_code = False
 
-with open('PaulGrahamEssays_URLs.txt') as f:
+base_dir = os.path.dirname(__file__)
+file_path = os.path.join(base_dir, "PaulGrahamEssays_URLs.txt")
+
+with open(file_path) as f:
     urls = [line.strip() for line in f]
 
 for url in tqdm(urls):

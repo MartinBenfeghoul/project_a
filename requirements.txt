@@ -4,6 +4,8 @@ datasets==4.5.0
 numpy==2.4.1
 
 dotenv==0.9.9
+html2text==2025.4.15
+bs4==0.0.2
 
 # notebooks and analysis
 ipython
