@@ -10,7 +10,7 @@ def train_mlps(layer_mlps, kv_cache, config):
     Args:
         layer_mlps: List of MLP modules, one per layer
         kv_cache: KV cache containing keys and values
-        config: Training config with num_epochs, lr, loss_func
+        config: Training config with num_epochs, lr, loss_func, optimizer
 
     Returns:
         Trained layer_mlps
@@ -18,9 +18,13 @@ def train_mlps(layer_mlps, kv_cache, config):
     num_epochs = config.num_epochs
     lr = config.lr
     loss_func = get_loss_func(config.loss_func)
+    optimizer_name = config.get("optimizer", "adam")
 
     all_params = [p for mlp in layer_mlps for p in mlp.parameters()]
-    optimizer = torch.optim.Adam(all_params, lr=lr)
+    if optimizer_name.lower() == "sgd":
+        optimizer = torch.optim.SGD(all_params, lr=lr)
+    else:
+        optimizer = torch.optim.Adam(all_params, lr=lr)
 
     for epoch in range(num_epochs):
         optimizer.zero_grad()

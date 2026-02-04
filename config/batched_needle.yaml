@@ -1,0 +1,20 @@
+model:
+  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  pretrained_mlps: null  # path to pre-trained MLP checkpoint (e.g., "meta_learned_mlps_qwen.pt")
+
+training:
+  num_epochs: 1
+  lr: 3e-2
+  loss_func: "mse"  # "mse" or "cosine"
+  optimizer: "sgd"  # "sgd" or "adam"
+
+evaluation:
+  target_percentages: [1, 5, 10, 25, 50, 75, 100]
+  num_generate_tokens: 16
+
+data:
+  splits: [512, 1024, 2048]
+  num_samples_per_split: 5
+
+output:
+  file_name: "results/results_needle_mse_long.jsonl" # TODO: change to save with more specific name based on config
