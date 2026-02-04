@@ -31,7 +31,6 @@ def evaluate_sequence(
 ):
     target_percentages = config.evaluation.target_percentages
     num_generate_tokens = config.evaluation.num_generate_tokens
-    eval_batch_size = config.training.eval_batch_size
 
     results = {
         "accuracies": [],
@@ -41,7 +40,7 @@ def evaluate_sequence(
 
     with torch.no_grad():
         past_key_values, original_input_id = generate_kv_batched(
-            [seq], model, eval_batch_size, tokenizer, device
+            [seq], model, 1, tokenizer, device  # batch_size=1 since processing one seq at a time
         )
 
         for target_perc in target_percentages:
@@ -116,18 +115,17 @@ def evaluate_sequence(
     return results
 
 
-def run_experiment(model, tokenizer, datasets, splits, config, device):
-    eval_batch_size = config.training.eval_batch_size
+def run_experiment(model, tokenizer, splits, config, device):
     target_percentages = config.evaluation.target_percentages
-    max_sequences = config.data.max_sequences
+    num_samples_per_split = config.data.num_samples_per_split
     pretrained_mlps_path = config.model.get("pretrained_mlps", None)
     output_file = config.output.get("file_name", "./results.jsonl")
     num_epochs = config.training.num_epochs
     lr = config.training.lr
     loss_func = config.training.get("loss_func", "mse")
 
-    for ds_idx, ds in enumerate(datasets):
-        print(f"Currently running with sequence length {splits[ds_idx]}")
+    for split in splits:
+        print(f"Currently running with sequence length {split}")
 
         old_total_nlls = 0
         total_num_changed_kv = [0 for _ in target_percentages]
@@ -137,14 +135,13 @@ def run_experiment(model, tokenizer, datasets, splits, config, device):
         start_time = time.time()
         num_samples = 0
 
-        for seq_idx, seq in enumerate(ds):
-            if seq_idx >= max_sequences:
-                break
+        for _ in range(num_samples_per_split):
+            seq = generate_passkey_sample(tokenizer, seq_len=split)
 
             num_samples += 1
 
             avg_nll_, kv_cache = avg_nll(
-                [seq], model, eval_batch_size, tokenizer, device
+                [seq], model, 1, tokenizer, device
             )
             _, num_head, num_token, head_dim = kv_cache.layers[0].keys.shape
 
@@ -181,7 +178,7 @@ def run_experiment(model, tokenizer, datasets, splits, config, device):
         end_time = time.time()
 
         print(
-            f"Overall nll for sequence {splits[ds_idx]} is {old_total_nlls / num_samples:.4f}"
+            f"Overall nll for sequence {split} is {old_total_nlls / num_samples:.4f}"
         )
         print(f"It took {(end_time - start_time) / 60:.2f} minutes")
 
@@ -194,7 +191,7 @@ def run_experiment(model, tokenizer, datasets, splits, config, device):
             avg_threshold = new_thresholds[perc_idx] / num_samples
 
             print(
-                f"Overall acc for modified cache with seq_len {splits[ds_idx]} "
+                f"Overall acc for modified cache with seq_len {split} "
                 f"and percentage {target_perc} is {accuracy:.4f}"
             )
             print(f"Avg KV changed: {avg_changed_kv:.2f}, Percentage: {percentage_changed_kv:.2f}%")
@@ -216,9 +213,9 @@ def run_experiment(model, tokenizer, datasets, splits, config, device):
                 loss_func=loss_func,
                 num_changed_kv=avg_changed_kv,
                 percentage_changed_kv=percentage_changed_kv,
-                seq_len=splits[ds_idx],
+                seq_len=split,
             )
-            print(f"Saved results for split {splits[ds_idx]}, compression {target_perc}%")
+            print(f"Saved results for split {split}, compression {target_perc}%")
 
 
 def load_config():
@@ -238,16 +235,9 @@ def main():
     model, tokenizer = get_model_and_tokenizer(config.model.name, device)
 
     splits = config.data.splits
-    num_samples_per_split = config.data.num_samples_per_split
-
-    print("Generating passkey datasets...")
-    datasets = [
-        [generate_passkey_sample(tokenizer, seq_len=split) for _ in range(num_samples_per_split)]
-        for split in splits
-    ]
 
     print("Starting experiment...")
-    run_experiment(model, tokenizer, datasets, splits, config, device)
+    run_experiment(model, tokenizer, splits, config, device)
 
 
 if __name__ == "__main__":
