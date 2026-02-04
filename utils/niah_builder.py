@@ -117,7 +117,7 @@ if __name__ == "__main__":
     #ds_name = "HHazard/multi-keys"
     ds_name = ""
 
-    with open("PaulGrahamEssays.json", "r") as f:
+    with open("data/PaulGrahamEssays.json", "r") as f:
         data = json.load(f)
         filler_sentences.append(data['text'])
 
