@@ -4,4 +4,4 @@ from .model import get_model_and_tokenizer, clone_mlp_params, VectorizedIndepend
 from .matrix_decomposition import truncated_svd, full_svd
 from .dataloader import PackedTokens, load_data, collate, MetaLearningDataset, meta_collate
 from .tracking import save_results, generate_run_name, init_wandb
-from .training import train_mlps
+from .training import train_mlps, set_seed

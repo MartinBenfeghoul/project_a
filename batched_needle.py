@@ -13,6 +13,7 @@ from utils import (
     VectorizedIndependentHeadMLP,
     load_pretrained_mlps,
     train_mlps,
+    set_seed,
     save_results,
 )
 
@@ -227,6 +228,10 @@ def load_config():
 
 def main():
     config = load_config()
+
+    seed = config.get("seed", 42)
+    set_seed(seed)
+    print(f"Using seed: {seed}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
