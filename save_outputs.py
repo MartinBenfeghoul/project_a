@@ -9,7 +9,10 @@ from utils import (
     collate,
     get_model_and_tokenizer,
 )
-# testing
+
+# load all environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 def calculate_surprise(loss):
     """Calculate surprise from loss."""
@@ -66,8 +69,8 @@ def main(
 
 
 if __name__ == "__main__":
-    # model_name = "meta-llama/Llama-3.2-1B-Instruct"
-    model_name = "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
+    # model_name = "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
     dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset"
     save_path = "model_outputs.pt"
 

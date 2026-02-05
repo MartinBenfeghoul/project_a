@@ -1,5 +1,7 @@
 #/bin/bash -e
 
+conda init
+. ~/.bashrc
 conda create -n pem-llm python=3.12 -y
 conda activate pem-llm
 pip install -r requirements.txt
@@ -11,4 +13,4 @@ pip install -r requirements.txt
 sudo chmod -R g+rwX /home/ma-user/work
 
 # point to HF_HOME
-export HF_HOME="/home/ma-user/.cache/huggingface"
+echo 'export HF_HOME="/home/ma-user/.cache/huggingface"' >> ~/.bashrc

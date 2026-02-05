@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from utils import (
-    SVDCache,
+    CACHE_CLASSES,
     PackedTokens,
     load_data,
     collate,
@@ -19,11 +19,18 @@ def measure_perplexity(logits, target):
     ppl = torch.exp(nll)
     return nll, ppl
 
+def get_cache(cache_type):
+    if cache_type not in CACHE_CLASSES:
+        raise ValueError(f"{cache_type} not in CACHE_CLASSES. Please select one of the following: {CACHE_CLASSES.keys()}")
+    print(f"Loading cache type {cache_type}")
+    return CACHE_CLASSES[cache_type]
+
 def main(
     model_name,
     dataset,
-    seq_len=1024,
-    micro_bs=4,
+    seq_len: int = 1024,
+    micro_bs: int = 4,
+    cache_type: str = 'svd'
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
@@ -55,8 +62,13 @@ def main(
         inputs["input_ids"].shape[1], device=model.device
     )
 
-    past_key_values = SVDCache(
-        config=model.config, comp_ratio=2, niter=3
+    cache = get_cache(cache_type)
+    past_key_values = cache(
+        config=model.config,
+        comp_ratio=1.5,
+        niter=8,
+        gamma=3.0,
+        min_size=8.0,
     )
 
     pos = 512
@@ -69,11 +81,16 @@ def main(
         cache_position=chunk_position, 
         use_cache=True
     )
+    past_key_values = out.past_key_values
     nll = out.loss
     ppl= torch.exp(out.loss)
     print(f"Prefill over {pos} positions, nll={nll.item():.1f}, ppl={ppl.item():.1f}")
-    past_key_values.update_events()
+    past_key_values.update_events(
+        out.logits, inputs["input_ids"][..., 1:pos+1]
+    )
+
     ppls = []
+    output_tokens = []
     for _ in range(16):
         out = model(
             inputs["input_ids"][..., pos:pos+1], 
@@ -81,6 +98,7 @@ def main(
             cache_position=cache_position[pos:pos+1], 
             use_cache=True
         )
+        past_key_values = out.past_key_values
         target = inputs["input_ids"][:, pos+1]  # shape (B,)
         logits = out.logits[:, -1, :] # shape (B, V)
         nll, ppl = measure_perplexity(logits, target)
@@ -94,7 +112,7 @@ def main(
 if __name__ == "__main__":
     # model_name = "meta-llama/Llama-3.2-1B-Instruct"
     model_name = "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
-    dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset"
-    save_path = "model_outputs.pt"
+    dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset", "HuggingFaceFW/fineweb-edu", 
+    cache_type = 'surprise_svd'  # svd, surprise_svd
 
-    main(model_name, dataset)
+    main(model_name, dataset, cache_type=cache_type)

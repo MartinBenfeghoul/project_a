@@ -5,6 +5,10 @@ from typing import List, Dict
 from transformers import AutoTokenizer
 from datasets import Dataset, DatasetDict
 
+# load all environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 def generate_multi_passkey_dataset(
     output_path: str,
     tokenizer_name: str = "gpt2",
@@ -98,8 +102,8 @@ def generate_multi_passkey_dataset(
 # --- Execution Logic ---
 if __name__ == "__main__":
     lengths = {
-        #"128": 128,
-        #"256": 256,
+        # "128": 128,
+        # "256": 256,
         "512": 512,
         "1k": 1000,
         "2k": 2000,
@@ -114,8 +118,7 @@ if __name__ == "__main__":
     
     filler_sentences = []
 
-    #ds_name = "HHazard/multi-keys"
-    ds_name = ""
+    ds_name = "data/NIAH/multi-keys"
 
     with open("data/PaulGrahamEssays.json", "r") as f:
         data = json.load(f)
@@ -133,7 +136,7 @@ if __name__ == "__main__":
         print(f"Generating {name}...")
         new_dics[name] = generate_multi_passkey_dataset(
             output_path=f"data/multi_passkey_{name}.jsonl",
-            tokenizer_name="meta-llama/Llama-3.1-8B-Instruct",
+            tokenizer_name="/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6",  # "meta-llama/Llama-3.2-1B-Instruct",
             num_samples=100,
             seq_length=length,
             filler_text=filler_sentences,
@@ -142,4 +145,6 @@ if __name__ == "__main__":
         )
 
     ds = DatasetDict(new_dics)
-    ds.push_to_hub(ds_name)
+    print(f"Saving generated dataset to hub under: {ds_name}")
+    # ds.push_to_hub(ds_name)
+    ds.save_to_disk(ds_name)

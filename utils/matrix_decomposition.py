@@ -1,7 +1,7 @@
 import torch
 
 # SVD-based decomposition
-def truncated_svd(A, k, niter=3, dtype=torch.float32):
+def lowrank_svd(A, k, niter=3, dtype=torch.float32):
     """Compute the truncated SVD of matrix A using PyTorch's built-in function.
     Args:
         A: (..., m, n) CUDA tensor
@@ -18,6 +18,75 @@ def truncated_svd(A, k, niter=3, dtype=torch.float32):
     U, S, V = torch.svd_lowrank(A, q=k, niter=niter)  # V: (n, k)
     U, S, V = (t.to(og_dtype) for t in (U, S, V))
     return U, S, V.transpose(-2, -1)  # Vh
+
+def calc_energy(M):
+    S = torch.linalg.svdvals(M)  # (d,)
+    return (S**2).cumsum(-1) / (S**2).sum(-1, keepdim=True)
+
+def find_rank_wrt_energy(S, energy_threshold):
+    """
+    Args:
+        S: singular values tensor, shape (..., r). Assumed non-negative and sorted descending along last dim.
+        energy_threshold: float in (0, 1], or tensor broadcastable to S.shape[:-1]
+
+    Returns:
+        k: smallest integer satisfying energy > energy_threshold for all dimensions
+           (i.e., k is a Python int; rank is in [1, r] unless r==0).
+    """
+    if S.numel() == 0:
+        return 0  # degenerate
+
+    S2 = S**2
+    denom = S2.sum(-1, keepdim=True).clamp_min(torch.finfo(S2.dtype).tiny)
+    energy = S2.cumsum(-1) / denom  # (..., r)
+
+    # For each prefix position, does it meet threshold?
+    meets = energy >= energy_threshold  # thr  # (..., r)
+
+    # Find first True along last dim. If none, take r.
+    first_idx = meets.float().argmax(dim=-1)  # (...,) but 0 if all False too
+    has_any = meets.any(dim=-1)               # (...,)
+
+    k_per = torch.where(has_any, first_idx + 1, torch.full_like(first_idx, S.shape[-1]))
+    k = int(k_per.max().item())  # smallest k that works for *all* batch dims
+
+    return k
+
+def truncated_svd(A, k=None, energy_threshold=0.95, dtype=torch.float32, **kwargs):
+    """Compute a truncated SVD of A.
+
+    Args:
+        A: (..., m, n) tensor (CUDA or CPU)
+        k: int or None. If None, choose smallest k capturing `energy_threshold`.
+        energy_threshold: float in (0, 1], or tensor broadcastable to A.shape[:-2]
+        dtype: compute dtype (SVD is typically more stable in float32)
+
+    Returns:
+        U:  (..., m, k)
+        S:  (..., k)
+        Vh: (..., k, n)
+    """
+    if k is not None:
+        # TODO: benchmark this path vs the full then truncated path in terms of compute time
+        return lowrank_svd(A, k, dtype=dtype, **kwargs)
+    og_dtype = A.dtype
+    A_ = A.to(dtype).contiguous()
+
+    U, S, Vh = torch.linalg.svd(A_, full_matrices=False)
+    r = S.shape[-1]
+
+    k = find_rank_wrt_energy(S, energy_threshold)
+
+    # safety
+    k = max(1, min(int(k), r))
+
+    U = U[..., :k]
+    S = S[..., :k]
+    Vh = Vh[..., :k, :]
+
+    U, S, Vh = (t.to(og_dtype) for t in (U, S, Vh))
+    return U, S, Vh
+
 
 def full_svd(A, dtype=torch.float32):
     """Compute the full SVD of matrix A using PyTorch's built-in function.

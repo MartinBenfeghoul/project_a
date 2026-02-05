@@ -1,6 +1,8 @@
 import torch 
 
-from transformers.cache_utils import DynamicCache, Any
+from transformers.cache_utils import (
+    DynamicCache as DC, Any, Iterable, PreTrainedConfig
+)
 # from transformers.models.llama.modeling_llama import LlamaAttention
 
 from .matrix_decomposition import truncated_svd
@@ -13,8 +15,24 @@ def find_rank_wrt_cr(r, m, n):
     k = m * n / (r * (m + n))
     return int(round(k))
 
-def find_rank_wrt_energy(energy):
-    raise NotImplementedError
+
+class DynamicCache(DC):
+    """This class simply intercepts kwargs for a more flexible base."""
+    def __init__(
+        self, 
+        *args,
+        ddp_cache_data: Iterable[tuple[torch.Tensor | None, ...]] | None = None,
+        config: PreTrainedConfig | None = None,
+        offloading: bool = False,
+        offload_only_non_sliding: bool = False,
+        **kwargs,
+    ):
+        super().__init__(
+            ddp_cache_data,
+            config,
+            offloading,
+            offload_only_non_sliding,
+        )
 
 
 class SVDCache(DynamicCache):
@@ -22,7 +40,7 @@ class SVDCache(DynamicCache):
         self, 
         *args,
         niter: int = 3,
-        comp_ratio: int = 2,
+        comp_ratio: float = 2.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -114,6 +132,8 @@ class SurpriseSVDCache(SVDCache):
         )
         if self.prefill:
             return keys, values
+        elif hasattr(self, 'svd_keys'):
+            raise NotImplementedError
         else:
             recon_keys = []
             for b in range(len(self.events)):
