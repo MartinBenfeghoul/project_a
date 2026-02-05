@@ -14,3 +14,4 @@ sudo chmod -R g+rwX /home/ma-user/work
 
 # point to HF_HOME
 echo 'export HF_HOME="/home/ma-user/.cache/huggingface"' >> ~/.bashrc
+. ~/.bashrc

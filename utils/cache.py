@@ -49,10 +49,12 @@ class SVDCache(DynamicCache):
         self.r = comp_ratio
         self.prefill = True
 
+        self.svd_keys = {}
+
     @property
     def compression_ratio(self):
-        U, _, V = self.svd_keys
-        m, k = U.shape[-2:]
+        US, V = self.svd_keys[0]
+        m, k = US.shape[-2:]
         n = V.size(-1)
         return (m * n) / (k * (m + n))
 
@@ -74,27 +76,43 @@ class SVDCache(DynamicCache):
         )
         if self.prefill:
             return keys, values
-        k = find_rank_wrt_cr(self.r, keys.size(-2), keys.size(-1))
+        elif self.svd_keys.get(layer_idx, False):
+            US, V = self.svd_keys[layer_idx]
+            reconstructed_keys = US @ V
+            if US.size(-2) < keys.size(-2):
+                reconstructed_keys = torch.cat(
+                    [reconstructed_keys, keys[..., US.size(-2):, :]],
+                    dim=-2,
+                )
+            return reconstructed_keys, values
+        else:
+            k = find_rank_wrt_cr(self.r, keys.size(-2), keys.size(-1))
+            U, S, V = truncated_svd(keys, k, niter=self.n)
+            US = U * S.unsqueeze(-2)
+            self.svd_keys[layer_idx] = (US, V)
+            reconstructed_keys = US @ V
+            return reconstructed_keys, values
 
-        self.svd_keys = truncated_svd(keys, k, niter=self.n)
 
-        U, S, V = self.svd_keys
-        reconstructed_keys = (U * S.unsqueeze(-2)) @ V
-        return reconstructed_keys, values
-
-
-class SurpriseSVDCache(SVDCache):
+class SurpriseSVDCache(DynamicCache):
     def __init__(
         self, 
         *args,
+        niter: int = 3,
+        comp_ratio: float = 2.0,
         gamma: float = 3.0,
         min_size: int = 8,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         
+        self.n = niter
+        self.r = comp_ratio
         self.gamma = gamma
         self.min_size = min_size
+        self.prefill = True
+
+        self.svd_keys = {}
 
     @property
     def compression_ratio(self):
@@ -132,12 +150,28 @@ class SurpriseSVDCache(SVDCache):
         )
         if self.prefill:
             return keys, values
-        elif hasattr(self, 'svd_keys'):
-            raise NotImplementedError
+        
+        elif self.svd_keys.get(layer_idx, False):
+            recon_keys = []
+            svd_keys = self.svd_keys[layer_idx]
+            for b in range(len(svd_keys)):
+                batch_recon_keys = []
+                for (US, V) in svd_keys[b]:
+                    batch_recon_keys.append(US @ V)
+                ed = self.events[b][-1]
+                if ed < keys.size(-2):
+                    batch_recon_keys.append(
+                        keys[b, ..., ed:, :]
+                    )
+                recon_keys.append(
+                    torch.cat(batch_recon_keys, dim=-2)
+                )
         else:
             recon_keys = []
+            svd_keys = []
             for b in range(len(self.events)):
                 batch_recon_keys = []
+                batch_svd_keys = []
                 for i, st in enumerate(self.events[b][:-1]):
                     ed = self.events[b][i+1]
                     keys_subset = keys[b, ..., st:ed, :]
@@ -145,17 +179,19 @@ class SurpriseSVDCache(SVDCache):
                         self.r, keys_subset.size(-2), keys_subset.size(-1)
                     )
                     U, S, V = truncated_svd(keys_subset, k, niter=self.n)
+                    batch_svd_keys.append((U * S.unsqueeze(-2), V))
                     batch_recon_keys.append(
                         (U * S.unsqueeze(-2)) @ V
                     )
                 if ed < keys.size(-2):
-                    # if layer_idx == 0 and b == 0:
-                    #     print("Appending new keys to recon")
                     batch_recon_keys.append(
                         keys[b, ..., ed:, :]
                     )
-                    recon_keys.append(
-                        torch.cat(batch_recon_keys, dim=-2)
-                    )
-            recon_keys = torch.stack(recon_keys, dim=0)
-            return recon_keys, values
+                recon_keys.append(
+                    torch.cat(batch_recon_keys, dim=-2)
+                )
+                svd_keys.append(batch_svd_keys)
+            self.svd_keys[layer_idx] = svd_keys
+
+        recon_keys = torch.stack(recon_keys, dim=0)
+        return recon_keys, values

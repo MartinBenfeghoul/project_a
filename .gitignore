@@ -2,6 +2,7 @@
 __pycache__
 wget-log*
 
+*.out
 *.pt
 *.json
 *.jsonl

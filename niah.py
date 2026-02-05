@@ -21,13 +21,20 @@ def get_cache(cache_type):
     return CACHE_CLASSES[cache_type]
 
 @torch.no_grad()
-def main(args):
+def main(
+    model_name: str,
+    dataset: str,
+    n_samples: int,
+    cache_type: str,
+    comp_ratio: float,
+    max_new_tokens: int,
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, tokenizer = get_model_and_tokenizer(args.model_name, device)
+    model, tokenizer = get_model_and_tokenizer(model_name, device)
     eos_id = tokenizer.eos_token_id
 
-    ds = load_from_disk(args.dataset)
-    n_samples = min(args.n_samples, len(ds))
+    ds = load_from_disk(dataset)
+    n_samples = min(n_samples, len(ds))
     print(f"Testing NIAH over {n_samples} samples.")
     n_correct = 0
     for i, batch in enumerate(ds):
@@ -43,10 +50,10 @@ def main(args):
             T, device=device
         )
 
-        cache = get_cache(args.cache_type)
+        cache = get_cache(cache_type)
         past_key_values = cache(
             config=model.config,
-            comp_ratio=args.compression_ratio,
+            comp_ratio=comp_ratio,
             niter=8,
             gamma=3.0,
             min_size=8.0,
@@ -67,7 +74,6 @@ def main(args):
             f"Prefill: nll={nll.item():.1f}, ppl={ppl.item():.1f}, seq_len={T}"
         )
         if hasattr(past_key_values, 'update_events'):
-            print("Updating events within the KV cache.")
             past_key_values.update_events(
                 out.logits, input_ids
             )
@@ -75,7 +81,7 @@ def main(args):
         output_ids = []
         input_id = input_ids[..., -1:]                 # (B, 1)
         cache_position = cache_position[..., -1:]       # (B, 1) or (1,) depending on how you built it
-        for _ in range(args.max_new_tokens):
+        for _ in range(max_new_tokens):
             out = model(
                 input_ids=input_id,
                 past_key_values=past_key_values,
@@ -112,7 +118,7 @@ def main(args):
     print(f"Success rate: {success_rate * 100:.1f}%")
     return success_rate
 
-def parse_args():
+def get_parser():
     parser = argparse.ArgumentParser(description="Training script for LLM.")
     parser.add_argument(
         "-m", "--model_name", type=str, default="/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
@@ -124,7 +130,7 @@ def parse_args():
         "-c", "--cache_type", type=str, default="surprise_svd"
     )
     parser.add_argument(
-        "-r", "--compression_ratio", type=float, default=2.0
+        "-r", "--comp_ratio", type=float, default=2.0
     )
     parser.add_argument(
         "-n", "--n_samples", type=int, default=100
@@ -132,9 +138,10 @@ def parse_args():
     parser.add_argument(
         "--max_new_tokens", type=int, default=4
     )
-    return parser.parse_known_args()
+    return parser
 
 
 if __name__ == "__main__":
-    args, unknown = parse_args()
-    main(args)
+    parser = get_parser()
+    args, unknown = parser.parse_known_args()
+    main(**vars(args))
