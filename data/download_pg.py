@@ -35,6 +35,7 @@ h.mark_code = False
 
 base_dir = os.path.dirname(__file__)
 file_path = os.path.join(base_dir, "PaulGrahamEssays_URLs.txt")
+save_path = os.path.join(base_dir, 'PaulGrahamEssays.json')
 
 with open(file_path) as f:
     urls = [line.strip() for line in f]
@@ -77,7 +78,7 @@ for file in files_repo + files_html:
     with open(file, 'r') as f:
         text += f.read()
         
-with open('PaulGrahamEssays.json', 'w') as f:
+with open(save_path, 'w') as f:
     json.dump({"text": text}, f)
 
 
