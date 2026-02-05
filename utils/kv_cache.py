@@ -36,3 +36,27 @@ def generate_kv_batched(ds, model, batch_size, tokenizer, device):
                     cache = out.past_key_values
             
     return cache, batch_ids[:, token_idx : token_idx+1]
+
+def generate_kv(seq, model, batch_len, tokenizer, device):
+    inputs = tokenizer(seq["prompt"], return_tensors='pt', padding=True).to(device)
+
+    input_ids = inputs["input_ids"]
+    _, seq_len = input_ids.shape
+
+    with torch.no_grad():
+          out = model(input_ids=input_ids[:, :batch_len], use_cache=True)
+          cache = out.past_key_values
+
+    for token_idx in range(batch_len, seq_len, batch_len):
+        if token_idx < seq_len:
+            with torch.no_grad():
+                out = model(
+                    input_ids=input_ids[:, token_idx : token_idx+batch_len],
+                    past_key_values=cache,
+                    use_cache=True
+                )
+                cache = out.past_key_values
+
+    cache.crop(seq_len-1)
+
+    return cache, input_ids[:, seq_len-1:seq_len]
