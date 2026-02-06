@@ -4,10 +4,7 @@ import seaborn as sns
 import pandas as pd
 
 if __name__ == "__main__":
-    path = "./results_language_modeling_mse.jsonl"
-    #path = './results_needle_mse_100.jsonl'
-    path = './results_needle_mse_long (1).jsonl'
-    #save_path = "nll_heatmap_lm_mse.png"
+    path = "./results/needle_mse_long.jsonl"
     save_path = "nll_heatmap_needle_mse.png"
     colums = "num_token_per_training"
     #values = "avg_nll_change_perc"
