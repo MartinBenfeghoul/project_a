@@ -1,4 +1,5 @@
 import argparse
+import numpy as np
 import torch
 from datasets import load_from_disk
 
@@ -27,8 +28,11 @@ def main(
     n_samples: int,
     cache_type: str,
     comp_ratio: float,
+    energy_threshold: float,
+    rank_selection: str,
     max_new_tokens: int,
 ):
+    """ ThE cOdE iS tHe DoCsTrInG - Fredericoco 2026"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     eos_id = tokenizer.eos_token_id
@@ -37,15 +41,16 @@ def main(
     n_samples = min(n_samples, len(ds))
     print(f"Testing NIAH over {n_samples} samples.")
     n_correct = 0
+    crs = []
     for i, batch in enumerate(ds):
         prompt = batch['prompt']
         answer = batch['answer']
 
         input_ids = tokenizer(
-            prompt, return_tensors="pt", add_special_tokens=False
-        )['input_ids']
+            prompt, return_tensors="pt", add_special_tokens=False, device=device
+        )['input_ids'].to(device)
 
-        B, T = input_ids.shape
+        _, T = input_ids.shape
         cache_position = torch.arange(
             T, device=device
         )
@@ -54,6 +59,8 @@ def main(
         past_key_values = cache(
             config=model.config,
             comp_ratio=comp_ratio,
+            energy_threshold=energy_threshold,
+            rank_selection=rank_selection,
             niter=8,
             gamma=3.0,
             min_size=8.0,
@@ -81,7 +88,7 @@ def main(
         output_ids = []
         input_id = input_ids[..., -1:]                 # (B, 1)
         cache_position = cache_position[..., -1:]       # (B, 1) or (1,) depending on how you built it
-        for _ in range(max_new_tokens):
+        for j in range(max_new_tokens):
             out = model(
                 input_ids=input_id,
                 past_key_values=past_key_values,
@@ -89,6 +96,10 @@ def main(
                 use_cache=True,
             )
             past_key_values = out.past_key_values
+            if j == 0:
+                cr = past_key_values.compression_ratio
+                print(f"Compression ratio: {cr:.2f}")
+                crs.append(cr)
 
             logits = out.logits[:, -1, :]              # (B, V)
             next_id = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
@@ -116,7 +127,10 @@ def main(
             break
     success_rate = n_correct / n_samples
     print(f"Success rate: {success_rate * 100:.1f}%")
-    return success_rate
+    cr_avg = np.mean(crs)
+    cr_std = np.std(crs)
+    print(f"Compression ratio: {cr_avg:.2f}+-{cr_std:.2f}")
+    return success_rate, (cr_avg, cr_std)
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Training script for LLM.")
@@ -131,6 +145,12 @@ def get_parser():
     )
     parser.add_argument(
         "-r", "--comp_ratio", type=float, default=2.0
+    )
+    parser.add_argument(
+        "-e", "--energy_threshold", type=float, default=0.95
+    )
+    parser.add_argument(
+        "--rank_selection", type=str, default="comp_ratio"  # comp_ratio, energy
     )
     parser.add_argument(
         "-n", "--n_samples", type=int, default=100

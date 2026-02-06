@@ -1,6 +1,10 @@
-import matplotlib.pyplot as plt
+import os
 import math
 import torch
+import numpy as np
+
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 def plot_energy_at_rank_k(energy, k):
     energy = energy.clone()
@@ -79,3 +83,53 @@ def plot_energy_at_ranks(
     cbar.set_label("Energy")
 
     plt.show()
+
+def get_unique_save_path(save_path):
+    if not os.path.exists(save_path.format('')):
+        return save_path.format('')
+    for i in range(100):
+        new_path = save_path.format(f'_{i}')
+        if not os.path.exists(new_path):
+            return new_path
+    raise ValueError(
+        f"There appears to be at least 100 numbered variations of {save_path}!"
+    )
+
+def plot_success_matrix(
+    success_matrix,
+    seq_lens,
+    x_key,
+    x_values,
+    cache_type,
+    save_path='NIAH_ablations{}.png',
+    crs=None
+):
+    if crs is None:
+        annot = True
+        fmt = ".1f"
+    else:
+        annot = np.empty_like(success_matrix, dtype=object)
+        for i in range(success_matrix.shape[0]):
+            for j in range(success_matrix.shape[1]):
+                annot[i, j] = f"{success_matrix[i, j]:.2f}\n({crs[i, j]:.2f})"
+        fmt = ""
+
+    fig, ax = plt.subplots()
+
+    sns.heatmap(
+        success_matrix,
+        annot=annot,
+        fmt=fmt,
+        cmap="YlGn",
+        xticklabels=x_values,
+        yticklabels=seq_lens,
+    )
+
+    ax.set_xlabel(x_key)
+    ax.set_ylabel("Sequence Length")
+    ax.set_title(f"Ablating {cache_type}")
+
+    fig.tight_layout()
+
+    save_path = get_unique_save_path(save_path)
+    fig.savefig(save_path, dpi=300)

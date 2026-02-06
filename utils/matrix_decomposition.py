@@ -19,6 +19,13 @@ def lowrank_svd(A, k, niter=3, dtype=torch.float32):
     U, S, V = (t.to(og_dtype) for t in (U, S, V))
     return U, S, V.transpose(-2, -1)  # Vh
 
+def find_rank_wrt_cr(r, m, n):
+    """Find the rank k to use for low-rank approximation of a (m x n) matrix 
+        such that the compression ratio is ~r.
+    """
+    k = m * n / (r * (m + n))
+    return int(round(k))
+
 def calc_energy(M):
     S = torch.linalg.svdvals(M)  # (d,)
     return (S**2).cumsum(-1) / (S**2).sum(-1, keepdim=True)
@@ -52,7 +59,10 @@ def find_rank_wrt_energy(S, energy_threshold):
 
     return k
 
-def truncated_svd(A, k=None, energy_threshold=0.95, dtype=torch.float32, **kwargs):
+def truncated_svd(
+        A, rank_selection,
+        cr=2.0, energy_threshold=0.95, dtype=torch.float32, **kwargs
+    ):
     """Compute a truncated SVD of A.
 
     Args:
@@ -66,27 +76,33 @@ def truncated_svd(A, k=None, energy_threshold=0.95, dtype=torch.float32, **kwarg
         S:  (..., k)
         Vh: (..., k, n)
     """
-    if k is not None:
+    if rank_selection == 'comp_ratio':
         # TODO: benchmark this path vs the full then truncated path in terms of compute time
+        k = find_rank_wrt_cr(cr, A.size(-2), A.size(-1))
         return lowrank_svd(A, k, dtype=dtype, **kwargs)
-    og_dtype = A.dtype
-    A_ = A.to(dtype).contiguous()
+    elif rank_selection == 'energy':
+        og_dtype = A.dtype
+        A_ = A.to(dtype).contiguous()
 
-    U, S, Vh = torch.linalg.svd(A_, full_matrices=False)
-    r = S.shape[-1]
+        U, S, Vh = torch.linalg.svd(A_, full_matrices=False)
+        r = S.shape[-1]
 
-    k = find_rank_wrt_energy(S, energy_threshold)
+        k = find_rank_wrt_energy(S, energy_threshold)
 
-    # safety
-    k = max(1, min(int(k), r))
+        # safety
+        k = max(1, min(int(k), r))
 
-    U = U[..., :k]
-    S = S[..., :k]
-    Vh = Vh[..., :k, :]
+        U = U[..., :k]
+        S = S[..., :k]
+        Vh = Vh[..., :k, :]
 
-    U, S, Vh = (t.to(og_dtype) for t in (U, S, Vh))
-    return U, S, Vh
-
+        U, S, Vh = (t.to(og_dtype) for t in (U, S, Vh))
+        return U, S, Vh
+    else:
+        raise ValueError(
+            f"rank_selection set to {rank_selection}.",
+            "Try either 'comp_ratio' or 'energy_threshold'"
+        )
 
 def full_svd(A, dtype=torch.float32):
     """Compute the full SVD of matrix A using PyTorch's built-in function.
@@ -155,7 +171,6 @@ def cosine_with_warmup_scheduler(
         return min_lr_ratio + (1 - min_lr_ratio) * cosine
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
 
 @torch.enable_grad()
 def learn_lora_matrix(

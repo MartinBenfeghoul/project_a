@@ -6,5 +6,9 @@ wget-log*
 *.pt
 *.json
 *.jsonl
+*.png
 .env
+
+scripts/lazy_runs
 data/NIAH
+results

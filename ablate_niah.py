@@ -1,9 +1,12 @@
 import os
-import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-from utils import list_of_strings, list_of_floats
+from utils import (
+    list_of_strings, 
+    list_of_floats,
+    plot_success_matrix,
+)
 
 from niah import (
     main as benchmark_niah,
@@ -22,50 +25,6 @@ def get_dataset_paths(seq_lens, data_dir):
                 f"Requested dataset path {dataset_path} for seq_len {seq_len} does not exist."
             )
     return dataset_paths
-
-def get_unique_save_path(save_path):
-    if not os.path.exists(save_path.format('')):
-        return save_path.format('')
-    for i in range(100):
-        new_path = save_path.format(f'_{i}')
-        if not os.path.exists(new_path):
-            return new_path
-    raise ValueError(
-        f"There appears to be at least 100 numbered variations of {save_path}!"
-    )
-
-def plot_results(
-    success_matrix,
-    seq_lens,
-    key,
-    values,
-    cache_type,
-    save_path='NIAH_ablations{}.png',
-):
-    plt.imshow(success_matrix)
-    plt.colorbar()
-    for i in range(success_matrix.shape[0]):
-        for j in range(success_matrix.shape[1]):
-            plt.text(
-                j, i, f"{success_matrix[i, j]:.2f}",
-                ha="center", va="center",
-                color="white"
-            )
-    plt.xticks(values)
-    plt.xticks(
-        ticks=range(len(values)),
-        labels=values
-    )
-    plt.yticks(
-        ticks=range(len(seq_lens)),
-        labels=seq_lens
-    )
-    plt.xlabel(key)
-    plt.ylabel("Sequence Length")
-    plt.title(f"Ablating cache type {cache_type}")
-
-    save_path = get_unique_save_path(save_path)
-    plt.savefig(save_path, dpi=300)
 
 def main(
     data_dir: str,
@@ -89,13 +48,15 @@ def main(
     if comp_ratios is not None:
         key = 'comp_ratio'
         values = comp_ratios
+        rank_selection = 'comp_ratio'
     else:
         key = 'energy_threshold'
         values = energy_thresholds
-        raise NotImplementedError("Energy-based rank selection is not currently implemented.")
+        rank_selection = 'energy'
 
     # remove key from kwargs to overwrite defaults from the other script
     kwargs.pop(key)
+    kwargs.pop('rank_selection')
 
     n_datasets = len(datasets)
     n_values = len(values)
@@ -103,30 +64,36 @@ def main(
     success_matrix = np.zeros(
         (len(datasets), len(values)), dtype=np.float32
     )
+    crs = np.ones_like(success_matrix)
     for i, dataset in tqdm(enumerate(datasets)):
         for j, value in enumerate(values):
             print(f"Testing {key}={value} on dataset {dataset}")
             try:
-                success_matrix[i, j] = benchmark_niah(**{
+                success_matrix[i, j], (cr_avg, _) = benchmark_niah(**{
                     'dataset': dataset,
+                    'rank_selection': rank_selection,
                     key: value,
                     **kwargs,
                 })
+                crs[i, j] = cr_avg
             except Exception as e:
                 print(f"Error processing this ablation: \n {e}")
                 print("Full traceback: \n")
                 import traceback; traceback.print_exc()
-                # TODO: test entering a different value (eg. inf) in matrix to denote error
+                success_matrix[i, j] = None
+                crs[i, j] = None
             pbar.update(1)
     
-    print(success_matrix)
-    plot_results(
+    print("Success matrix: ", success_matrix)
+    print("Compression ratios: ", crs)
+    plot_success_matrix(
         success_matrix,
         seq_lens,
         key,
         values,
         kwargs['cache_type'],
-        save_path='NIAH_ablations{}.png',
+        save_path='results/NIAH/NIAH_ablations{}.png',
+        crs=crs if key =='energy_threshold' else None,
     )
 
 def add_to_parser(parser):
@@ -138,11 +105,11 @@ def add_to_parser(parser):
     )
     parser.add_argument(
         "--comp_ratios", type=list_of_floats, 
-        default=[1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
+        default=None,  # [1.5, 2.0, 2.5, 3.0, 3.5, 4.0],
     )
     parser.add_argument(
         "--energy_thresholds", type=list_of_floats, 
-        default=None,  # [0.95, 0.96, 0.97, 0.99]
+        default=None,  # [0.85, 0.875, 0.9, 0.925, 0.95, 0.975, 0.99]
     )
     return parser
 

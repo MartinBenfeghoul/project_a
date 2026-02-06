@@ -8,13 +8,6 @@ from transformers.cache_utils import (
 from .matrix_decomposition import truncated_svd
 from .segmentation import find_thresholds
 
-def find_rank_wrt_cr(r, m, n):
-    """Find the rank k to use for low-rank approximation of a (m x n) matrix 
-        such that the compression ratio is ~r.
-    """
-    k = m * n / (r * (m + n))
-    return int(round(k))
-
 
 class DynamicCache(DC):
     """This class simply intercepts kwargs for a more flexible base."""
@@ -41,22 +34,31 @@ class SVDCache(DynamicCache):
         *args,
         niter: int = 3,
         comp_ratio: float = 2.0,
+        energy_threshold: float = 0.95,
+        rank_selection: str = 'comp_ratio',  # comp_ratio, energy
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         
         self.n = niter
         self.r = comp_ratio
+        self.e = energy_threshold
+        self.rank_selection = rank_selection
         self.prefill = True
 
         self.svd_keys = {}
 
     @property
     def compression_ratio(self):
-        US, V = self.svd_keys[0]
-        m, k = US.shape[-2:]
-        n = V.size(-1)
-        return (m * n) / (k * (m + n))
+        if self.rank_selection == 'comp_ratio':
+            return self.r
+        else:
+            crs = 0
+            for US, V in self.svd_keys.values():
+                m, k = US.shape[-2:]
+                n = V.size(-1)
+                crs += (m * n) / (k * (m + n))
+            return crs / len(self.svd_keys)
 
     def update_events(self, *args, **kwargs):
         self.prefill = False
@@ -75,7 +77,14 @@ class SVDCache(DynamicCache):
             cache_kwargs,
         )
         if self.prefill:
-            return keys, values
+            U, S, V = truncated_svd(
+                keys, self.rank_selection,
+                cr=self.r, energy_threshold=self.e,
+                niter=self.n
+            )
+            US = U * S.unsqueeze(-2)
+            self.svd_keys[layer_idx] = (US, V)
+            return keys, values  # return full KVs for accurate optimal generation of KVs in next layers
         elif self.svd_keys.get(layer_idx, False):
             US, V = self.svd_keys[layer_idx]
             reconstructed_keys = US @ V
@@ -86,12 +95,9 @@ class SVDCache(DynamicCache):
                 )
             return reconstructed_keys, values
         else:
-            k = find_rank_wrt_cr(self.r, keys.size(-2), keys.size(-1))
-            U, S, V = truncated_svd(keys, k, niter=self.n)
-            US = U * S.unsqueeze(-2)
-            self.svd_keys[layer_idx] = (US, V)
-            reconstructed_keys = US @ V
-            return reconstructed_keys, values
+            raise Exception(
+                "Prefill is set to False and no svd keys were found."
+            )
 
 
 class SurpriseSVDCache(DynamicCache):
@@ -100,6 +106,8 @@ class SurpriseSVDCache(DynamicCache):
         *args,
         niter: int = 3,
         comp_ratio: float = 2.0,
+        energy_threshold: float = 0.95,
+        rank_selection: str = 'comp_ratio',  # comp_ratio, energy
         gamma: float = 3.0,
         min_size: int = 8,
         **kwargs,
@@ -108,6 +116,8 @@ class SurpriseSVDCache(DynamicCache):
         
         self.n = niter
         self.r = comp_ratio
+        self.e = energy_threshold
+        self.rank_selection = rank_selection
         self.gamma = gamma
         self.min_size = min_size
         self.prefill = True
@@ -116,7 +126,19 @@ class SurpriseSVDCache(DynamicCache):
 
     @property
     def compression_ratio(self):
-        return self.r  # TODO: implement wrt events
+        if self.rank_selection == 'comp_ratio':
+            return self.r
+        else:
+            crs = 0
+            num_events = 0
+            for svd_keys in self.svd_keys.values():
+                for b in range(len(svd_keys)):
+                    for (US, V) in svd_keys[b]:
+                        m, k = US.shape[-2:]
+                        n = V.size(-1)
+                        crs += (m * n) / (k * (m + n))
+                        num_events += 1
+            return crs / num_events
 
     def update_events(self, logits, labels):
         prob = torch.softmax(logits, dim=-1)
@@ -175,10 +197,11 @@ class SurpriseSVDCache(DynamicCache):
                 for i, st in enumerate(self.events[b][:-1]):
                     ed = self.events[b][i+1]
                     keys_subset = keys[b, ..., st:ed, :]
-                    k = find_rank_wrt_cr(
-                        self.r, keys_subset.size(-2), keys_subset.size(-1)
+                    U, S, V = truncated_svd(
+                        keys_subset, self.rank_selection,
+                        cr=self.r, energy_threshold=self.e,
+                        niter=self.n
                     )
-                    U, S, V = truncated_svd(keys_subset, k, niter=self.n)
                     batch_svd_keys.append((U * S.unsqueeze(-2), V))
                     batch_recon_keys.append(
                         (U * S.unsqueeze(-2)) @ V
