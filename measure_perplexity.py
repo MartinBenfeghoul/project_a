@@ -103,7 +103,7 @@ def main(
         logits = out.logits[:, -1, :] # shape (B, V)
         nll, ppl = measure_perplexity(logits, target)
         ppls.append(ppl.item())
-        cr = past_key_values.compression_ratio
+        cr = past_key_values.comp_ratio
         print(f"pos={pos}, CR={cr:.1f}, nll={nll.item():.1f}, ppl={ppl.item():.1f}")
         
         pos += 1

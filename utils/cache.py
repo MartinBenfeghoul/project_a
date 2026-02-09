@@ -48,8 +48,7 @@ class SVDCache(DynamicCache):
 
         self.svd_keys = {}
 
-    @property
-    def compression_ratio(self):
+    def calc_compression_ratio(self):
         if self.rank_selection == 'comp_ratio':
             return self.r
         else:
@@ -84,6 +83,7 @@ class SVDCache(DynamicCache):
             )
             US = U * S.unsqueeze(-2)
             self.svd_keys[layer_idx] = (US, V)
+            self.comp_ratio = self.calc_compression_ratio()
             return keys, values  # return full KVs for accurate optimal generation of KVs in next layers
         elif self.svd_keys.get(layer_idx, False):
             US, V = self.svd_keys[layer_idx]
@@ -124,8 +124,7 @@ class SurpriseSVDCache(DynamicCache):
 
         self.svd_keys = {}
 
-    @property
-    def compression_ratio(self):
+    def calc_compression_ratio(self):
         if self.rank_selection == 'comp_ratio':
             return self.r
         else:
@@ -215,6 +214,7 @@ class SurpriseSVDCache(DynamicCache):
                 )
                 svd_keys.append(batch_svd_keys)
             self.svd_keys[layer_idx] = svd_keys
+            self.comp_ratio = self.calc_compression_ratio()
 
         recon_keys = torch.stack(recon_keys, dim=0)
         return recon_keys, values

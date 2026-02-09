@@ -6,6 +6,7 @@ from .dataloader import PackedTokens, load_data, collate
 from .cache import DynamicCache, SVDCache, SurpriseSVDCache
 from .args import str2bool, list_of_strings, list_of_floats, args_type
 from .analysis import plot_success_matrix
+from .logger import Logger
 
 
 CACHE_CLASSES = {

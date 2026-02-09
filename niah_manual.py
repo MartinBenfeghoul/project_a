@@ -5,7 +5,6 @@ from datasets import load_from_disk
 
 from utils import (
     CACHE_CLASSES,
-    Logger,
     get_model_and_tokenizer,
 )
 
@@ -22,43 +21,6 @@ def get_cache(cache_type):
     print(f"Loading cache type {cache_type}")
     return CACHE_CLASSES[cache_type]
 
-def make_hook(logger):
-    def hook(module, args, kwargs, output):
-        input_ids = kwargs['input_ids']
-        seq_len = input_ids.size(-1)
-        pkv = output.past_key_values
-        if seq_len > 1:
-            nll = output.loss
-            logits = output.logits
-            if nll is None:
-                nll = module.loss_function(
-                    logits=logits, 
-                    labels=input_ids, 
-                    vocab_size=module.config.vocab_size, 
-                    **kwargs
-                )
-            ppl = torch.exp(nll)
-            print(
-                f"Prefill: nll={nll.item():.1f}, ppl={ppl.item():.1f}",
-                f", seq_len={seq_len}"
-            )
-            if hasattr(pkv, 'update_events'):
-                pkv.update_events(
-                    logits, input_ids
-                )
-        else:
-            if hasattr(pkv, 'comp_ratio') and not logger.recorded_cr:
-                cr = pkv.comp_ratio
-                print(f"Compression ratio: {cr:.2f}")
-                logger.add_log('crs', cr)
-                logger.recorded_cr = True
-    return hook
-
-def register_hooks(model):
-    logger = Logger()
-    model.register_forward_hook(make_hook(logger), with_kwargs=True)
-    return model, logger
-
 @torch.no_grad()
 def main(
     model_name: str,
@@ -73,7 +35,6 @@ def main(
     """ ThE cOdE iS tHe DoCsTrInG - Fredericoco 2026"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
-    model, logger = register_hooks(model)
     eos_id = tokenizer.eos_token_id
 
     ds = load_from_disk(dataset)
@@ -82,14 +43,17 @@ def main(
     n_correct = 0
     crs = []
     for i, batch in enumerate(ds):
-        logger.recorded_cr = False
-
         prompt = batch['prompt']
         answer = batch['answer']
 
         input_ids = tokenizer(
             prompt, return_tensors="pt", add_special_tokens=False, device=device
         )['input_ids'].to(device)
+
+        _, T = input_ids.shape
+        cache_position = torch.arange(
+            T, device=device
+        )
 
         cache = get_cache(cache_type)
         past_key_values = cache(
@@ -102,20 +66,56 @@ def main(
             min_size=8.0,
         )
 
-        out = model.generate(
-            input_ids,
+        # Prefill
+        out = model(
+            input_ids, 
             labels=input_ids,
-            past_key_values=past_key_values,
-            use_cache=True,
-            logits_to_keep=0,
-            max_new_tokens=max_new_tokens,
+            past_key_values=past_key_values, 
+            cache_position=cache_position, 
+            use_cache=True
         )
+        past_key_values = out.past_key_values
+        nll = out.loss
+        ppl = torch.exp(out.loss)
+        print(
+            f"Prefill: nll={nll.item():.1f}, ppl={ppl.item():.1f}, seq_len={T}"
+        )
+        if hasattr(past_key_values, 'update_events'):
+            past_key_values.update_events(
+                out.logits, input_ids
+            )
 
+        output_ids = []
+        input_id = input_ids[..., -1:]                 # (B, 1)
+        cache_position = cache_position[..., -1:]       # (B, 1) or (1,) depending on how you built it
+        for j in range(max_new_tokens):
+            out = model(
+                input_ids=input_id,
+                past_key_values=past_key_values,
+                cache_position=cache_position,
+                use_cache=True,
+            )
+            past_key_values = out.past_key_values
+            if j == 0:
+                cr = past_key_values.comp_ratio
+                print(f"Compression ratio: {cr:.2f}")
+                crs.append(cr)
+
+            logits = out.logits[:, -1, :]              # (B, V)
+            next_id = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
+            output_ids.append(next_id)
+
+            input_id = next_id
+            cache_position = cache_position + 1
+
+            if eos_id is not None:
+                if (next_id == eos_id).all():
+                    print(f"EOS detected. Stopping.")
+                    break
+
+        gen_ids = torch.cat(output_ids, dim=-1)
         print(f"Answer: {answer}")
-        input_len = input_ids.size(-1)
-        output = tokenizer.decode(
-            out[:, input_len:], skip_special_tokens=True
-        )[0]
+        output = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
         correct = answer in output
         n_correct += 1 if correct else 0
         print(
@@ -127,7 +127,8 @@ def main(
             break
     success_rate = n_correct / n_samples
     print(f"Success rate: {success_rate * 100:.1f}%")
-    cr_avg, cr_std = logger.get_log_mean('crs', std=True)
+    cr_avg = np.mean(crs)
+    cr_std = np.std(crs)
     print(f"Compression ratio: {cr_avg:.2f}+-{cr_std:.2f}")
     return success_rate, (cr_avg, cr_std)
 
