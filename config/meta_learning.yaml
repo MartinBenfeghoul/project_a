@@ -1,8 +1,8 @@
 model:
-  name: "Qwen/Qwen2.5-0.5B-Instruct"
+  name: "meta-llama/Llama-3.1-8B-Instruct"
 
 training:
-  seq_len: 512 # size of full sequence length during meta-learning
+  seq_len: 512
   batch_size: 5 # TODO: think about whether this should be 1
   inner_steps: 1
   meta_lr: 3e-4

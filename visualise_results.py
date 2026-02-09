@@ -38,29 +38,43 @@ def load_results(results_file):
     return pd.DataFrame(results)
 
 
-def plot_heatmap(df, output_path, title=None):
-    pivot = df.pivot(
-        index="num_token",
-        columns="avg_nll_change_perc",
-        values="avg_accuracy_modified_cache"
-    )
-    pivot = pivot.sort_index()
+SEQ_LENGTH_BUCKETS = [500, 1000, 2000, 4000, 8000, 10000]
+SEQ_LENGTH_LABELS = {500: "500", 1000: "1k", 2000: "2k", 4000: "4k", 8000: "8k", 10000: "10k"}
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+
+def snap_to_bucket(n):
+    return min(SEQ_LENGTH_BUCKETS, key=lambda b: abs(b - n))
+
+
+def plot_heatmap(df, output_path, title=None):
+    df = df.copy()
+    df["seq_length"] = df["num_token"].apply(snap_to_bucket)
+
+    pivot = df.pivot(
+        index="avg_nll_change_perc",
+        columns="seq_length",
+        values="avg_accuracy_modified_cache",
+    )
+    pivot = pivot.sort_index(ascending=True)
+    pivot = pivot[sorted(pivot.columns)]
+
+    pivot.columns = [SEQ_LENGTH_LABELS[c] for c in pivot.columns]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
 
     sns.heatmap(
         pivot,
         annot=True,
-        fmt=".2f",
-        cmap="RdYlGn",
-        vmin=0,
-        vmax=1,
+        fmt=".3f",
+        cmap="YlGn",
+        vmin=pivot.min().min(),
+        vmax=pivot.max().max(),
         cbar_kws={"label": "Accuracy"},
         ax=ax,
     )
 
-    ax.set_xlabel("Compression %")
-    ax.set_ylabel("Sequence Length")
+    ax.set_xlabel("Sequence Length")
+    ax.set_ylabel("Percentage of KV Changed")
 
     if title:
         ax.set_title(title)

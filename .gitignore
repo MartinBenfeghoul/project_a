@@ -1,8 +1,7 @@
 .vscode
 __pycache__
 
-*.pt
+
 .env
 
-results/*
 wandb/*
