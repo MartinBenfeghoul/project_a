@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+
 def plot_energy_at_rank_k(energy, k):
     energy = energy.clone()
     if energy.dim() > 3:
@@ -18,6 +19,7 @@ def plot_energy_at_rank_k(energy, k):
     plt.xlabel("Heads")
     plt.ylabel("Layers")
     plt.show()
+
 
 def plot_energy_at_ranks(
     energy,
@@ -48,8 +50,7 @@ def plot_energy_at_ranks(
     fig, axes = plt.subplots(
         nrows,
         ncols,
-        figsize=(figsize_per_plot[0] * ncols,
-                 figsize_per_plot[1] * nrows),
+        figsize=(figsize_per_plot[0] * ncols, figsize_per_plot[1] * nrows),
         squeeze=False,
     )
 
@@ -75,8 +76,8 @@ def plot_energy_at_ranks(
     cax = fig.add_axes([0.90, 0.15, 0.02, 0.7])  # [left, bottom, width, height]
 
     fig.subplots_adjust(
-        wspace=0.25,   # horizontal gap
-        hspace=0.35,   # vertical gap
+        wspace=0.25,  # horizontal gap
+        hspace=0.35,  # vertical gap
     )
 
     cbar = fig.colorbar(ims[0], cax=cax)
@@ -84,16 +85,18 @@ def plot_energy_at_ranks(
 
     plt.show()
 
+
 def get_unique_save_path(save_path):
-    if not os.path.exists(save_path.format('')):
-        return save_path.format('')
+    if not os.path.exists(save_path.format("")):
+        return save_path.format("")
     for i in range(100):
-        new_path = save_path.format(f'_{i}')
+        new_path = save_path.format(f"_{i}")
         if not os.path.exists(new_path):
             return new_path
     raise ValueError(
         f"There appears to be at least 100 numbered variations of {save_path}!"
     )
+
 
 def plot_success_matrix(
     success_matrix,
@@ -101,8 +104,8 @@ def plot_success_matrix(
     x_key,
     x_values,
     cache_type,
-    save_path='NIAH_ablations{}.png',
-    crs=None
+    save_path="NIAH_ablations{}.png",
+    crs=None,
 ):
     if crs is None:
         annot = True

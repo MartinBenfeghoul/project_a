@@ -13,3 +13,7 @@ ipython
 ipykernel
 matplotlib
 seaborn
+
+# formatting
+black
+black[jupyter]

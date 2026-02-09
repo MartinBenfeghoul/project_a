@@ -1,20 +1,26 @@
 import argparse
 
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+    if v.lower() in ("yes", "true", "t", "y", "1"):
         return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+    elif v.lower() in ("no", "false", "f", "n", "0"):
         return False
     else:
-        raise argparse.ArgumentTypeError(f'Boolean value expected. Got {v}, type: {type(v)}')
+        raise argparse.ArgumentTypeError(
+            f"Boolean value expected. Got {v}, type: {type(v)}"
+        )
+
 
 def list_of_strings(arg):
-    return arg.split(',')
+    return arg.split(",")
+
 
 def list_of_floats(arg):
     return [float(x) for x in list_of_strings(arg)]
+
 
 def args_type(default):
     def parse_string(x):

@@ -1,5 +1,6 @@
 import torch
 
+
 # SVD-based decomposition
 def lowrank_svd(A, k, niter=3, dtype=torch.float32):
     """Compute the truncated SVD of matrix A using PyTorch's built-in function.
@@ -19,16 +20,19 @@ def lowrank_svd(A, k, niter=3, dtype=torch.float32):
     U, S, V = (t.to(og_dtype) for t in (U, S, V))
     return U, S, V.transpose(-2, -1)  # Vh
 
+
 def find_rank_wrt_cr(r, m, n):
-    """Find the rank k to use for low-rank approximation of a (m x n) matrix 
-        such that the compression ratio is ~r.
+    """Find the rank k to use for low-rank approximation of a (m x n) matrix
+    such that the compression ratio is ~r.
     """
     k = m * n / (r * (m + n))
     return int(round(k))
 
+
 def calc_energy(M):
     S = torch.linalg.svdvals(M)  # (d,)
     return (S**2).cumsum(-1) / (S**2).sum(-1, keepdim=True)
+
 
 def find_rank_wrt_energy(S, energy_threshold):
     """
@@ -52,17 +56,24 @@ def find_rank_wrt_energy(S, energy_threshold):
 
     # Find first True along last dim. If none, take r.
     first_idx = meets.float().argmax(dim=-1)  # (...,) but 0 if all False too
-    has_any = meets.any(dim=-1)               # (...,)
+    has_any = meets.any(dim=-1)  # (...,)
 
-    k_per = torch.where(has_any, first_idx + 1, torch.full_like(first_idx, S.shape[-1]))
+    k_per = torch.where(
+        has_any, first_idx + 1, torch.full_like(first_idx, S.shape[-1])
+    )
     k = int(k_per.max().item())  # smallest k that works for *all* batch dims
 
     return k
 
+
 def truncated_svd(
-        A, rank_selection,
-        cr=2.0, energy_threshold=0.95, dtype=torch.float32, **kwargs
-    ):
+    A,
+    rank_selection,
+    cr=2.0,
+    energy_threshold=0.95,
+    dtype=torch.float32,
+    **kwargs,
+):
     """Compute a truncated SVD of A.
 
     Args:
@@ -76,11 +87,11 @@ def truncated_svd(
         S:  (..., k)
         Vh: (..., k, n)
     """
-    if rank_selection == 'comp_ratio':
+    if rank_selection == "comp_ratio":
         # TODO: benchmark this path vs the full then truncated path in terms of compute time
         k = find_rank_wrt_cr(cr, A.size(-2), A.size(-1))
         return lowrank_svd(A, k, dtype=dtype, **kwargs)
-    elif rank_selection == 'energy':
+    elif rank_selection == "energy":
         og_dtype = A.dtype
         A_ = A.to(dtype).contiguous()
 
@@ -101,8 +112,9 @@ def truncated_svd(
     else:
         raise ValueError(
             f"rank_selection set to {rank_selection}.",
-            "Try either 'comp_ratio' or 'energy_threshold'"
+            "Try either 'comp_ratio' or 'energy_threshold'",
         )
+
 
 def full_svd(A, dtype=torch.float32):
     """Compute the full SVD of matrix A using PyTorch's built-in function.
@@ -120,11 +132,15 @@ def full_svd(A, dtype=torch.float32):
     U, S, V = (t.to(og_dtype) for t in (U, S, V))
     return U, S, V  # Vh.transpose(-2, -1)
 
+
 # Learned decomposition methods
 def mse(a, b):
     return ((a - b) ** 2).mean()
 
+
 import math
+
+
 def init_lora_like(A, B, alpha=None):
     # A: (..., T, r)  (one factor random)
     # B: (..., r, D)  (other factor zero so product starts at 0)
@@ -134,6 +150,7 @@ def init_lora_like(A, B, alpha=None):
     r = A.shape[-1]
     scale = (alpha / r) if alpha is not None else 1.0
     return scale
+
 
 @torch.enable_grad()
 def learn_lora_matrix_sgd(M, k, lr=1e-2, n_iter=10, std=0.01):
@@ -146,15 +163,16 @@ def learn_lora_matrix_sgd(M, k, lr=1e-2, n_iter=10, std=0.01):
     losses = []
     for i in tqdm(range(n_iter)):
         # loss = mse(M, A @ B)
-        loss = ((M - A @ B) ** 2).sum() / (b*H*L*T)
+        loss = ((M - A @ B) ** 2).sum() / (b * H * L * T)
         gA, gB = torch.autograd.grad(loss, (A, B))
         assert torch.all(torch.isfinite(gA))
-        
+
         A = (A - lr * gA).detach().requires_grad_(True)
         B = (B - lr * gB).detach().requires_grad_(True)
         losses.append(loss.detach().cpu().item())
 
     return A, B, losses
+
 
 def cosine_with_warmup_scheduler(
     optimizer,
@@ -172,16 +190,24 @@ def cosine_with_warmup_scheduler(
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
+
 @torch.enable_grad()
 def learn_lora_matrix(
-    M, k, lr=1e-2, n_iter=10, std=1, weight_decay=0.0, alpha=None,
-    warmup_frac=0.05, min_lr_ratio=0.05
+    M,
+    k,
+    lr=1e-2,
+    n_iter=10,
+    std=1,
+    weight_decay=0.0,
+    alpha=None,
+    warmup_frac=0.05,
+    min_lr_ratio=0.05,
 ):
-    shape = M.shape[:-2] 
+    shape = M.shape[:-2]
     T, D = M.shape[-2:]
 
-    A = torch.empty((*shape,T,k), device=M.device, dtype=torch.float32)
-    B = torch.zeros((*shape,k,D), device=M.device, dtype=torch.float32)
+    A = torch.empty((*shape, T, k), device=M.device, dtype=torch.float32)
+    B = torch.zeros((*shape, k, D), device=M.device, dtype=torch.float32)
 
     torch.nn.init.kaiming_uniform_(A, a=math.sqrt(5))
     scale = (alpha / k) if alpha is not None else 1.0

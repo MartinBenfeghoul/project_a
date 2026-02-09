@@ -9,22 +9,25 @@ from utils import (
     get_model_and_tokenizer,
 )
 
+
 def measure_perplexity(logits, target):
-    nll = torch.nn.functional.cross_entropy(
-        logits, target, reduction="mean"
-    )
+    nll = torch.nn.functional.cross_entropy(logits, target, reduction="mean")
     ppl = torch.exp(nll)
     return nll, ppl
 
+
 def get_cache(cache_type):
     if cache_type not in CACHE_CLASSES:
-        raise ValueError(f"{cache_type} not in CACHE_CLASSES. Please select one of the following: {CACHE_CLASSES.keys()}")
+        raise ValueError(
+            f"{cache_type} not in CACHE_CLASSES. Please select one of the following: {CACHE_CLASSES.keys()}"
+        )
     print(f"Loading cache type {cache_type}")
     return CACHE_CLASSES[cache_type]
 
+
 def make_hook(logger):
     def hook(module, args, kwargs, output):
-        input_ids = kwargs['input_ids']
+        input_ids = kwargs["input_ids"]
         seq_len = input_ids.size(-1)
         pkv = output.past_key_values
         if seq_len > 1:
@@ -32,32 +35,33 @@ def make_hook(logger):
             logits = output.logits
             if nll is None:
                 nll = module.loss_function(
-                    logits=logits, 
-                    labels=input_ids, 
-                    vocab_size=module.config.vocab_size, 
-                    **kwargs
+                    logits=logits,
+                    labels=input_ids,
+                    vocab_size=module.config.vocab_size,
+                    **kwargs,
                 )
             ppl = torch.exp(nll)
             print(
                 f"Prefill: nll={nll.item():.1f}, ppl={ppl.item():.1f}",
-                f", seq_len={seq_len}"
+                f", seq_len={seq_len}",
             )
-            if hasattr(pkv, 'update_events'):
-                pkv.update_events(
-                    logits, input_ids
-                )
+            if hasattr(pkv, "update_events"):
+                pkv.update_events(logits, input_ids)
         else:
-            if hasattr(pkv, 'comp_ratio') and not logger.recorded_cr:
+            if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
                 print(f"Compression ratio: {cr:.2f}")
-                logger.add_log('crs', cr)
+                logger.add_log("crs", cr)
                 logger.recorded_cr = True
+
     return hook
+
 
 def register_hooks(model):
     logger = Logger()
     model.register_forward_hook(make_hook(logger), with_kwargs=True)
     return model, logger
+
 
 @torch.no_grad()
 def main(
@@ -70,7 +74,7 @@ def main(
     rank_selection: str,
     max_new_tokens: int,
 ):
-    """ ThE cOdE iS tHe DoCsTrInG - Fredericoco 2026"""
+    """ThE cOdE iS tHe DoCsTrInG - Fredericoco 2026"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
@@ -84,12 +88,12 @@ def main(
     for i, batch in enumerate(ds):
         logger.recorded_cr = False
 
-        prompt = batch['prompt']
-        answer = batch['answer']
+        prompt = batch["prompt"]
+        answer = batch["answer"]
 
         input_ids = tokenizer(
             prompt, return_tensors="pt", add_special_tokens=False, device=device
-        )['input_ids'].to(device)
+        )["input_ids"].to(device)
 
         cache = get_cache(cache_type)
         past_key_values = cache(
@@ -113,50 +117,41 @@ def main(
 
         print(f"Answer: {answer}")
         input_len = input_ids.size(-1)
-        output = tokenizer.decode(
-            out[:, input_len:], skip_special_tokens=True
-        )[0]
+        output = tokenizer.decode(out[:, input_len:], skip_special_tokens=True)[
+            0
+        ]
         correct = answer in output
         n_correct += 1 if correct else 0
-        print(
-            f"Output: {output}",
-            f"{'\u2705' if correct else '\u274C'}"
-        )
+        print(f"Output: {output}", f"{'\u2705' if correct else '\u274C'}")
         if i >= n_samples - 1:
             print(f"Finished testing on {n_samples}. Stopping.")
             break
     success_rate = n_correct / n_samples
     print(f"Success rate: {success_rate * 100:.1f}%")
-    cr_avg, cr_std = logger.get_log_mean('crs', std=True)
+    cr_avg, cr_std = logger.get_log_mean("crs", std=True)
     print(f"Compression ratio: {cr_avg:.2f}+-{cr_std:.2f}")
     return success_rate, (cr_avg, cr_std)
+
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Training script for LLM.")
     parser.add_argument(
-        "-m", "--model_name", type=str, default="/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
+        "-m",
+        "--model_name",
+        type=str,
+        default="/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6",
     )
     parser.add_argument(
         "-d", "--dataset", type=str, default="data/NIAH/multi-keys/1k"
     )
-    parser.add_argument(
-        "-c", "--cache_type", type=str, default="surprise_svd"
-    )
-    parser.add_argument(
-        "-r", "--comp_ratio", type=float, default=2.0
-    )
-    parser.add_argument(
-        "-e", "--energy_threshold", type=float, default=0.95
-    )
+    parser.add_argument("-c", "--cache_type", type=str, default="surprise_svd")
+    parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
+    parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
     parser.add_argument(
         "--rank_selection", type=str, default="comp_ratio"  # comp_ratio, energy
     )
-    parser.add_argument(
-        "-n", "--n_samples", type=int, default=100
-    )
-    parser.add_argument(
-        "--max_new_tokens", type=int, default=4
-    )
+    parser.add_argument("-n", "--n_samples", type=int, default=100)
+    parser.add_argument("--max_new_tokens", type=int, default=4)
     return parser
 
 

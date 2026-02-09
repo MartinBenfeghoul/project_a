@@ -12,33 +12,39 @@ from utils import (
     get_model_and_tokenizer,
 )
 
+
 def measure_perplexity(logits, target):
-    nll = torch.nn.functional.cross_entropy(
-        logits, target, reduction="mean"
-    )
+    nll = torch.nn.functional.cross_entropy(logits, target, reduction="mean")
     ppl = torch.exp(nll)
     return nll, ppl
 
+
 def get_cache(cache_type):
     if cache_type not in CACHE_CLASSES:
-        raise ValueError(f"{cache_type} not in CACHE_CLASSES. Please select one of the following: {CACHE_CLASSES.keys()}")
+        raise ValueError(
+            f"{cache_type} not in CACHE_CLASSES. Please select one of the following: {CACHE_CLASSES.keys()}"
+        )
     print(f"Loading cache type {cache_type}")
     return CACHE_CLASSES[cache_type]
+
 
 def main(
     model_name,
     dataset,
     seq_len: int = 1024,
     micro_bs: int = 4,
-    cache_type: str = 'svd'
+    cache_type: str = "svd",
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
 
-    if not os.path.exists('model_inputs.pt'):
+    if not os.path.exists("model_inputs.pt"):
         ds = load_data(dataset)
         packed = PackedTokens(
-            ds, tokenizer, seq_len=seq_len, eos_id=tokenizer.eos_token_id,
+            ds,
+            tokenizer,
+            seq_len=seq_len,
+            eos_id=tokenizer.eos_token_id,
             buffer_tokens=2 * micro_bs * seq_len,
         )
         dl = DataLoader(
@@ -53,8 +59,7 @@ def main(
         batches = list(itertools.islice(dl, micro_bs))
         inputs = batches[0]  # Take first batch only for saving
     else:
-        inputs = torch.load('model_inputs.pt')
-
+        inputs = torch.load("model_inputs.pt")
 
     inputs = {k: v.to(device) for k, v in inputs.items()}
 
@@ -75,44 +80,49 @@ def main(
     chunk_input_ids = inputs["input_ids"][..., :pos]
     chunk_position = cache_position[:pos]
     out = model(
-        chunk_input_ids, 
+        chunk_input_ids,
         labels=chunk_input_ids,
-        past_key_values=past_key_values, 
-        cache_position=chunk_position, 
-        use_cache=True
+        past_key_values=past_key_values,
+        cache_position=chunk_position,
+        use_cache=True,
     )
     past_key_values = out.past_key_values
     nll = out.loss
-    ppl= torch.exp(out.loss)
-    print(f"Prefill over {pos} positions, nll={nll.item():.1f}, ppl={ppl.item():.1f}")
+    ppl = torch.exp(out.loss)
+    print(
+        f"Prefill over {pos} positions, nll={nll.item():.1f}, ppl={ppl.item():.1f}"
+    )
     past_key_values.update_events(
-        out.logits, inputs["input_ids"][..., 1:pos+1]
+        out.logits, inputs["input_ids"][..., 1 : pos + 1]
     )
 
     ppls = []
     output_tokens = []
     for _ in range(16):
         out = model(
-            inputs["input_ids"][..., pos:pos+1], 
-            past_key_values=past_key_values, 
-            cache_position=cache_position[pos:pos+1], 
-            use_cache=True
+            inputs["input_ids"][..., pos : pos + 1],
+            past_key_values=past_key_values,
+            cache_position=cache_position[pos : pos + 1],
+            use_cache=True,
         )
         past_key_values = out.past_key_values
-        target = inputs["input_ids"][:, pos+1]  # shape (B,)
-        logits = out.logits[:, -1, :] # shape (B, V)
+        target = inputs["input_ids"][:, pos + 1]  # shape (B,)
+        logits = out.logits[:, -1, :]  # shape (B, V)
         nll, ppl = measure_perplexity(logits, target)
         ppls.append(ppl.item())
         cr = past_key_values.comp_ratio
-        print(f"pos={pos}, CR={cr:.1f}, nll={nll.item():.1f}, ppl={ppl.item():.1f}")
-        
+        print(
+            f"pos={pos}, CR={cr:.1f}, nll={nll.item():.1f}, ppl={ppl.item():.1f}"
+        )
+
         pos += 1
     print(f"Average ppl={np.mean(ppls):.1f}+-{np.std(ppls):.1f}")
+
 
 if __name__ == "__main__":
     # model_name = "meta-llama/Llama-3.2-1B-Instruct"
     model_name = "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
-    dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset", "HuggingFaceFW/fineweb-edu", 
-    cache_type = 'surprise_svd'  # svd, surprise_svd
+    dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset", "HuggingFaceFW/fineweb-edu",
+    cache_type = "surprise_svd"  # svd, surprise_svd
 
     main(model_name, dataset, cache_type=cache_type)

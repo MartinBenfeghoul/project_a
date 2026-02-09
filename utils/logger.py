@@ -1,8 +1,8 @@
 import numpy as np
 
 
-class Logger():
-    def __init__(self, layer_idx = None):
+class Logger:
+    def __init__(self, layer_idx=None):
         self.layer_idx = layer_idx
         self.log_dict = {}
 
@@ -28,7 +28,10 @@ class Logger():
             elif isinstance(values[0], np.ndarray):
                 res = np.mean(np.stack(values), axis=0, dtype=return_dtype)
                 if std:
-                    res = (res, np.std(np.stack(values), axis=0, dtype=return_dtype))
+                    res = (
+                        res,
+                        np.std(np.stack(values), axis=0, dtype=return_dtype),
+                    )
             else:
                 raise ValueError(f"Unexpected value type: {type(values[0])}")
             return res

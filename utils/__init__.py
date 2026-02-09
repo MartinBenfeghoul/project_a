@@ -8,9 +8,8 @@ from .args import str2bool, list_of_strings, list_of_floats, args_type
 from .analysis import plot_success_matrix
 from .logger import Logger
 
-
 CACHE_CLASSES = {
-    'baseline': DynamicCache,
-    'svd': SVDCache,
-    'surprise_svd': SurpriseSVDCache,
+    "baseline": DynamicCache,
+    "svd": SVDCache,
+    "surprise_svd": SurpriseSVDCache,
 }

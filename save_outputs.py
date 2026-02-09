@@ -12,21 +12,29 @@ from utils import (
 
 # load all environment variables from .env file
 from dotenv import load_dotenv
+
 load_dotenv()
+
 
 def calculate_surprise(loss):
     """Calculate surprise from loss."""
     return torch.exp(loss)
 
+
 def save_dict(dict_, save_path):
     """Save model inputs and outputs to a file."""
     print(f"Saving inputs and outputs to {save_path}")
-    tensors = {k: v.clone().cpu() for k, v in dict_.items() if isinstance(v, torch.Tensor)}
+    tensors = {
+        k: v.clone().cpu()
+        for k, v in dict_.items()
+        if isinstance(v, torch.Tensor)
+    }
     non_tensors = {k: v for k, v in dict_.items() if k not in tensors}
     torch.save(
-        {**tensors, **non_tensors}, 
+        {**tensors, **non_tensors},
         save_path,
     )
+
 
 def main(
     model_name,
@@ -38,10 +46,13 @@ def main(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
 
-    if not os.path.exists('model_inputs.pt'):
+    if not os.path.exists("model_inputs.pt"):
         ds = load_data(dataset)
         packed = PackedTokens(
-            ds, tokenizer, seq_len=seq_len, eos_id=tokenizer.eos_token_id,
+            ds,
+            tokenizer,
+            seq_len=seq_len,
+            eos_id=tokenizer.eos_token_id,
             buffer_tokens=2 * micro_bs * seq_len,
         )
         dl = DataLoader(
@@ -56,8 +67,7 @@ def main(
         batches = list(itertools.islice(dl, micro_bs))
         inputs = batches[0]  # Take first batch only for saving
     else:
-        inputs = torch.load('model_inputs.pt')
-
+        inputs = torch.load("model_inputs.pt")
 
     inputs = {k: v.to(device) for k, v in inputs.items()}
     save_dict(inputs, "model_inputs.pt")
@@ -74,7 +84,4 @@ if __name__ == "__main__":
     dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset"
     save_path = "model_outputs.pt"
 
-    main(
-        model_name, dataset, 
-        save_path=save_path
-    )
+    main(model_name, dataset, save_path=save_path)
