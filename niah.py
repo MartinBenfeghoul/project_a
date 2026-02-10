@@ -78,7 +78,6 @@ def main(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
-    eos_id = tokenizer.eos_token_id
 
     ds = load_from_disk(dataset)
     n_samples = min(n_samples, len(ds))

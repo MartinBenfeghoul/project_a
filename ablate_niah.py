@@ -59,6 +59,7 @@ def main(
     # remove key from kwargs to overwrite defaults from the other script
     kwargs.pop(key)
     kwargs.pop("rank_selection")
+    kwargs.pop("dataset")
 
     n_datasets = len(datasets)
     n_values = len(values)
