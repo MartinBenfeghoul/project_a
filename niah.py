@@ -117,9 +117,8 @@ def main(
 
         print(f"Answer: {answer}")
         input_len = input_ids.size(-1)
-        output = tokenizer.decode(out[:, input_len:], skip_special_tokens=True)[
-            0
-        ]
+        output = tokenizer.decode(out[:, input_len:], skip_special_tokens=True)
+        output = output[0]
         correct = answer in output
         n_correct += 1 if correct else 0
         print(f"Output: {output}", f"{'\u2705' if correct else '\u274C'}")
@@ -144,7 +143,7 @@ def get_parser():
     parser.add_argument(
         "-d", "--dataset", type=str, default="data/NIAH/multi-keys/1k"
     )
-    parser.add_argument("-c", "--cache_type", type=str, default="surprise_svd")
+    parser.add_argument("-c", "--cache_type", type=str, default="surprise_lr")
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
     parser.add_argument(

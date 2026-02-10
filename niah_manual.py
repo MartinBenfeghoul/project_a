@@ -142,7 +142,7 @@ def get_parser():
     parser.add_argument(
         "-d", "--dataset", type=str, default="data/NIAH/multi-keys/1k"
     )
-    parser.add_argument("-c", "--cache_type", type=str, default="surprise_svd")
+    parser.add_argument("-c", "--cache_type", type=str, default="surprise_lr")
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
     parser.add_argument(

@@ -3,13 +3,13 @@ from .metrics import eval_model, avg_nll, clean
 from .model import get_model_and_tokenizer
 from .matrix_decomposition import truncated_svd, full_svd, learn_lora_matrix
 from .dataloader import PackedTokens, load_data, collate
-from .cache import DynamicCache, SVDCache, SurpriseSVDCache
+from .cache import DynamicCache, LowRankKeysCache, SurpriseLRKCache
 from .args import str2bool, list_of_strings, list_of_floats, args_type
 from .analysis import plot_success_matrix
 from .logger import Logger
 
 CACHE_CLASSES = {
     "baseline": DynamicCache,
-    "svd": SVDCache,
-    "surprise_svd": SurpriseSVDCache,
+    "low_rank": LowRankKeysCache,
+    "surprise_lr": SurpriseLRKCache,
 }

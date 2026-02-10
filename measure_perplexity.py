@@ -33,7 +33,7 @@ def main(
     dataset,
     seq_len: int = 1024,
     micro_bs: int = 4,
-    cache_type: str = "svd",
+    cache_type: str = "low_rank",
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
@@ -123,6 +123,6 @@ if __name__ == "__main__":
     # model_name = "meta-llama/Llama-3.2-1B-Instruct"
     model_name = "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
     dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset", "HuggingFaceFW/fineweb-edu",
-    cache_type = "surprise_svd"  # svd, surprise_svd
+    cache_type = "surprise_lr"  # low_rank, surprise_lr
 
     main(model_name, dataset, cache_type=cache_type)
