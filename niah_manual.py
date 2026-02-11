@@ -62,7 +62,7 @@ def main(
             comp_ratio=comp_ratio,
             energy_threshold=energy_threshold,
             rank_selection=rank_selection,
-            niter=8,
+            n_iter=8,
             gamma=3.0,
             min_size=8.0,
         )

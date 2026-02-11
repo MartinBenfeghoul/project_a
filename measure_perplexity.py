@@ -71,7 +71,7 @@ def main(
     past_key_values = cache(
         config=model.config,
         comp_ratio=1.5,
-        niter=8,
+        n_iter=8,
         gamma=3.0,
         min_size=8.0,
     )

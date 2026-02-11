@@ -9,7 +9,7 @@ from transformers.cache_utils import (
 
 # from transformers.models.llama.modeling_llama import LlamaAttention
 
-from .matrix_decomposition import truncated_svd
+from .matrix_decomposition import DECOMP_METHODS
 from .segmentation import find_thresholds
 
 
@@ -37,20 +37,32 @@ class LowRankKeysCache(DynamicCache):
     def __init__(
         self,
         *args,
-        niter: int = 3,
+        decomposition_method: str,
+        # decomposition method-agnostic args
+        rank_selection: str = "comp_ratio",  # comp_ratio, energy
         comp_ratio: float = 2.0,
         energy_threshold: float = 0.95,
-        rank_selection: str = "comp_ratio",  # comp_ratio, energy
+        n_iter: int = 3,
+        # LoRA-specific args
+        lr: float = 1e-2,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
-        self.n = niter
+        assert (
+            decomposition_method in DECOMP_METHODS.keys()
+        ), f"Decomposition method {decomposition_method} not found in available methods: {DECOMP_METHODS.keys()}"
+        self.decomposition_method = decomposition_method
+        self.decompose = DECOMP_METHODS[decomposition_method]
+
+        self.rank_selection = rank_selection
         self.r = comp_ratio
         self.e = energy_threshold
-        self.rank_selection = rank_selection
-        self.prefill = True
+        self.n = n_iter
 
+        self.lr = lr
+
+        self.prefill = True
         self.lr_keys = {}
 
     def calc_compression_ratio(self):
@@ -58,9 +70,9 @@ class LowRankKeysCache(DynamicCache):
             return self.r
         else:
             crs = 0
-            for US, V in self.lr_keys.values():
-                m, k = US.shape[-2:]
-                n = V.size(-1)
+            for A, B in self.lr_keys.values():
+                m, k = A.shape[-2:]
+                n = B.size(-1)
                 crs += (m * n) / (k * (m + n))
             return crs / len(self.lr_keys)
 
@@ -68,23 +80,23 @@ class LowRankKeysCache(DynamicCache):
         self.prefill = False
 
     def _decompose_keys(self, keys, layer_idx):
-        U, S, V = truncated_svd(
+        A, B = self.decompose(
             keys,
             self.rank_selection,
             cr=self.r,
             energy_threshold=self.e,
-            niter=self.n,
+            n_iter=self.n,
+            lr=self.lr,
         )
-        US = U * S.unsqueeze(-2)
-        self.lr_keys[layer_idx] = (US, V)
+        self.lr_keys[layer_idx] = (A, B)
         self.comp_ratio = self.calc_compression_ratio()
 
     def _reconstruct_keys(self, keys, layer_idx):
-        US, V = self.lr_keys[layer_idx]
-        recon_keys = US @ V
-        if US.size(-2) < keys.size(-2):
+        A, B = self.lr_keys[layer_idx]
+        recon_keys = A @ B
+        if A.size(-2) < keys.size(-2):
             recon_keys = torch.cat(
-                [recon_keys, keys[..., US.size(-2) :, :]],
+                [recon_keys, keys[..., A.size(-2) :, :]],
                 dim=-2,
             )
         return recon_keys
@@ -118,24 +130,38 @@ class SurpriseLRKCache(DynamicCache):
     def __init__(
         self,
         *args,
-        niter: int = 3,
+        decomposition_method: str,
+        # decomposition method-agnostic args
+        rank_selection: str = "comp_ratio",  # comp_ratio, energy
         comp_ratio: float = 2.0,
         energy_threshold: float = 0.95,
-        rank_selection: str = "comp_ratio",  # comp_ratio, energy
+        n_iter: int = 3,
+        # LoRA-specific args
+        lr: float = 1e-2,
+        # segmentation args
         gamma: float = 3.0,
         min_size: int = 8,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
-        self.n = niter
+        assert (
+            decomposition_method in DECOMP_METHODS.keys()
+        ), f"Decomposition method {decomposition_method} not found in available methods: {DECOMP_METHODS.keys()}"
+        self.decomposition_method = decomposition_method
+        self.decompose = DECOMP_METHODS[decomposition_method]
+
+        self.rank_selection = rank_selection
         self.r = comp_ratio
         self.e = energy_threshold
-        self.rank_selection = rank_selection
+        self.n = n_iter
+
+        self.lr = lr
+
         self.gamma = gamma
         self.min_size = min_size
-        self.prefill = True
 
+        self.prefill = True
         self.lr_keys = {}
 
     def calc_compression_ratio(self):
@@ -146,9 +172,9 @@ class SurpriseLRKCache(DynamicCache):
             num_events = 0
             for lr_keys in self.lr_keys.values():
                 for b in range(len(lr_keys)):
-                    for US, V in lr_keys[b]:
-                        m, k = US.shape[-2:]
-                        n = V.size(-1)
+                    for A, B in lr_keys[b]:
+                        m, k = A.shape[-2:]
+                        n = B.size(-1)
                         crs += (m * n) / (k * (m + n))
                         num_events += 1
             return crs / num_events
@@ -177,14 +203,15 @@ class SurpriseLRKCache(DynamicCache):
             for i, st in enumerate(self.events[b][:-1]):
                 ed = self.events[b][i + 1]
                 keys_subset = keys[b, ..., st:ed, :]
-                U, S, V = truncated_svd(
+                A, B = self.decompose(
                     keys_subset,
                     self.rank_selection,
                     cr=self.r,
                     energy_threshold=self.e,
-                    niter=self.n,
+                    n_iter=self.n,
+                    lr=self.lr,
                 )
-                batch_svd_keys.append((U * S.unsqueeze(-2), V))
+                batch_svd_keys.append((A, B))
             lr_keys.append(batch_svd_keys)
         self.lr_keys[layer_idx] = lr_keys
         self.comp_ratio = self.calc_compression_ratio()
@@ -194,8 +221,8 @@ class SurpriseLRKCache(DynamicCache):
         recon_keys = []
         for b in range(len(lr_keys)):
             batch_recon_keys = []
-            for US, V in lr_keys[b]:
-                batch_recon_keys.append(US @ V)
+            for A, B in lr_keys[b]:
+                batch_recon_keys.append(A @ B)
             ed = self.events[b][-1]
             if ed < keys.size(-2):
                 batch_recon_keys.append(keys[b, ..., ed:, :])

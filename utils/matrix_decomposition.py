@@ -2,23 +2,24 @@ import torch
 
 
 # SVD-based decomposition
-def lowrank_svd(A, k, niter=3, dtype=torch.float32):
-    """Compute the truncated SVD of matrix A using PyTorch's built-in function.
+def lowrank_svd(M, k, n_iter=3, dtype=torch.float32, **kwargs):
+    """Compute the truncated SVD of matrix M using PyTorch's built-in function.
     Args:
-        A: (..., m, n) CUDA tensor
+        M: (..., m, n) CUDA tensor
         k: number of singular values and vectors to compute
-        niter: number of power iterations (default: 3)
+        n_iter: number of power iterations (default: 3)
         dtype: data type to use for computation (default: torch.float32)
         Returns:
             U: (..., m, k) left singular vectors
             S: (..., k) singular values
             Vh: (..., k, n) right singular vectors (transposed)
     """
-    og_dtype = A.dtype
-    A = A.to(dtype).contiguous()
-    U, S, V = torch.svd_lowrank(A, q=k, niter=niter)  # V: (n, k)
-    U, S, V = (t.to(og_dtype) for t in (U, S, V))
-    return U, S, V.transpose(-2, -1)  # Vh
+    og_dtype = M.dtype
+    M = M.to(dtype).contiguous()
+    U, S, V = torch.svd_lowrank(M, q=k, niter=n_iter)  # V: (n, k)
+    US = U * S.unsqueeze(-2)
+    US, V = (t.to(og_dtype) for t in (US, V))
+    return US, V.transpose(-2, -1)  # Vh
 
 
 def find_rank_wrt_cr(r, m, n):
@@ -67,19 +68,19 @@ def find_rank_wrt_energy(S, energy_threshold):
 
 
 def truncated_svd(
-    A,
+    M,
     rank_selection,
     cr=2.0,
     energy_threshold=0.95,
     dtype=torch.float32,
     **kwargs,
 ):
-    """Compute a truncated SVD of A.
+    """Compute a truncated SVD of M.
 
     Args:
-        A: (..., m, n) tensor (CUDA or CPU)
+        M: (..., m, n) tensor (CUDA or CPU)
         k: int or None. If None, choose smallest k capturing `energy_threshold`.
-        energy_threshold: float in (0, 1], or tensor broadcastable to A.shape[:-2]
+        energy_threshold: float in (0, 1], or tensor broadcastable to M.shape[:-2]
         dtype: compute dtype (SVD is typically more stable in float32)
 
     Returns:
@@ -89,13 +90,13 @@ def truncated_svd(
     """
     if rank_selection == "comp_ratio":
         # TODO: benchmark this path vs the full then truncated path in terms of compute time
-        k = find_rank_wrt_cr(cr, A.size(-2), A.size(-1))
-        return lowrank_svd(A, k, dtype=dtype, **kwargs)
+        k = find_rank_wrt_cr(cr, M.size(-2), M.size(-1))
+        return lowrank_svd(M, k, dtype=dtype, **kwargs)
     elif rank_selection == "energy":
-        og_dtype = A.dtype
-        A_ = A.to(dtype).contiguous()
+        og_dtype = M.dtype
+        M_ = M.to(dtype).contiguous()
 
-        U, S, Vh = torch.linalg.svd(A_, full_matrices=False)
+        U, S, Vh = torch.linalg.svd(M_, full_matrices=False)
         r = S.shape[-1]
 
         k = find_rank_wrt_energy(S, energy_threshold)
@@ -107,8 +108,9 @@ def truncated_svd(
         S = S[..., :k]
         Vh = Vh[..., :k, :]
 
-        U, S, Vh = (t.to(og_dtype) for t in (U, S, Vh))
-        return U, S, Vh
+        US = U * S.unsqueeze(-2)
+        US, Vh = (t.to(og_dtype) for t in (US, Vh))
+        return US, Vh
     else:
         raise ValueError(
             f"rank_selection set to {rank_selection}.",
@@ -116,19 +118,19 @@ def truncated_svd(
         )
 
 
-def full_svd(A, dtype=torch.float32):
-    """Compute the full SVD of matrix A using PyTorch's built-in function.
+def full_svd(M, dtype=torch.float32):
+    """Compute the full SVD of matrix M using PyTorch's built-in function.
     Args:
-        A: (..., m, n) CUDA tensor
+        M: (..., m, n) CUDA tensor
         dtype: data type to use for computation (default: torch.float32)
     Returns:
         U: (..., m, min(m, n)) left singular vectors
         S: (..., min(m, n)) singular values
         Vh: (..., n, min(m, n)) right singular vectors (transposed)
     """
-    og_dtype = A.dtype
-    A = A.to(dtype).contiguous()
-    U, S, V = torch.linalg.svd(A, full_matrices=False)  # V: (n, n)
+    og_dtype = M.dtype
+    M = M.to(dtype).contiguous()
+    U, S, V = torch.linalg.svd(M, full_matrices=False)  # V: (n, n)
     U, S, V = (t.to(og_dtype) for t in (U, S, V))
     return U, S, V  # Vh.transpose(-2, -1)
 
@@ -202,12 +204,15 @@ def learn_lora_matrix(
     alpha=None,
     warmup_frac=0.05,
     min_lr_ratio=0.05,
+    return_loss=False,
+    dtype=torch.float32,
+    **kwargs,
 ):
     shape = M.shape[:-2]
     T, D = M.shape[-2:]
 
-    A = torch.empty((*shape, T, k), device=M.device, dtype=torch.float32)
-    B = torch.zeros((*shape, k, D), device=M.device, dtype=torch.float32)
+    A = torch.empty((*shape, T, k), device=M.device, dtype=dtype)
+    B = torch.zeros((*shape, k, D), device=M.device, dtype=dtype)
 
     torch.nn.init.kaiming_uniform_(A, a=math.sqrt(5))
     scale = (alpha / k) if alpha is not None else 1.0
@@ -236,4 +241,35 @@ def learn_lora_matrix(
         l = loss.detach().cpu().item()
         sched.step(l)
         losses.append(l)
-    return A.detach(), B.detach(), losses
+    if return_loss:
+        return A.detach(), B.detach(), losses
+    return A.detach(), B.detach()
+
+
+def lora_matrix(
+    M,
+    rank_selection,
+    cr=2.0,
+    energy_threshold=0.95,
+    dtype=torch.float32,
+    **kwargs,
+):
+    og_dtype = M.dtype
+    M_ = M.to(dtype).contiguous()
+    if rank_selection == "comp_ratio":
+        k = find_rank_wrt_cr(cr, M_.size(-2), M_.size(-1))
+    elif rank_selection == "energy":
+        _, S, _ = torch.linalg.svd(M_, full_matrices=False)
+        k = find_rank_wrt_energy(S, energy_threshold)
+        del S
+    else:
+        raise ValueError(
+            f"rank_selection set to {rank_selection}.",
+            "Try either 'comp_ratio' or 'energy_threshold'",
+        )
+    A, B = learn_lora_matrix(M_, k, dtype=dtype, **kwargs)
+    A, B = (t.to(og_dtype) for t in (A, B))
+    return A, B
+
+
+DECOMP_METHODS = {"svd": truncated_svd, "lora": lora_matrix}

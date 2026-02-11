@@ -69,9 +69,12 @@ def main(
     dataset: str,
     n_samples: int,
     cache_type: str,
+    decomposition_method: str,
     comp_ratio: float,
     energy_threshold: float,
     rank_selection: str,
+    lr: float,
+    n_iter: int,
     max_new_tokens: int,
 ):
     """ThE cOdE iS tHe DoCsTrInG - Fredericoco 2026"""
@@ -97,10 +100,12 @@ def main(
         cache = get_cache(cache_type)
         past_key_values = cache(
             config=model.config,
+            decomposition_method=decomposition_method,
             comp_ratio=comp_ratio,
             energy_threshold=energy_threshold,
             rank_selection=rank_selection,
-            niter=8,
+            lr=lr,
+            n_iter=n_iter,
             gamma=3.0,
             min_size=8.0,
         )
@@ -142,12 +147,29 @@ def get_parser():
     parser.add_argument(
         "-d", "--dataset", type=str, default="data/NIAH/multi-keys/1k"
     )
-    parser.add_argument("-c", "--cache_type", type=str, default="surprise_lr")
+    parser.add_argument(
+        "-c",
+        "--cache_type",
+        type=str,
+        default="surprise_lr",
+        choices=list(CACHE_CLASSES.keys()),
+    )
+    parser.add_argument(
+        "--decomposition_method",
+        type=str,
+        default="svd",
+        choices=["svd", "lora"],
+    )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
     parser.add_argument(
-        "--rank_selection", type=str, default="comp_ratio"  # comp_ratio, energy
+        "--rank_selection",
+        type=str,
+        default="comp_ratio",
+        choices=["comp_ratio", "energy"],
     )
+    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--n_iter", type=int, default=3)
     parser.add_argument("-n", "--n_samples", type=int, default=100)
     parser.add_argument("--max_new_tokens", type=int, default=4)
     return parser
