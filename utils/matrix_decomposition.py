@@ -197,6 +197,7 @@ def cosine_with_warmup_scheduler(
 def learn_lora_matrix(
     M,
     k,
+    init_method="svd",
     lr=1e-2,
     n_iter=10,
     std=1,
@@ -208,13 +209,22 @@ def learn_lora_matrix(
     dtype=torch.float32,
     **kwargs,
 ):
-    shape = M.shape[:-2]
-    T, D = M.shape[-2:]
+    if init_method == "svd":
+        U, S, Vh = torch.linalg.svd(M, full_matrices=False)
 
-    A = torch.empty((*shape, T, k), device=M.device, dtype=dtype)
-    B = torch.zeros((*shape, k, D), device=M.device, dtype=dtype)
+        U = U[..., :k]
+        S = S[..., :k]
 
-    torch.nn.init.kaiming_uniform_(A, a=math.sqrt(5))
+        A = U * S.unsqueeze(-2)
+
+        B = Vh[..., :k, :]
+    else:
+        shape = M.shape[:-2]
+        T, D = M.shape[-2:]
+        A = torch.empty((*shape, T, k), device=M.device, dtype=dtype)
+        B = torch.zeros((*shape, k, D), device=M.device, dtype=dtype)
+
+        torch.nn.init.kaiming_uniform_(A, a=math.sqrt(5))
     scale = (alpha / k) if alpha is not None else 1.0
 
     A, B = A.requires_grad_(True), B.requires_grad_(True)
