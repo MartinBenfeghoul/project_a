@@ -1,3 +1,4 @@
+import warnings
 import torch
 
 from transformers.cache_utils import (
@@ -47,6 +48,14 @@ class SingleTensorDynamicLayer:
     def reset(self) -> None:
         if self.is_initialized:
             self.tensor.zero_()
+    
+    def clear(self, end_idx: int | None = None) -> None:
+        # Created to avoid overwriting the reset method for full compliance with HF's DynamicLayer API
+        if self.is_initialized:
+            if end_idx is None:
+                self.tensor = torch.tensor([], dtype=self.dtype, device=self.device)
+            else:
+                self.tensor = self.tensor[..., :end_idx, :]
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         if self.get_seq_length() > 0:
@@ -108,6 +117,15 @@ class SingleTensorCache:
     def reset(self):
         for layer in self.layers:
             layer.reset()
+    
+    def clear(self, layer_idx: int | None = None, end_idx: int | None = None):
+        if layer_idx is not None: 
+            if layer_idx < len(self.layers): 
+                self.layers[layer_idx].clear(end_idx=end_idx)
+        else:
+            warnings.warn("Clearing all layers in cache.")
+            for layer in self.layers:
+                layer.clear(end_idx=end_idx)
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
         for layer in self.layers:

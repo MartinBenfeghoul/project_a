@@ -70,7 +70,7 @@ class LowRankKeysCache(SingleTensorCache):
     def _reconstruct_keys(self, keys, layer_idx):
         A, B = self.lr_keys[layer_idx]
         recon_keys = A @ B
-        if A.size(-2) < keys.size(-2):
+        if A.size(-2) < keys.size(-2):  # TODO: update this logic to handle evicted tokens - ie. keys is now only the new tokens since prefill
             recon_keys = torch.cat(
                 [recon_keys, keys[..., A.size(-2) :, :]],
                 dim=-2,
@@ -90,9 +90,13 @@ class LowRankKeysCache(SingleTensorCache):
         )
         if self.prefill:
             self._decompose_keys(keys, layer_idx)
+            self.clear(layer_idx=layer_idx) 
             return keys
         elif self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)
+            cache_position = cache_kwargs.get("cache_position", None) 
+        if cache_position is not None:
+            assert recon_keys.size(-2) == cache_position.size(-1), f"Reconstructed keys have seq_len {recon_keys.size(-2)} but cache_position has size {cache_position.size(-1)}"
             return recon_keys
         else:
             raise Exception(
@@ -198,7 +202,8 @@ class SurpriseLRKCache(SingleTensorCache):
             for A, B in lr_keys[b]:
                 batch_recon_keys.append(A @ B)
             ed = self.events[b][-1]
-            if ed < keys.size(-2):
+            # TODO: move the below outside the loop as all batches will have the same ed
+            if ed < keys.size(-2):    # TODO: update this logic to handle evicted tokens - ie. keys is now only the new tokens since prefill
                 batch_recon_keys.append(keys[b, ..., ed:, :])
             recon_keys.append(torch.cat(batch_recon_keys, dim=-2))
         return torch.stack(recon_keys, dim=0)
@@ -218,7 +223,11 @@ class SurpriseLRKCache(SingleTensorCache):
             return keys
         elif not self.lr_keys.get(layer_idx, False):
             self._decompose_keys(keys, layer_idx)
+            self.clear(layer_idx=layer_idx, end_idx=self.events[0][-1])
         recon_keys = self._reconstruct_keys(keys, layer_idx)
+        cache_position = cache_kwargs.get("cache_position", None) 
+        if cache_position is not None:
+            assert recon_keys.size(-2) == cache_position.size(-1), f"Reconstructed keys have seq_len {recon_keys.size(-2)} but cache_position has size {cache_position.size(-1)}"
         return recon_keys
 
 

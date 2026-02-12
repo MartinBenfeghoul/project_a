@@ -90,6 +90,7 @@ def main(
         )["input_ids"].to(device)
 
         past_key_values = CompressedCache(
+            config=model.config,
             key_cache_kwargs={
                 "cache_type": cache_type,  # CompressedCache resolves class internally
                 "decomposition_method": decomposition_method,
