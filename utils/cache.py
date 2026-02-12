@@ -1,9 +1,10 @@
 import torch
 
 from transformers.cache_utils import (
-    Cache,
+    DynamicCache,
     Any,
     Iterable,
+    PreTrainedConfig,
 )
 
 
@@ -132,7 +133,7 @@ class SingleTensorCache:
             yield layer.tensor
 
 
-class CompressedCache(Cache):
+class CompressedCache(DynamicCache):
     """
     Dynamic cache that applies low-rank decomposition to keys
         and learns values in MLPs.
@@ -143,10 +144,12 @@ class CompressedCache(Cache):
     def __init__(
         self,
         ddp_cache_data: Iterable[torch.Tensor] | None = None,
+        config: PreTrainedConfig | None = None,
         key_cache_kwargs: dict | None = None,
         value_cache_kwargs: dict | None = None,
+        **kwargs,
     ):
-        super().__init__()
+        super().__init__(ddp_cache_data=ddp_cache_data, config=config)
 
         if key_cache_kwargs is None:
             key_cache_kwargs = {"cache_type": "baseline"}
