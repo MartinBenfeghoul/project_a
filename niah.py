@@ -4,7 +4,7 @@ import torch
 from datasets import load_from_disk
 
 from utils import (
-    KEY_CACHE_CLASSES,
+    CompressedCache,
     Logger,
     get_model_and_tokenizer,
 )
@@ -14,15 +14,6 @@ def measure_perplexity(logits, target):
     nll = torch.nn.functional.cross_entropy(logits, target, reduction="mean")
     ppl = torch.exp(nll)
     return nll, ppl
-
-
-def get_cache(cache_type):
-    if cache_type not in KEY_CACHE_CLASSES:
-        raise ValueError(
-            f"{cache_type} not in KEY_CACHE_CLASSES. Please select one of the following: {KEY_CACHE_CLASSES.keys()}"
-        )
-    print(f"Loading cache type {cache_type}")
-    return KEY_CACHE_CLASSES[cache_type]
 
 
 def make_hook(logger):
@@ -50,9 +41,10 @@ def make_hook(logger):
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
-                print(f"Compression ratio: {cr:.2f}")
-                logger.add_log("crs", cr)
-                logger.recorded_cr = True
+                if cr is not None:
+                    print(f"Compression ratio: {cr:.2f}")
+                    logger.add_log("crs", cr)
+                    logger.recorded_cr = True
 
     return hook
 
@@ -97,17 +89,19 @@ def main(
             prompt, return_tensors="pt", add_special_tokens=False, device=device
         )["input_ids"].to(device)
 
-        cache = get_cache(cache_type)
-        past_key_values = cache(
-            config=model.config,
-            decomposition_method=decomposition_method,
-            comp_ratio=comp_ratio,
-            energy_threshold=energy_threshold,
-            rank_selection=rank_selection,
-            lr=lr,
-            n_iter=n_iter,
-            gamma=3.0,
-            min_size=8.0,
+        past_key_values = CompressedCache(
+            key_cache_kwargs={
+                "cache_type": cache_type,  # CompressedCache resolves class internally
+                "decomposition_method": decomposition_method,
+                "comp_ratio": comp_ratio,
+                "energy_threshold": energy_threshold,
+                "rank_selection": rank_selection,
+                "lr": lr,
+                "n_iter": n_iter,
+                "gamma": 3.0,
+                "min_size": 8.0,
+            },
+            value_cache_kwargs={},
         )
 
         out = model.generate(
@@ -142,7 +136,7 @@ def get_parser():
         "-m",
         "--model_name",
         type=str,
-        default="/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6",
+        default="meta-llama/Llama-3.2-1B-Instruct",  # "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6",
     )
     parser.add_argument(
         "-d", "--dataset", type=str, default="data/NIAH/multi-keys/1k"
@@ -152,7 +146,6 @@ def get_parser():
         "--cache_type",
         type=str,
         default="surprise_lr",
-        choices=list(KEY_CACHE_CLASSES.keys()),
     )
     parser.add_argument(
         "--decomposition_method",

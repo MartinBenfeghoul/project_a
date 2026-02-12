@@ -1,43 +1,19 @@
 import torch
 
-from transformers.cache_utils import (
-    DynamicCache as DC,
-    Any,
-    Iterable,
-    PreTrainedConfig,
-)
+from transformers.cache_utils import Any
 
 # from transformers.models.llama.modeling_llama import LlamaAttention
 
 from .matrix_decomposition import DECOMP_METHODS
 from .segmentation import find_thresholds
+from .cache import SingleTensorCache
 
 
-class DynamicCache(DC):
-    """This class simply intercepts kwargs for a more flexible base class."""
-
+class LowRankKeysCache(SingleTensorCache):
     def __init__(
         self,
         *args,
-        ddp_cache_data: Iterable[tuple[torch.Tensor | None, ...]] | None = None,
-        config: PreTrainedConfig | None = None,
-        offloading: bool = False,
-        offload_only_non_sliding: bool = False,
-        **kwargs,
-    ):
-        super().__init__(
-            ddp_cache_data,
-            config,
-            offloading,
-            offload_only_non_sliding,
-        )
-
-
-class LowRankKeysCache(DynamicCache):
-    def __init__(
-        self,
-        *args,
-        decomposition_method: str,
+        decomposition_method: str = None,
         # decomposition method-agnostic args
         rank_selection: str = "comp_ratio",  # comp_ratio, energy
         comp_ratio: float = 2.0,
@@ -104,33 +80,31 @@ class LowRankKeysCache(DynamicCache):
     def update(
         self,
         key_states: torch.Tensor,
-        value_states: torch.Tensor,
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        keys, values = super().update(
+    ) -> torch.Tensor:
+        keys = super().update(
             key_states,
-            value_states,
             layer_idx,
             cache_kwargs,
         )
         if self.prefill:
             self._decompose_keys(keys, layer_idx)
-            return keys, values
+            return keys
         elif self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)
-            return recon_keys, values
+            return recon_keys
         else:
             raise Exception(
                 "Prefill is set to False and no low_rank keys were found."
             )
 
 
-class SurpriseLRKCache(DynamicCache):
+class SurpriseLRKCache(SingleTensorCache):
     def __init__(
         self,
         *args,
-        decomposition_method: str,
+        decomposition_method: str = None,
         # decomposition method-agnostic args
         rank_selection: str = "comp_ratio",  # comp_ratio, energy
         comp_ratio: float = 2.0,
@@ -232,26 +206,24 @@ class SurpriseLRKCache(DynamicCache):
     def update(
         self,
         key_states: torch.Tensor,
-        value_states: torch.Tensor,
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        keys, values = super().update(
+    ) -> torch.Tensor:
+        keys = super().update(
             key_states,
-            value_states,
             layer_idx,
             cache_kwargs,
         )
         if self.prefill:
-            return keys, values
+            return keys
         elif not self.lr_keys.get(layer_idx, False):
             self._decompose_keys(keys, layer_idx)
         recon_keys = self._reconstruct_keys(keys, layer_idx)
-        return recon_keys, values
+        return recon_keys
 
 
 KEY_CACHE_CLASSES = {
-    "baseline": DynamicCache,
+    "baseline": SingleTensorCache,
     "low_rank": LowRankKeysCache,
     "surprise_lr": SurpriseLRKCache,
 }

@@ -2,34 +2,16 @@ import torch
 
 from transformers.cache_utils import (
     Cache,
-    DynamicCache as DC,
     Any,
     Iterable,
-    PreTrainedConfig,
 )
 
-# NOTE: avoid top-level import to prevent circular import with key_cache.py
-# from .key_cache import KEY_CACHE_CLASSES
 
-
-class DynamicCache(DC):
-    """This class simply intercepts kwargs for a more flexible base class."""
-
-    def __init__(
-        self,
-        *args,
-        ddp_cache_data: Iterable[tuple[torch.Tensor | None, ...]] | None = None,
-        config: PreTrainedConfig | None = None,
-        offloading: bool = False,
-        offload_only_non_sliding: bool = False,
-        **kwargs,
-    ):
-        super().__init__(
-            ddp_cache_data,
-            config,
-            offloading,
-            offload_only_non_sliding,
-        )
+def get_cache(cache_type, CACHE_CLASSES):
+    if cache_type not in CACHE_CLASSES:
+        raise ValueError(f"Invalid cache type: {cache_type}")
+    print(f"Loading cache type {cache_type}")
+    return CACHE_CLASSES[cache_type]
 
 
 class SingleTensorDynamicLayer:
@@ -152,9 +134,10 @@ class SingleTensorCache:
 
 class CompressedCache(Cache):
     """
-    Dynamic cache that applies low-rank decomposition to keys 
+    Dynamic cache that applies low-rank decomposition to keys
         and learns values in MLPs.
     """
+
     # TODO: make it fully HF-compatible by implementing the same API as DynamicCache and adding a config class
 
     def __init__(
@@ -165,21 +148,29 @@ class CompressedCache(Cache):
     ):
         super().__init__()
 
-        key_cache_kwargs = (
-            {} if key_cache_kwargs is None else dict(key_cache_kwargs)
-        )
-        value_cache_kwargs = (
-            {} if value_cache_kwargs is None else dict(value_cache_kwargs)
-        )
+        if key_cache_kwargs is None:
+            key_cache_kwargs = {"cache_type": "baseline"}
+        else:
+            key_cache_kwargs = dict(key_cache_kwargs)
+
+        if value_cache_kwargs is None:
+            value_cache_kwargs = {"cache_type": "baseline"}
+        else:
+            value_cache_kwargs = dict(value_cache_kwargs)
 
         # local import to avoid circular import at module load
         from .key_cache import KEY_CACHE_CLASSES
 
         key_cache_type = key_cache_kwargs.pop("cache_type")
-        self.key_cache = KEY_CACHE_CLASSES[key_cache_type](**key_cache_kwargs)
+        self.key_cache = get_cache(key_cache_type, KEY_CACHE_CLASSES)(
+            ddp_cache_data=ddp_cache_data,
+            **key_cache_kwargs,
+        )
 
-        # TODO: replace value cache with the cache in the value branch
-        self.value_cache = SingleTensorCache(
+        from .value_cache import VALUE_CACHE_CLASSES
+
+        value_cache_type = value_cache_kwargs.pop("cache_type")
+        self.value_cache = get_cache(value_cache_type, VALUE_CACHE_CLASSES)(
             ddp_cache_data=ddp_cache_data,
             **value_cache_kwargs,
         )
@@ -193,6 +184,38 @@ class CompressedCache(Cache):
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
-        
+
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
         return keys, values
+
+    @property
+    def comp_ratio(self) -> float | None:
+        """
+        Calculate compression ratios from both caches.
+        """
+        if hasattr(self.key_cache, "comp_ratio"):
+            key_cr = self.key_cache.comp_ratio
+        else:
+            key_cr = None
+        if hasattr(self.value_cache, "comp_ratio"):
+            value_cr = self.value_cache.comp_ratio
+        else:
+            value_cr = None
+
+        if key_cr is not None and value_cr is not None:
+            return (key_cr + value_cr) / 2
+        elif key_cr is not None:
+            return key_cr
+        elif value_cr is not None:
+            return value_cr
+        else:
+            return None
+
+    def update_events(self, *args, **kwargs) -> None:
+        """
+        Forward event updates to caches.
+        """
+        if hasattr(self.key_cache, "update_events"):
+            self.key_cache.update_events(*args, **kwargs)
+        if hasattr(self.value_cache, "update_events"):
+            self.value_cache.update_events(*args, **kwargs)
