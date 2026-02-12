@@ -4,7 +4,7 @@ import torch
 from datasets import load_from_disk
 
 from utils import (
-    CACHE_CLASSES,
+    KEY_CACHE_CLASSES,
     get_model_and_tokenizer,
 )
 
@@ -16,12 +16,12 @@ def measure_perplexity(logits, target):
 
 
 def get_cache(cache_type):
-    if cache_type not in CACHE_CLASSES:
+    if cache_type not in KEY_CACHE_CLASSES:
         raise ValueError(
-            f"{cache_type} not in CACHE_CLASSES. Please select one of the following: {CACHE_CLASSES.keys()}"
+            f"{cache_type} not in KEY_CACHE_CLASSES. Please select one of the following: {KEY_CACHE_CLASSES.keys()}"
         )
     print(f"Loading cache type {cache_type}")
-    return CACHE_CLASSES[cache_type]
+    return KEY_CACHE_CLASSES[cache_type]
 
 
 @torch.no_grad()
