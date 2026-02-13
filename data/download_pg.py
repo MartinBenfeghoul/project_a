@@ -81,7 +81,7 @@ for file in files_repo + files_html:
     with open(file, "r") as f:
         text += f.read()
 
-with open("PaulGrahamEssays.json", "w") as f:
+with open("data/PaulGrahamEssays.json", "w") as f:
     json.dump({"text": text}, f)
 
 
