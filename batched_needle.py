@@ -1,3 +1,4 @@
+import os
 import time
 
 import torch
@@ -120,8 +121,10 @@ def run_experiment(model, tokenizer, splits, config, device):
     target_percentages = config.evaluation.target_percentages
     num_samples_per_split = config.data.num_samples_per_split
     pretrained_mlps_path = config.model.get("pretrained_mlps", None)
-    output_file = config.output.get("file_name", "./results.jsonl")
     num_epochs = config.training.num_epochs
+    model_name = config.model.name.split("/")[-1]
+    output_file = f"results/{model_name}/{num_samples_per_split}_samples_{num_epochs}epoch.jsonl"
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     lr = config.training.lr
     loss_func = config.training.get("loss_func", "mse")
 

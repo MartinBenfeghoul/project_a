@@ -1,19 +1,20 @@
 model:
-  name: "meta-llama/Llama-3.1-8B-Instruct"
+  name: "meta-llama/Llama-3.1-8B-Instruct" # 
 
 training:
   seq_len: 512
-  batch_size: 5 # TODO: think about whether this should be 1
+  batch_size: 1 
   inner_steps: 1
   meta_lr: 3e-4
   inner_lr: 3e-2
+  learn_inner_lr: false
   support_ratio: 0.7
   num_meta_epochs: 20
   eval_batch_size: 32
-  checkpoint_path: "meta_learned_mlps_qwen.pt" # TODO: Change this to model/run_name
-  log_interval: 1  # log metrics every N batches
+  checkpoint_path: "meta_learned_mlps_llama.pt" # TODO: Change this to model/run_name
+  log_interval: 10  # log metrics every N batches
   batches_per_epoch: 500  # limit batches per epoch (null for unlimited)
 
 wandb:
   enabled: true
-  project: "gist_vs_details"
+project: "gist_vs_details"

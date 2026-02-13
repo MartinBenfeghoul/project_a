@@ -1,7 +1,10 @@
 .vscode
 __pycache__
 
-.pt
+*.pt
 .env
 
 wandb/*
+
+*.out
+scripts/lazy_runs/*

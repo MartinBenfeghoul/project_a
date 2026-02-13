@@ -1,20 +1,17 @@
 model:
-  name: "Qwen/Qwen2.5-0.5B-Instruct"
-  pretrained_mlps: "/Users/teresadelga/Desktop/gist_vs_details/results/meta_learned_mlps_qwen_epoch1.pt"  # path to pre-trained MLP checkpoint (e.g., "meta_learned_mlps_qwen.pt")
+  name: "meta-llama/Llama-3.1-8B-Instruct"
+  pretrained_mlps: "/home/t84411738/github/gist_vs_details/checkpoints/Llama-3.1-8B-Instruct/meta_learned_mlps_llama_epoch0.pt" 
 
 training:
-  num_epochs: 2
+  num_epochs: 1
   lr: 3e-2
   loss_func: "mse"  # "mse" or "cosine"
   optimizer: "sgd"  # "sgd" or "adam"
 
 evaluation:
-  target_percentages: [1, 5, 10, 25, 50, 75, 100]
+  target_percentages: [5, 25, 50, 75, 85, 90, 95, 100]
   num_generate_tokens: 16
 
 data:
   splits: [512, 1024, 2048, 4096, 8192, 10000]
-  num_samples_per_split: 10
-
-output:
-  file_name: "results/results_needle_mse_long_10_samples_2_epochs_train_2_epoch_ttt.jsonl" # TODO: change to save with more specific name based on config
+  num_samples_per_split: 100
