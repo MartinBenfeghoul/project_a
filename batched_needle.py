@@ -10,7 +10,7 @@ from utils import (
     generate_kv_batched,
     avg_nll,
     clean,
-    VectorizedIndependentHeadMLP,
+    MLP,
     load_pretrained_mlps,
     train_mlps,
     set_seed,
@@ -147,7 +147,7 @@ def run_experiment(model, tokenizer, splits, config, device):
             _, num_head, num_token, head_dim = kv_cache.layers[0].keys.shape
 
             layer_mlps = [
-                VectorizedIndependentHeadMLP(num_heads=num_head, head_dim=head_dim).to(
+                MLP(num_heads=num_head, head_dim=head_dim).to(
                     device
                 )
                 for _ in range(len(kv_cache))

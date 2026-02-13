@@ -10,10 +10,12 @@ from torch.utils.data import DataLoader
 from utils.tracking import init_wandb
 import wandb
 
+from tqdm import tqdm
+
 from utils import (
     get_model_and_tokenizer,
     avg_nll,
-    VectorizedIndependentHeadMLP,
+    MLP,
     MetaLearningDataset,
     load_data,
     meta_collate,
@@ -48,7 +50,10 @@ def inner_loop_functional(layer_mlps, kv_cache, support_slice, inner_lr, inner_s
 
         grads = torch.autograd.grad(total_loss, phi, create_graph=False, retain_graph=False)
 
-        phi = [p - inner_lr * g for p, g in zip(phi, grads)]
+        if isinstance(inner_lr, list):
+            phi = [p - lr * g for p, lr, g in zip(phi, inner_lr, grads)]
+        else:
+            phi = [p - inner_lr * g for p, g in zip(phi, grads)]
 
     final_support_loss = None
     if track_losses:
@@ -68,22 +73,19 @@ def inner_loop_functional(layer_mlps, kv_cache, support_slice, inner_lr, inner_s
 
 
 def functional_mlp_forward(mlp, x, all_params, start_idx):
-    b, h, t, d = x.shape
-    x_reshaped = x.permute(0, 1, 3, 2).reshape(b, h * d, t)
+    # x: [B, H, T, D]
+    # params order from ParameterList: weights[0..N-1], then biases[0..N-1]
+    n = mlp.num_layers
+    out = x
 
-    param_idx = start_idx
-    out = x_reshaped
+    for i in range(n):
+        weight = all_params[start_idx + i]
+        bias = all_params[start_idx + n + i]
+        out = torch.matmul(out, weight) + bias
+        if i < n - 1:
+            out = mlp.intermediate_activation(out)
 
-    for layer in mlp.net:
-        if isinstance(layer, nn.Conv1d):
-            weight = all_params[param_idx]
-            bias = all_params[param_idx + 1]
-            out = F.conv1d(out, weight, bias, groups=layer.groups)
-            param_idx += 2
-        elif isinstance(layer, nn.GELU):
-            out = F.gelu(out)
-
-    return out.view(b, h, d, t).permute(0, 1, 3, 2)
+    return out
 
 
 def compute_query_loss_functional(layer_mlps, kv_cache, query_slice, adapted_params, loss_fn=F.mse_loss, track_per_layer=False):
@@ -128,6 +130,7 @@ def meta_train(
     dataloader,
     device,
     config,
+    checkpoint_path,
     loss_fn=F.mse_loss,
     use_wandb=False,
 ):
@@ -139,10 +142,17 @@ def meta_train(
     eval_batch_size = config.eval_batch_size
     log_interval = config.get("log_interval", 10)
     batches_per_epoch = config.get("batches_per_epoch", None)
-    checkpoint_path = config.get("checkpoint_path", "meta_learned_mlps.pt")
+    learn_inner_lr = config.get("learn_inner_lr", False)
 
     theta = [p for mlp in layer_mlps for p in mlp.parameters()]
-    meta_optimizer = torch.optim.Adam(theta, lr=meta_lr)
+
+    if learn_inner_lr:
+        inner_lr_params = [nn.Parameter(torch.tensor(inner_lr, dtype=torch.float32, device=device)) for _ in theta]
+        meta_optimizer = torch.optim.Adam(theta + inner_lr_params, lr=meta_lr)
+        print(f"Meta-learning inner LR: {len(inner_lr_params)} learnable LR params (init={inner_lr})")
+    else:
+        inner_lr_params = None
+        meta_optimizer = torch.optim.Adam(theta, lr=meta_lr)
 
     model.eval() # TODO: I think this might already be set when instantiating model
 
@@ -153,7 +163,7 @@ def meta_train(
         num_batches = 0
         epoch_start_time = time.time()
 
-        for batch_idx, batch in enumerate(dataloader):
+        for batch_idx, batch in enumerate(tqdm(dataloader, total=batches_per_epoch or len(dataloader))):
             if batches_per_epoch is not None and batch_idx >= batches_per_epoch:
                 break
 
@@ -174,7 +184,9 @@ def meta_train(
             should_log = (batch_idx % log_interval == 0)
 
             theta_list, phi, inner_metrics = inner_loop_functional(
-                layer_mlps, kv_cache, support_slice, inner_lr, inner_steps, loss_fn,
+                layer_mlps, kv_cache, support_slice,
+                inner_lr_params if inner_lr_params is not None else inner_lr,
+                inner_steps, loss_fn,
                 track_losses=should_log
             )
 
@@ -183,7 +195,13 @@ def meta_train(
                 track_per_layer=should_log
             )
 
-            g_phi = torch.autograd.grad(query_loss, phi, create_graph=False, retain_graph=False)
+            if inner_lr_params is not None:
+                all_grads = torch.autograd.grad(query_loss, list(phi) + inner_lr_params, create_graph=False, retain_graph=False)
+                g_phi = all_grads[:len(phi)]
+                g_lr = all_grads[len(phi):]
+            else:
+                g_phi = torch.autograd.grad(query_loss, phi, create_graph=False, retain_graph=False)
+                g_lr = None
 
             for p_theta, g in zip(theta_list, g_phi):
                 if g is None:
@@ -192,6 +210,13 @@ def meta_train(
                     p_theta.grad = g.detach().clone()
                 else:
                     p_theta.grad.add_(g.detach())
+
+            if g_lr is not None:
+                for lr_param, g in zip(inner_lr_params, g_lr):
+                    if lr_param.grad is None:
+                        lr_param.grad = g.detach().clone()
+                    else:
+                        lr_param.grad.add_(g.detach())
 
             meta_optimizer.step()
 
@@ -237,6 +262,12 @@ def meta_train(
                         for layer_idx, layer_loss in enumerate(per_layer_losses):
                             log_dict[f"layer/query_loss_layer_{layer_idx}"] = layer_loss
 
+                    if inner_lr_params is not None:
+                        lr_values = [lr.item() for lr in inner_lr_params]
+                        log_dict["inner/learned_lr_mean"] = sum(lr_values) / len(lr_values)
+                        log_dict["inner/learned_lr_min"] = min(lr_values)
+                        log_dict["inner/learned_lr_max"] = max(lr_values)
+
                     wandb.log(log_dict, step=global_step)
 
         epoch_time_sec = time.time() - epoch_start_time
@@ -254,13 +285,15 @@ def meta_train(
         base, ext = os.path.splitext(checkpoint_path)
         epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
         epoch_params = {f"layer_{i}": mlp.state_dict() for i, mlp in enumerate(layer_mlps)}
+        if inner_lr_params is not None:
+            epoch_params["inner_lr_params"] = [lr.detach().cpu() for lr in inner_lr_params]
         torch.save(epoch_params, epoch_checkpoint_path)
         print(f"Checkpoint saved to {epoch_checkpoint_path}")
 
         if use_wandb:
             wandb.save(epoch_checkpoint_path)
 
-    return layer_mlps
+    return layer_mlps, inner_lr_params
 
 
 
@@ -287,7 +320,13 @@ def main():
     print(f"Using device: {device}")
     print(f"Loading model: {config.model.name}")
 
-    model, tokenizer = get_model_and_tokenizer(config.model.name, device)
+    model_name = config.model.name
+    model_folder = model_name.split("/")[-1]
+    checkpoint_dir = os.path.join("checkpoints", model_folder)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Checkpoints will be saved to: {checkpoint_dir}/")
+
+    model, tokenizer = get_model_and_tokenizer(model_name, device) # TODO: check torch_dtype=torch.bfloat16
 
     num_kv_heads = model.config.num_key_value_heads
     head_dim = model.config.hidden_size // model.config.num_attention_heads
@@ -303,7 +342,7 @@ def main():
         })
 
     layer_mlps = [
-        VectorizedIndependentHeadMLP(num_heads=num_kv_heads, head_dim=head_dim).to(device)
+        MLP(num_heads=num_kv_heads, head_dim=head_dim).to(device)
         for _ in range(num_layers)
     ]
 
@@ -324,19 +363,22 @@ def main():
     )
 
     batches_per_epoch = training_config.get("batches_per_epoch", None)
+    checkpoint_path = os.path.join(checkpoint_dir, training_config.checkpoint_path)
     print(f"Starting meta-training... (batches_per_epoch: {batches_per_epoch or 'unlimited'})")
-    layer_mlps = meta_train(
+    layer_mlps, inner_lr_params = meta_train(
         model=model,
         tokenizer=tokenizer,
         layer_mlps=layer_mlps,
         dataloader=dataloader,
         device=device,
         config=training_config,
+        checkpoint_path=checkpoint_path,
         use_wandb=use_wandb,
     )
 
     trained_params = {f"layer_{i}": mlp.state_dict() for i, mlp in enumerate(layer_mlps)}
-    checkpoint_path = training_config.checkpoint_path
+    if inner_lr_params is not None:
+        trained_params["inner_lr_params"] = [lr.detach().cpu() for lr in inner_lr_params]
     torch.save(trained_params, checkpoint_path)
     print(f"Meta-learned parameters saved to {checkpoint_path}")
 
