@@ -13,6 +13,7 @@ def download_model_to_hub(model_name, **kwargs):
 def get_model_and_tokenizer(
     model_name, device, pad_token=None, pad_token_side="left"
 ):
+    print(f"Loading model and tokenizer for {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
