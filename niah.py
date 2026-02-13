@@ -102,9 +102,7 @@ def main(
                 "gamma": 3.0,
                 "min_size": 8.0,
             },
-            value_cache_kwargs={
-                "cache_type": "baseline"
-            },
+            value_cache_kwargs={"cache_type": "baseline"},
         )
 
         out = model.generate(
