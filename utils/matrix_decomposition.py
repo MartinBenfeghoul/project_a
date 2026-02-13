@@ -1,3 +1,4 @@
+import math
 import torch
 
 
@@ -140,9 +141,6 @@ def mse(a, b):
     return ((a - b) ** 2).mean()
 
 
-import math
-
-
 def init_lora_like(A, B, alpha=None):
     # A: (..., T, r)  (one factor random)
     # B: (..., r, D)  (other factor zero so product starts at 0)
@@ -163,7 +161,7 @@ def learn_lora_matrix_sgd(M, k, lr=1e-2, n_iter=10, std=0.01):
 
     A, B = A.requires_grad_(True), B.requires_grad_(True)
     losses = []
-    for i in tqdm(range(n_iter)):
+    for _ in range(n_iter):
         # loss = mse(M, A @ B)
         loss = ((M - A @ B) ** 2).sum() / (b * H * L * T)
         gA, gB = torch.autograd.grad(loss, (A, B))
@@ -208,7 +206,9 @@ def learn_lora_matrix(
     return_loss=False,
     dtype=torch.float32,
     **kwargs,
-):
+) -> tuple[
+    torch.Tensor, torch.Tensor, list[float] | torch.Tensor, torch.Tensor
+]:
     if init_method == "svd":
         U, S, Vh = torch.linalg.svd(M, full_matrices=False)
 

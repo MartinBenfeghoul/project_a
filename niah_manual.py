@@ -137,7 +137,7 @@ def get_parser():
         "-m",
         "--model_name",
         type=str,
-        default="/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6",
+        default="meta-llama/Llama-3.2-1B-Instruct",  # "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
     )
     parser.add_argument(
         "-d", "--dataset", type=str, default="data/NIAH/multi-keys/1k"

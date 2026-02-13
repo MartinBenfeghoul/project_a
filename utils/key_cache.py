@@ -9,6 +9,14 @@ from .segmentation import find_thresholds
 from .cache import SingleTensorCache
 
 
+def check_recon_length(recon_keys, cache_kwargs):
+    if cache_kwargs is not None:
+        cache_position = cache_kwargs.get("cache_position", None)
+        if cache_position is not None:
+            assert recon_keys.size(-2) == cache_position[..., -1], \
+                f"Reconstructed keys have seq_len {recon_keys.size(-2)} but cache_position expects {cache_position[..., -1]}"
+
+
 class LowRankKeysCache(SingleTensorCache):
     def __init__(
         self,
@@ -91,14 +99,11 @@ class LowRankKeysCache(SingleTensorCache):
         )
         if self.prefill:
             self._decompose_keys(keys, layer_idx)
-            self.clear(layer_idx=layer_idx)
+            # self.clear(layer_idx=layer_idx)
             return keys
         elif self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)
-            cache_position = cache_kwargs.get("cache_position", None)
-        if cache_position is not None:
-            assert recon_keys.size(-2) == cache_position.size(-1), \
-            f"Reconstructed keys have seq_len {recon_keys.size(-2)} but cache_position has size {cache_position.size(-1)}"
+            # check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
         else:
             raise Exception(
@@ -226,12 +231,9 @@ class SurpriseLRKCache(SingleTensorCache):
             return keys
         elif not self.lr_keys.get(layer_idx, False):
             self._decompose_keys(keys, layer_idx)
-            self.clear(layer_idx=layer_idx, end_idx=self.events[0][-1])
+            # self.clear(layer_idx=layer_idx, end_idx=self.events[0][-1])
         recon_keys = self._reconstruct_keys(keys, layer_idx)
-        cache_position = cache_kwargs.get("cache_position", None)
-        if cache_position is not None:
-            assert recon_keys.size(-2) == cache_position.size(-1), \
-                f"Reconstructed keys have seq_len {recon_keys.size(-2)} but cache_position has size {cache_position.size(-1)}"
+        # check_recon_length(recon_keys, cache_kwargs)
         return recon_keys
 
 

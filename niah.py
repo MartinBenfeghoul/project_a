@@ -1,5 +1,4 @@
 import argparse
-import numpy as np
 import torch
 from datasets import load_from_disk
 
@@ -78,7 +77,6 @@ def main(
     n_samples = min(n_samples, len(ds))
     print(f"Testing NIAH over {n_samples} samples.")
     n_correct = 0
-    crs = []
     for i, batch in enumerate(ds):
         logger.recorded_cr = False
 

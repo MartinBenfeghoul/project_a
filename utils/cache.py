@@ -23,6 +23,7 @@ class SingleTensorDynamicLayer:
     but simplified for the single-tensor use case.
     """
 
+    # TODO: add all method from CacheLayerMixin as well (DynamicLayerr's Base)
     def __init__(self):
         self.tensor: torch.Tensor | None = None
         self.is_initialized = False
@@ -50,7 +51,7 @@ class SingleTensorDynamicLayer:
             self.tensor.zero_()
 
     def clear(self, end_idx: int | None = None) -> None:
-        # Created to avoid overwriting the reset method for full compliance with HF's DynamicLayer API
+        # custom API: Created to avoid overwriting the reset method for full compliance with HF's DynamicLayer API
         if self.is_initialized:
             if end_idx is None:
                 self.tensor = torch.tensor(
@@ -88,6 +89,7 @@ class SingleTensorCache:
     but simplified for the single-tensor use case.
     """
 
+    # TODO: add all method from Cache as well (DynamicCache's Base)
     def __init__(
         self,
         ddp_cache_data: Iterable[torch.Tensor] | None = None,
@@ -121,6 +123,7 @@ class SingleTensorCache:
             layer.reset()
 
     def clear(self, layer_idx: int | None = None, end_idx: int | None = None):
+        # custom API
         if layer_idx is not None:
             if layer_idx < len(self.layers):
                 self.layers[layer_idx].clear(end_idx=end_idx)

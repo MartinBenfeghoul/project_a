@@ -97,7 +97,6 @@ def main(
     )
 
     ppls = []
-    output_tokens = []
     for _ in range(16):
         out = model(
             inputs["input_ids"][..., pos : pos + 1],
@@ -121,7 +120,7 @@ def main(
 
 if __name__ == "__main__":
     # model_name = "meta-llama/Llama-3.2-1B-Instruct"
-    model_name = "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
+    model_name = "meta-llama/Llama-3.2-1B-Instruct"  # "/home/ma-user/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6"
     dataset = "HuggingFaceFW/fineweb-edu"  # "example_dataset", "HuggingFaceFW/fineweb-edu",
     cache_type = "surprise_lr"  # low_rank, surprise_lr
 

@@ -35,14 +35,11 @@ def main(
     **kwargs,
 ):
     """
-    The point of this function is to benchmark a key comrpession method on
+    The point of this function is to benchmark a key compression method on
      a matrix of sequence lengths and compression ratios/energy thresholds.
     """
 
     datasets = get_dataset_paths(seq_lens, data_dir)
-
-    comp_ratios = comp_ratios
-    energy_thresholds = energy_thresholds
     assert (
         comp_ratios is None or energy_thresholds is None
     ), "You can choose to either ablate over compression ratios or energy_thresholds"

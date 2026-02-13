@@ -47,7 +47,6 @@ def sequential_segmentation(keys, gamma=1.0, min_event_len=4):
     """Sequential K-Sim Segmentation as per original paper."""
     T, D = keys.shape
     boundaries = [0]
-    t0 = 0
     event_key_sum = keys[0].clone()
     event_len = 1
     score_history = []
@@ -76,7 +75,6 @@ def sequential_segmentation(keys, gamma=1.0, min_event_len=4):
             boundaries.append(t)
 
             # Reset Accumulators for new event
-            t0 = t
             event_key_sum = current_key.clone()
             event_len = 1
             score_history = []
@@ -104,7 +102,6 @@ def parallel_segmentation(keys, gamma=1.0, min_event_len=4):
         tail_indices = torch.arange(t0 + 1, T, device=keys.device)
         if len(tail_indices) == 0:
             break
-        P_prev = P[tail_indices - 1]
 
         # sum up to before current event started
         P_start = P[t0 - 1] if t0 > 0 else torch.zeros_like(P[0])
