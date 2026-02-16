@@ -8,3 +8,4 @@ wandb/*
 
 *.out
 scripts/lazy_runs/*
+results/*
