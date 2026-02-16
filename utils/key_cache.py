@@ -9,12 +9,20 @@ from .segmentation import find_thresholds
 from .cache import SingleTensorCache
 
 
-def check_recon_length(recon_keys, cache_kwargs):
+def get_expected_seq_len(cache_kwargs):
     if cache_kwargs is not None:
         cache_position = cache_kwargs.get("cache_position", None)
         if cache_position is not None:
-            assert recon_keys.size(-2) == cache_position[..., -1], \
-                f"Reconstructed keys have seq_len {recon_keys.size(-2)} but cache_position expects {cache_position[..., -1]}"
+            return cache_position[..., -1] + 1
+    return None
+
+
+def check_recon_length(recon_keys, cache_kwargs):
+    exp_seq_len = get_expected_seq_len(cache_kwargs)
+    if exp_seq_len is not None:
+        assert (
+            recon_keys.size(-2) == exp_seq_len
+        ), f"Reconstructed keys have seq_len {recon_keys.size(-2)} but cache_position expects {exp_seq_len}."
 
 
 class LowRankKeysCache(SingleTensorCache):
@@ -78,12 +86,8 @@ class LowRankKeysCache(SingleTensorCache):
     def _reconstruct_keys(self, keys, layer_idx):
         A, B = self.lr_keys[layer_idx]
         recon_keys = A @ B
-        if A.size(-2) < keys.size(-2):
-            # TODO: update this logic to handle evicted tokens - ie. keys is now only the new tokens since prefill
-            recon_keys = torch.cat(
-                [recon_keys, keys[..., A.size(-2) :, :]],
-                dim=-2,
-            )
+        if keys.size(-2) > 0:
+            recon_keys = torch.cat([recon_keys, keys], dim=-2)
         return recon_keys
 
     def update(
@@ -99,11 +103,11 @@ class LowRankKeysCache(SingleTensorCache):
         )
         if self.prefill:
             self._decompose_keys(keys, layer_idx)
-            # self.clear(layer_idx=layer_idx)
+            self.clear(layer_idx=layer_idx)
             return keys
         elif self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)
-            # check_recon_length(recon_keys, cache_kwargs)
+            check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
         else:
             raise Exception(
@@ -172,13 +176,15 @@ class SurpriseLRKCache(SingleTensorCache):
 
         self.events = []
         for b in range(surprise.size(0)):
-            self.events.append(
-                find_thresholds(
-                    surprise[b],
-                    threshold_param=self.gamma,
-                    min_size=self.min_size,
-                )[0]
-            )
+            events = find_thresholds(
+                surprise[b],
+                threshold_param=self.gamma,
+                min_size=self.min_size,
+            )[0]
+            # overwrite the final position to include the last token in prefill
+            # as there is no suprise for this position it won't be included
+            events[-1] += 1
+            self.events.append(events)
         self.prefill = False
 
     def _decompose_keys(self, keys, layer_idx):
@@ -200,6 +206,7 @@ class SurpriseLRKCache(SingleTensorCache):
             lr_keys.append(batch_svd_keys)
         self.lr_keys[layer_idx] = lr_keys
         self.comp_ratio = self.calc_compression_ratio()
+        return keys[..., ed:, :]
 
     def _reconstruct_keys(self, keys, layer_idx):
         lr_keys = self.lr_keys[layer_idx]
@@ -208,11 +215,8 @@ class SurpriseLRKCache(SingleTensorCache):
             batch_recon_keys = []
             for A, B in lr_keys[b]:
                 batch_recon_keys.append(A @ B)
-            ed = self.events[b][-1]
-            # TODO: move the below outside the loop as all batches will have the same ed
-            if ed < keys.size(-2):
-                # TODO: update this logic to handle evicted tokens - ie. keys is now only the new tokens since prefill
-                batch_recon_keys.append(keys[b, ..., ed:, :])
+            if keys.size(-2) > 0:
+                batch_recon_keys.append(keys[b])
             recon_keys.append(torch.cat(batch_recon_keys, dim=-2))
         return torch.stack(recon_keys, dim=0)
 
@@ -230,10 +234,10 @@ class SurpriseLRKCache(SingleTensorCache):
         if self.prefill:
             return keys
         elif not self.lr_keys.get(layer_idx, False):
-            self._decompose_keys(keys, layer_idx)
-            # self.clear(layer_idx=layer_idx, end_idx=self.events[0][-1])
+            keys = self._decompose_keys(keys, layer_idx)
+            self.clear(layer_idx=layer_idx, end_idx=self.events[0][-1])
         recon_keys = self._reconstruct_keys(keys, layer_idx)
-        # check_recon_length(recon_keys, cache_kwargs)
+        check_recon_length(recon_keys, cache_kwargs)
         return recon_keys
 
 

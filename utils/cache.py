@@ -58,7 +58,7 @@ class SingleTensorDynamicLayer:
                     [], dtype=self.dtype, device=self.device
                 )
             else:
-                self.tensor = self.tensor[..., :end_idx, :]
+                self.tensor = self.tensor[..., end_idx:, :]
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         if self.get_seq_length() > 0:

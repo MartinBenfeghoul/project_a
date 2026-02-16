@@ -5,7 +5,7 @@ import torch
 def find_thresholds(
     surprise, window=100, threshold_param=3.0, min_size=0, fixed_prob=None
 ):
-
+    # TODO: this code sucks.. (I wrote it) it's unclear and messy - rewrite!
     events_sur = []
     if fixed_prob is None:
         threshold = torch.zeros(len(surprise))
@@ -34,9 +34,11 @@ def find_thresholds(
                 events_sur.append(t)
             elif t - events_sur[-1] >= min_size:
                 events_sur.append(t)
-    # Append last timestep as a border
-    if events_sur[-1] != t:
-        events_sur.append(t)
+    # Append last timestep as a border - this one should be inclusive
+    if t - events_sur[-1] <= min_size:
+        events_sur[-1] = t + 1
+    else:
+        events_sur.append(t + 1)
 
     print("The threshold found", len(events_sur), "events including borders.")
     return events_sur, threshold

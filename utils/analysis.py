@@ -109,7 +109,7 @@ def plot_success_matrix(
 ):
     if crs is None:
         annot = True
-        fmt = ".1f"
+        fmt = ".2f"
     else:
         annot = np.empty_like(success_matrix, dtype=object)
         for i in range(success_matrix.shape[0]):

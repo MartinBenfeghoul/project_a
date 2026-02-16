@@ -15,7 +15,13 @@ def measure_perplexity(logits, target):
     return nll, ppl
 
 
-def make_hook(logger):
+def make_hook(logger, uncompressed_window=0):
+    """
+    :param logger: persistent logger object to record metrics
+    :param uncompressed_window: number of initial tokens to keep uncompressed 
+        (to get a more accurate estimate of initial perplexity)
+        NOTE: this doesn't do anything for non-surprise-based methods
+    """
     def hook(module, args, kwargs, output):
         input_ids = kwargs["input_ids"]
         seq_len = input_ids.size(-1)
@@ -36,7 +42,14 @@ def make_hook(logger):
                 f", seq_len={seq_len}",
             )
             if hasattr(pkv, "update_events"):
-                pkv.update_events(logits, input_ids)
+                if uncompressed_window > 0:
+                    label_ed = -uncompressed_window
+                else:
+                    label_ed = None
+                pkv.update_events(
+                    logits[..., : -1 - uncompressed_window, :],
+                    input_ids[..., 1:label_ed],
+                )
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
