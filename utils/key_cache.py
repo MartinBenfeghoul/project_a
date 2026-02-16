@@ -103,7 +103,7 @@ class LowRankKeysCache(SingleTensorCache):
         )
         if self.prefill:
             self._decompose_keys(keys, layer_idx)
-            self.clear(layer_idx=layer_idx)
+            self._evict(layer_idx=layer_idx)
             return keys
         elif self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)
@@ -237,7 +237,7 @@ class SurpriseLRKCache(SingleTensorCache):
             return keys
         elif not self.lr_keys.get(layer_idx, False):
             keys = self._decompose_keys(keys, layer_idx)
-            self.clear(layer_idx=layer_idx, end_idx=self.events[0][-1])
+            self._evict(layer_idx=layer_idx, end_idx=self.events[0][-1])
         recon_keys = self._reconstruct_keys(keys, layer_idx)
         check_recon_length(
             recon_keys, cache_kwargs

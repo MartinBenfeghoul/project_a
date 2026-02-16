@@ -33,32 +33,51 @@ class SingleTensorDynamicLayer:
     def lazy_initialization(self, tensor_states: torch.Tensor) -> None:
         self.dtype, self.device = tensor_states.dtype, tensor_states.device
         self.tensor = torch.tensor([], dtype=self.dtype, device=self.device)
+        self.seq_len = 0  # custom attribute
         self.is_initialized = True
 
     def update(self, tensor_states: torch.Tensor) -> torch.Tensor:
         if not self.is_initialized:
             self.lazy_initialization(tensor_states)
         self.tensor = torch.cat([self.tensor, tensor_states], dim=-2)
+        self.seq_len += tensor_states.shape[-2]
         return self.tensor
 
     def get_seq_length(self) -> int:
         if not self.is_initialized or self.tensor.numel() == 0:
             return 0
-        return self.tensor.shape[-2]
+        return self.seq_len  # custom changes
+
+    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
+        """
+        Return the length and offset of the cache, used to generate the mask
+        """
+        kv_offset = 0
+        query_length = cache_position.shape[0]
+        kv_length = self.get_seq_length() + query_length
+        return kv_length, kv_offset
 
     def reset(self) -> None:
         if self.is_initialized:
-            self.tensor.zero_()
+            self.tensor.zero_()  # TODO: why do they keep the tensor...?
 
-    def clear(self, end_idx: int | None = None) -> None:
+    def _evict(
+        self,
+        end_idx: int | None = None,
+        reset_seq_len: bool = False,
+    ) -> None:
         # custom API: Created to avoid overwriting the reset method for full compliance with HF's DynamicLayer API
         if self.is_initialized:
             if end_idx is None:
                 self.tensor = torch.tensor(
                     [], dtype=self.dtype, device=self.device
                 )
+                if reset_seq_len:
+                    self.seq_len = 0
             else:
                 self.tensor = self.tensor[..., end_idx:, :]
+                if reset_seq_len:
+                    self.seq_len = self.tensor.shape[-2]
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         if self.get_seq_length() > 0:
@@ -118,19 +137,26 @@ class SingleTensorCache:
             return 0
         return self.layers[layer_idx].get_seq_length()
 
+    def get_mask_sizes(
+        self, cache_position: torch.Tensor, layer_idx: int
+    ) -> tuple[int, int]:
+        if layer_idx >= len(self.layers):
+            return cache_position.shape[0], 0
+        return self.layers[layer_idx].get_mask_sizes(cache_position)
+
     def reset(self):
         for layer in self.layers:
             layer.reset()
 
-    def clear(self, layer_idx: int | None = None, end_idx: int | None = None):
+    def _evict(self, layer_idx: int | None = None, end_idx: int | None = None):
         # custom API
         if layer_idx is not None:
             if layer_idx < len(self.layers):
-                self.layers[layer_idx].clear(end_idx=end_idx)
+                self.layers[layer_idx]._evict(end_idx=end_idx)
         else:
             warnings.warn("Clearing all layers in cache.")
             for layer in self.layers:
-                layer.clear(end_idx=end_idx)
+                layer._evict(end_idx=end_idx)
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
         for layer in self.layers:
@@ -156,7 +182,7 @@ class SingleTensorCache:
             yield layer.tensor
 
 
-class CompressedCache(DynamicCache):
+class CompressedCache:
     """
     Dynamic cache that applies low-rank decomposition to keys
         and learns values in MLPs.
@@ -170,7 +196,7 @@ class CompressedCache(DynamicCache):
         value_cache_kwargs: dict | None = None,
         **kwargs,
     ):
-        super().__init__(ddp_cache_data=ddp_cache_data, config=config)
+        # super().__init__(ddp_cache_data=ddp_cache_data, config=config)
 
         if key_cache_kwargs is None:
             key_cache_kwargs = {"cache_type": "baseline"}
@@ -206,9 +232,7 @@ class CompressedCache(DynamicCache):
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
-
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
         return keys, values
 
@@ -243,3 +267,6 @@ class CompressedCache(DynamicCache):
             self.key_cache.update_events(*args, **kwargs)
         if hasattr(self.value_cache, "update_events"):
             self.value_cache.update_events(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.key_cache, name)
