@@ -107,7 +107,9 @@ class LowRankKeysCache(SingleTensorCache):
             return keys
         elif self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)
-            check_recon_length(recon_keys, cache_kwargs)
+            check_recon_length(
+                recon_keys, cache_kwargs
+            )  # TODO: remove later - keep during development for safety
             return recon_keys
         else:
             raise Exception(
@@ -119,7 +121,7 @@ class SurpriseLRKCache(SingleTensorCache):
     def __init__(
         self,
         *args,
-        decomposition_method: str = None,
+        decomposition_method: str,
         # decomposition method-agnostic args
         rank_selection: str = "comp_ratio",  # comp_ratio, energy
         comp_ratio: float = 2.0,
@@ -237,7 +239,9 @@ class SurpriseLRKCache(SingleTensorCache):
             keys = self._decompose_keys(keys, layer_idx)
             self.clear(layer_idx=layer_idx, end_idx=self.events[0][-1])
         recon_keys = self._reconstruct_keys(keys, layer_idx)
-        check_recon_length(recon_keys, cache_kwargs)
+        check_recon_length(
+            recon_keys, cache_kwargs
+        )  # TODO: remove later - keep during development for safety
         return recon_keys
 
 

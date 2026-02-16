@@ -85,9 +85,9 @@ def truncated_svd(
         dtype: compute dtype (SVD is typically more stable in float32)
 
     Returns:
-        U:  (..., m, k)
-        S:  (..., k)
-        Vh: (..., k, n)
+        U: (..., m, k) left singular vectors
+        S: (..., k) singular values
+        Vh: (..., k, n) right singular vectors (transposed)
     """
     if rank_selection == "comp_ratio":
         # TODO: benchmark this path vs the full then truncated path in terms of compute time + accuracy
@@ -131,9 +131,9 @@ def full_svd(M, dtype=torch.float32):
     """
     og_dtype = M.dtype
     M = M.to(dtype).contiguous()
-    U, S, V = torch.linalg.svd(M, full_matrices=False)  # V: (n, n)
+    U, S, V = torch.linalg.svd(M, full_matrices=False)
     U, S, V = (t.to(og_dtype) for t in (U, S, V))
-    return U, S, V  # Vh.transpose(-2, -1)
+    return U, S, V
 
 
 # Learned decomposition methods

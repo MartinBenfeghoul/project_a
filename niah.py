@@ -82,7 +82,6 @@ def main(
     n_iter: int,
     max_new_tokens: int,
 ):
-    """ThE cOdE iS tHe DoCsTrInG - Fredericoco 2026"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
@@ -98,7 +97,7 @@ def main(
         answer = batch["answer"]
 
         input_ids = tokenizer(
-            prompt, return_tensors="pt", add_special_tokens=False, device=device
+            prompt, return_tensors="pt", add_special_tokens=False
         )["input_ids"].to(device)
 
         past_key_values = CompressedCache(
