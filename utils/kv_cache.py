@@ -1,19 +1,21 @@
 import torch
 
+
 def generate_outputs_single_pass(ds, model, tokenizer, device):
     texts = [ds[i]["prompt"] for i in range(len(ds))]
-    inputs = tokenizer(texts, return_tensors='pt', padding=True).to(device)
+    inputs = tokenizer(texts, return_tensors="pt", padding=True).to(device)
     with torch.no_grad():
         out = model(
-            **inputs, 
+            **inputs,
             labels=inputs["input_ids"],
             use_cache=True,
         )
     return inputs, out
 
+
 def generate_kv_batched(ds, model, batch_size, tokenizer, device):
     texts = [ds[i]["prompt"] for i in range(len(ds))]
-    inputs = tokenizer(texts, return_tensors='pt', padding=True).to(device)
+    inputs = tokenizer(texts, return_tensors="pt", padding=True).to(device)
     input_ids = inputs["input_ids"]
     num_seq, seq_len = input_ids.shape
 
@@ -29,10 +31,10 @@ def generate_kv_batched(ds, model, batch_size, tokenizer, device):
             if token_idx < seq_len - 1:
                 with torch.no_grad():
                     out = model(
-                        input_ids=batch_ids[:, token_idx : token_idx+1],
+                        input_ids=batch_ids[:, token_idx : token_idx + 1],
                         past_key_values=cache,
-                        use_cache=True
+                        use_cache=True,
                     )
                     cache = out.past_key_values
-            
-    return cache, batch_ids[:, token_idx : token_idx+1]
+
+    return cache, batch_ids[:, token_idx : token_idx + 1]
