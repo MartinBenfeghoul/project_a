@@ -229,7 +229,7 @@ class CompressedCache(DynamicCache):
             value_cr = None
 
         if key_cr is not None and value_cr is not None:
-            return (key_cr + value_cr) / 2
+            return 2 / ((1 / key_cr) + (1 / value_cr))
         elif key_cr is not None:
             return key_cr
         elif value_cr is not None:
