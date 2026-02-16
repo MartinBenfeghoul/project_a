@@ -90,7 +90,7 @@ def truncated_svd(
         Vh: (..., k, n)
     """
     if rank_selection == "comp_ratio":
-        # TODO: benchmark this path vs the full then truncated path in terms of compute time
+        # TODO: benchmark this path vs the full then truncated path in terms of compute time + accuracy
         k = find_rank_wrt_cr(cr, M.size(-2), M.size(-1))
         return lowrank_svd(M, k, dtype=dtype, **kwargs)
     elif rank_selection == "energy":

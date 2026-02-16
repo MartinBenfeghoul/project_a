@@ -18,10 +18,11 @@ def measure_perplexity(logits, target):
 def make_hook(logger, uncompressed_window=0):
     """
     :param logger: persistent logger object to record metrics
-    :param uncompressed_window: number of initial tokens to keep uncompressed 
+    :param uncompressed_window: number of initial tokens to keep uncompressed
         (to get a more accurate estimate of initial perplexity)
         NOTE: this doesn't do anything for non-surprise-based methods
     """
+
     def hook(module, args, kwargs, output):
         input_ids = kwargs["input_ids"]
         seq_len = input_ids.size(-1)

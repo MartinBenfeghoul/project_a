@@ -162,8 +162,6 @@ class CompressedCache(DynamicCache):
         and learns values in MLPs.
     """
 
-    # TODO: make it fully HF-compatible by implementing the same API as DynamicCache and adding a config class
-
     def __init__(
         self,
         ddp_cache_data: Iterable[torch.Tensor] | None = None,
