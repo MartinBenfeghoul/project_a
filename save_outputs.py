@@ -43,6 +43,16 @@ def main(
     seq_len=1024,
     micro_bs=4,
 ):
+    """Run one forward pass and save the first batch inputs and model outputs,
+    including KV cache objects, to a file for later analysis.
+
+    Args:
+        model_name: Hugging Face model ID or local model path.
+        dataset: Dataset name/path used to build tokenized batches.
+        save_path: Output `.pt` file path for saved model outputs.
+        seq_len: Sequence length used when packing tokens.
+        micro_bs: Batch size used for data loading and packing buffer.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
 

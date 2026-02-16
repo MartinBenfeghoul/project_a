@@ -82,6 +82,24 @@ def main(
     n_iter: int,
     max_new_tokens: int,
 ):
+    """Evaluate NIAH retrieval accuracy with a custom compressed KV cache setup.
+
+    Args:
+        model_name: Hugging Face model ID or local model path.
+        dataset: Path to a disk-backed NIAH dataset.
+        n_samples: Number of dataset samples to evaluate.
+        cache_type: Key-cache compression strategy name.
+        decomposition_method: Low-rank decomposition method for keys.
+        comp_ratio: Target compression ratio when using ratio-based rank selection.
+        energy_threshold: Energy retention target when using energy-based rank selection.
+        rank_selection: Rank selection mode (e.g., by ratio or energy).
+        lr: Learning rate for iterative decomposition methods.
+        n_iter: Number of decomposition refinement iterations (used in both SVD and LoRA).
+        max_new_tokens: Maximum tokens to generate per sample.
+
+    Returns:
+        Tuple of `(success_rate, (compression_ratio_mean, compression_ratio_std))`.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
