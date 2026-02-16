@@ -213,6 +213,7 @@ class SurpriseLRKCache(SingleTensorCache):
     def _reconstruct_keys(self, keys, layer_idx):
         lr_keys = self.lr_keys[layer_idx]
         recon_keys = []
+        # TODO: Teresa suggests reconstructing events of the same size in batches
         for b in range(len(lr_keys)):
             batch_recon_keys = []
             for A, B in lr_keys[b]:
