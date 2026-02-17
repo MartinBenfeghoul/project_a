@@ -1,4 +1,14 @@
 .vscode
 __pycache__
+wget-log*
 
+*.out
+*.pt
+*.json
+*.jsonl
+*.png
 .env
+
+scripts/lazy_runs
+data/NIAH
+results
