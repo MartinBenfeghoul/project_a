@@ -2,7 +2,6 @@ import warnings
 import torch
 
 from transformers.cache_utils import (
-    DynamicCache,
     Any,
     Iterable,
     PreTrainedConfig,
