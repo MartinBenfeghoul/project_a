@@ -290,9 +290,6 @@ def meta_train(
         torch.save(epoch_params, epoch_checkpoint_path)
         print(f"Checkpoint saved to {epoch_checkpoint_path}")
 
-        if use_wandb:
-            wandb.save(epoch_checkpoint_path)
-
     return layer_mlps, inner_lr_params
 
 
@@ -383,7 +380,6 @@ def main():
     print(f"Meta-learned parameters saved to {checkpoint_path}")
 
     if use_wandb:
-        wandb.save(checkpoint_path)
         wandb.finish()
     
     return trained_params
