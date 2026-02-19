@@ -146,7 +146,7 @@ def meta_train(
 
     theta = [p for mlp in layer_mlps for p in mlp.parameters()]
 
-    if learn_inner_lr:
+    if learn_inner_lr: # TODO: maybe try doing this per head or per layer rather than per parameter
         inner_lr_params = [nn.Parameter(torch.tensor(inner_lr, dtype=torch.float32, device=device)) for _ in theta]
         meta_optimizer = torch.optim.Adam(theta + inner_lr_params, lr=meta_lr)
         print(f"Meta-learning inner LR: {len(inner_lr_params)} learnable LR params (init={inner_lr})")
@@ -183,7 +183,7 @@ def meta_train(
 
             should_log = (batch_idx % log_interval == 0)
 
-            theta_list, phi, inner_metrics = inner_loop_functional(
+            theta_list, phi, inner_metrics = inner_loop_functional( # phi = adapted_params
                 layer_mlps, kv_cache, support_slice,
                 inner_lr_params if inner_lr_params is not None else inner_lr,
                 inner_steps, loss_fn,
@@ -319,9 +319,22 @@ def main():
 
     model_name = config.model.name
     model_folder = model_name.split("/")[-1]
-    checkpoint_dir = os.path.join("checkpoints", model_folder)
+
+    tc = training_config
+    run_name = (
+        f"seq{tc.seq_len}"
+        f"_steps{tc.inner_steps}"
+        f"_mlr{tc.meta_lr}"
+        f"_ilr{tc.inner_lr}"
+        f"_learnlr{tc.get('learn_inner_lr', False)}"
+    )
+    checkpoint_dir = os.path.join("checkpoints", model_folder, run_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Checkpoints will be saved to: {checkpoint_dir}/")
+
+    config_save_path = os.path.join(checkpoint_dir, "config.yaml")
+    OmegaConf.save(config, config_save_path)
+    print(f"Config saved to: {config_save_path}")
 
     model, tokenizer = get_model_and_tokenizer(model_name, device) # TODO: check torch_dtype=torch.bfloat16
 
@@ -349,7 +362,7 @@ def main():
     meta_dataset = MetaLearningDataset(
         hf_dataset,
         tokenizer,
-        seq_len=training_config.seq_len,
+        seq_len=training_config.seq_len, # TODO: check whether sampling sequence length from a list of possible seq_lens improves 
         eos_id=tokenizer.eos_token_id,
     )
 
@@ -360,7 +373,7 @@ def main():
     )
 
     batches_per_epoch = training_config.get("batches_per_epoch", None)
-    checkpoint_path = os.path.join(checkpoint_dir, training_config.checkpoint_path)
+    checkpoint_path = os.path.join(checkpoint_dir, "meta_learned_mlps.pt")
     print(f"Starting meta-training... (batches_per_epoch: {batches_per_epoch or 'unlimited'})")
     layer_mlps, inner_lr_params = meta_train(
         model=model,

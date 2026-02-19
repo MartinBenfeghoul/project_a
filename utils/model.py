@@ -113,6 +113,10 @@ def load_pretrained_mlps(checkpoint_path, layer_mlps, device):
         layer_key = f"layer_{i}"
         if layer_key in checkpoint:
             mlp.load_state_dict(checkpoint[layer_key])
+    inner_lr_params = checkpoint.get("inner_lr_params", None)
+    if inner_lr_params is not None:
+        inner_lr_params = [lr.to(device) for lr in inner_lr_params]
+        print(f"Loaded meta-learned inner LR params from {checkpoint_path}")
     print(f"Loaded pre-trained MLP parameters from {checkpoint_path}")
-    return layer_mlps
+    return layer_mlps, inner_lr_params
 

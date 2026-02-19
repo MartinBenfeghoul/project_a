@@ -159,10 +159,11 @@ def run_experiment(model, tokenizer, splits, config, device):
             num_layer = len(kv_cache)
             old_total_nlls += avg_nll_
 
+            inner_lr_params = None
             if pretrained_mlps_path:
-                layer_mlps = load_pretrained_mlps(pretrained_mlps_path, layer_mlps, device)
+                layer_mlps, inner_lr_params = load_pretrained_mlps(pretrained_mlps_path, layer_mlps, device)
 
-            layer_mlps = train_mlps(layer_mlps, kv_cache, config.training)
+            layer_mlps = train_mlps(layer_mlps, kv_cache, config.training, inner_lr_params=inner_lr_params)
 
             del kv_cache
             torch.cuda.empty_cache()

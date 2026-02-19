@@ -10,7 +10,7 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def train_mlps(layer_mlps, kv_cache, config):
+def train_mlps(layer_mlps, kv_cache, config, inner_lr_params=None):
     """
     Train MLPs to predict values from keys in the KV cache.
 
@@ -18,6 +18,7 @@ def train_mlps(layer_mlps, kv_cache, config):
         layer_mlps: List of MLP modules, one per layer
         kv_cache: KV cache containing keys and values
         config: Training config with num_epochs, lr, loss_func, optimizer
+        inner_lr_params: Optional list of per-parameter LR tensors from meta-learning
 
     Returns:
         Trained layer_mlps
@@ -28,7 +29,13 @@ def train_mlps(layer_mlps, kv_cache, config):
     optimizer_name = config.get("optimizer", "adam")
 
     all_params = [p for mlp in layer_mlps for p in mlp.parameters()]
-    if optimizer_name.lower() == "sgd":
+    if inner_lr_params is not None:
+        param_groups = [{"params": [p], "lr": float(lr_val)} for p, lr_val in zip(all_params, inner_lr_params)]
+        if optimizer_name.lower() == "sgd":
+            optimizer = torch.optim.SGD(param_groups)
+        else:
+            optimizer = torch.optim.Adam(param_groups)
+    elif optimizer_name.lower() == "sgd":
         optimizer = torch.optim.SGD(all_params, lr=lr)
     else:
         optimizer = torch.optim.Adam(all_params, lr=lr)
