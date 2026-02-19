@@ -11,6 +11,7 @@ training:
   support_ratio: 0.7
   num_meta_epochs: 20
   eval_batch_size: 32
+  grad_accum_steps: 32  # accumulate gradients over N tasks before each optimizer step
   log_interval: 10  # log metrics every N batches
   batches_per_epoch: 500  # limit batches per epoch (null for unlimited)
 

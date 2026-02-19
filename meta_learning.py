@@ -143,6 +143,7 @@ def meta_train(
     log_interval = config.get("log_interval", 10)
     batches_per_epoch = config.get("batches_per_epoch", None)
     learn_inner_lr = config.get("learn_inner_lr", False)
+    grad_accum_steps = config.get("grad_accum_steps", 1)
 
     theta = [p for mlp in layer_mlps for p in mlp.parameters()]
 
@@ -162,14 +163,14 @@ def meta_train(
         epoch_loss = 0
         num_batches = 0
         epoch_start_time = time.time()
+        accum_count = 0
+        meta_optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(tqdm(dataloader, total=batches_per_epoch or len(dataloader))):
             if batches_per_epoch is not None and batch_idx >= batches_per_epoch:
                 break
 
             batch_start_time = time.time()
-
-            meta_optimizer.zero_grad()
 
             input_ids = batch["input_ids"].to(device)
             _, seq_len = input_ids.shape
@@ -203,27 +204,32 @@ def meta_train(
                 g_phi = torch.autograd.grad(query_loss, phi, create_graph=False, retain_graph=False)
                 g_lr = None
 
+            scale = 1.0 / grad_accum_steps
             for p_theta, g in zip(theta_list, g_phi):
                 if g is None:
                     continue
                 if p_theta.grad is None:
-                    p_theta.grad = g.detach().clone()
+                    p_theta.grad = g.detach() * scale
                 else:
-                    p_theta.grad.add_(g.detach())
+                    p_theta.grad.add_(g.detach() * scale)
 
             if g_lr is not None:
                 for lr_param, g in zip(inner_lr_params, g_lr):
                     if lr_param.grad is None:
-                        lr_param.grad = g.detach().clone()
+                        lr_param.grad = g.detach() * scale
                     else:
-                        lr_param.grad.add_(g.detach())
+                        lr_param.grad.add_(g.detach() * scale)
 
-            meta_optimizer.step()
+            accum_count += 1
+            if accum_count >= grad_accum_steps:
+                meta_optimizer.step()
+                meta_optimizer.zero_grad()
+                global_step += 1
+                accum_count = 0
 
             q = float(query_loss.detach().cpu())
             epoch_loss += q
             num_batches += 1
-            global_step += 1
 
             batch_time_ms = (time.time() - batch_start_time) * 1000
 
@@ -269,6 +275,13 @@ def meta_train(
                         log_dict["inner/learned_lr_max"] = max(lr_values)
 
                     wandb.log(log_dict, step=global_step)
+
+        # Flush any remaining accumulated gradients at end of epoch
+        if accum_count > 0:
+            meta_optimizer.step()
+            meta_optimizer.zero_grad()
+            global_step += 1
+            accum_count = 0
 
         epoch_time_sec = time.time() - epoch_start_time
         avg_loss = epoch_loss / max(num_batches, 1)
@@ -327,6 +340,7 @@ def main():
         f"_mlr{tc.meta_lr}"
         f"_ilr{tc.inner_lr}"
         f"_learnlr{tc.get('learn_inner_lr', False)}"
+        f"_gradaccm{tc.grad_accum_steps}"
     )
     checkpoint_dir = os.path.join("checkpoints", model_folder, run_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
