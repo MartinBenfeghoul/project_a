@@ -380,12 +380,6 @@ def main():
         use_wandb=use_wandb,
     )
 
-    trained_params = {f"layer_{i}": mlp.state_dict() for i, mlp in enumerate(layer_mlps)}
-    if inner_lr_params is not None:
-        trained_params["inner_lr_params"] = [lr.detach().cpu() for lr in inner_lr_params]
-    torch.save(trained_params, checkpoint_path)
-    print(f"Meta-learned parameters saved to {checkpoint_path}")
-
     if use_wandb:
         wandb.finish()
     
