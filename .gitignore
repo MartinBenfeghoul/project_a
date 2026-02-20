@@ -1,12 +1,19 @@
 .vscode
 __pycache__
+wget-log*
 
+*.out
 *.pt
 .env
 
 wandb/*
 
-*.out
-scripts/lazy_runs/*
-results/*
 checkpoints/*
+*.json
+*.jsonl
+*.png
+.env
+
+scripts/lazy_runs
+data/NIAH
+results

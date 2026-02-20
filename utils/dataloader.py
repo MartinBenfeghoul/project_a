@@ -3,13 +3,17 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import IterableDataset
 
+
 def load_data(
-        dataset_path: str = "HuggingFaceFW/fineweb-edu",
-        subset_name: str = "sample-100BT",
-    ):
-    if dataset_path == 'example_dataset':
+    dataset_path: str = "HuggingFaceFW/fineweb-edu",
+    subset_name: str = "sample-100BT",
+):
+    if dataset_path == "example_dataset":
         # Example dataset
-        return [{"prompt": "Hello, how are you?"}, {"prompt": "What is the capital of France?"}]
+        return [
+            {"prompt": "Hello, how are you?"},
+            {"prompt": "What is the capital of France?"},
+        ]
     ds = load_dataset(
         dataset_path,
         subset_name,
@@ -17,6 +21,7 @@ def load_data(
         streaming=True,
     )
     return ds
+
 
 def collate(batch):
     # batch is list of dicts containing 1D tensors of same length
@@ -29,7 +34,15 @@ class PackedTokens(IterableDataset):
     """
     Streams text samples, tokenizes, concatenates, and yields fixed-length blocks.
     """
-    def __init__(self, hf_dataset, tokenizer, seq_len: int, eos_id: int, buffer_tokens: int = 1_000_000):
+
+    def __init__(
+        self,
+        hf_dataset,
+        tokenizer,
+        seq_len: int,
+        eos_id: int,
+        buffer_tokens: int = 1_000_000,
+    ):
         self.ds = hf_dataset
         self.tok = tokenizer
         self.seq_len = seq_len

@@ -1,0 +1,8 @@
+[http]
+	sslCAInfo = /home/martinb/.mycertfs.crt
+	sslVerify = false
+	proxy = http://10.227.91.35:3128/
+[http "https://github.com"]
+	proxy = http://10.227.91.35:3128/
+[https]
+	proxy = http://10.227.91.35:3128/
