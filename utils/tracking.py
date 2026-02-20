@@ -7,14 +7,16 @@ import wandb
 def generate_run_name(config):
     """Generate a run name based on config parameters."""
     model_name = config.model.name.split("/")[-1]
-    training = config.training
+    t = config.training
 
     run_name = (
         f"{model_name}_"
-        f"mlr{training.meta_lr}_"
-        f"ilr{training.inner_lr}_"
-        f"is{training.inner_steps}_"
-        f"seq{training.seq_len}"
+        f"seq{t.seq_len}_"
+        f"steps{t.inner_steps}_"
+        f"mlr{t.meta_lr}_"
+        f"ilr{t.inner_lr}_"
+        f"learnlr{t.get('learn_inner_lr', False)}_"
+        f"gradaccum{t.grad_accum_steps}"
     )
     return run_name
 

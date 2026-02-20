@@ -125,15 +125,14 @@ def avg_nll(ds, model, batch_size, tokenizer, device, num_head=0, updated_cache=
             step_loss = step_loss * batch_mask[:, token_idx]
             batch_loss += step_loss
 
-            if token_idx < seq_len:
-                with torch.no_grad():
-                    out = model(
-                        input_ids=batch_ids[:, token_idx : token_idx + 1],
-                        past_key_values=cache,
-                        use_cache=True,
-                    )
-                    cache = out.past_key_values
-                    logits = out.logits[:, -1, :]
+            with torch.no_grad():
+                out = model(
+                    input_ids=batch_ids[:, token_idx : token_idx + 1],
+                    past_key_values=cache,
+                    use_cache=True,
+                )
+                cache = out.past_key_values
+                logits = out.logits[:, -1, :]
 
             if updated_cache:
                 cache = update_cache(

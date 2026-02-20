@@ -14,11 +14,12 @@ from tqdm import tqdm
 
 from utils import (
     get_model_and_tokenizer,
-    avg_nll,
     MLP,
     MetaLearningDataset,
     load_data,
     meta_collate,
+    get_loss_func,
+    generate_run_name,
     )
 
 from dotenv import load_dotenv
@@ -112,7 +113,6 @@ def compute_query_loss_functional(layer_mlps, kv_cache, query_slice, adapted_par
 
 def meta_train(
     model,
-    tokenizer,
     layer_mlps,
     dataloader,
     device,
@@ -126,7 +126,6 @@ def meta_train(
     inner_steps = config.inner_steps
     support_ratio = config.support_ratio
     num_meta_epochs = config.num_meta_epochs
-    eval_batch_size = config.eval_batch_size
     log_interval = config.get("log_interval", 10)
     batches_per_epoch = config.get("batches_per_epoch", None)
     learn_inner_lr = config.get("learn_inner_lr", False)
@@ -166,8 +165,13 @@ def meta_train(
             support_slice = slice(0, split_idx)
             query_slice = slice(split_idx, seq_len)
 
-            with torch.no_grad(): # TODO: maybe redundant
-                _, kv_cache = avg_nll(batch, model, eval_batch_size, tokenizer, device, already_tokenized=True)
+            with torch.no_grad():
+                out = model(
+                    input_ids=input_ids,
+                    attention_mask=batch["attention_mask"].to(device),
+                    use_cache=True,
+                )
+                kv_cache = out.past_key_values
 
             should_log = (batch_idx % log_interval == 0)
 
@@ -316,15 +320,7 @@ def main():
     model_name = config.model.name
     model_folder = model_name.split("/")[-1]
 
-    tc = training_config
-    run_name = (
-        f"seq{tc.seq_len}"
-        f"_steps{tc.inner_steps}"
-        f"_mlr{tc.meta_lr}"
-        f"_ilr{tc.inner_lr}"
-        f"_learnlr{tc.get('learn_inner_lr', False)}"
-        f"_gradaccm{tc.grad_accum_steps}"
-    )
+    run_name = generate_run_name(config)
     checkpoint_dir = os.path.join("checkpoints", model_folder, run_name)
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Checkpoints will be saved to: {checkpoint_dir}/")
@@ -371,15 +367,16 @@ def main():
 
     batches_per_epoch = training_config.get("batches_per_epoch", None)
     checkpoint_path = os.path.join(checkpoint_dir, "meta_learned_mlps.pt")
+    loss_fn = get_loss_func(training_config.get("loss_func", "mse"))
     print(f"Starting meta-training... (batches_per_epoch: {batches_per_epoch or 'unlimited'})")
     layer_mlps, inner_lr_params = meta_train(
         model=model,
-        tokenizer=tokenizer,
         layer_mlps=layer_mlps,
         dataloader=dataloader,
         device=device,
         config=training_config,
         checkpoint_path=checkpoint_path,
+        loss_fn=loss_fn,
         use_wandb=use_wandb,
     )
 
