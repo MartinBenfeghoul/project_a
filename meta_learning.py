@@ -110,19 +110,6 @@ def compute_query_loss_functional(layer_mlps, kv_cache, query_slice, adapted_par
     return total_loss, per_layer_losses
 
 
-def compute_weight_norm(params):
-    total_norm = 0.0
-    for p in params:
-        total_norm += p.detach().norm(2).item() ** 2
-    return total_norm ** 0.5
-
-
-def compute_update_norm(old_params, new_params):
-    total_norm = 0.0
-    for old_p, new_p in zip(old_params, new_params):
-        total_norm += (new_p.detach() - old_p).norm(2).item() ** 2
-    return total_norm ** 0.5
-
 def meta_train(
     model,
     tokenizer,
@@ -155,7 +142,7 @@ def meta_train(
         inner_lr_params = None
         meta_optimizer = torch.optim.Adam(theta, lr=meta_lr)
 
-    model.eval() # TODO: I think this might already be set when instantiating model
+    model.eval()
 
     global_step = 0
 
@@ -259,10 +246,6 @@ def meta_train(
                         "inner/adaptation_improvement": initial_support_loss - final_support_loss,
                         "perf/batch_time_ms": batch_time_ms,
                     }
-
-                    if inner_metrics["inner_losses"]:
-                        for step_idx, step_loss in enumerate(inner_metrics["inner_losses"]):
-                            log_dict[f"inner/support_loss_step_{step_idx}"] = step_loss
 
                     if per_layer_losses:
                         for layer_idx, layer_loss in enumerate(per_layer_losses):

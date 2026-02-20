@@ -5,13 +5,13 @@ import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
 
+from model.mlp import MLP
 from utils.passkey_data import generate_passkey_sample
 from utils import (
     get_model_and_tokenizer,
     generate_kv_batched,
     avg_nll,
     clean,
-    MLP,
     load_pretrained_mlps,
     train_mlps,
     set_seed,
