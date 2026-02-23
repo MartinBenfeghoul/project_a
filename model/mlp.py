@@ -20,7 +20,6 @@ class MLP(nn.Module):
         num_layers: int = 4,
         hidden_factor: int = 2,
         num_heads: int = 8,
-        device="cuda",
         deterministic_init: bool = True,
         intermediate_activation: str = "gelu",
     ):
@@ -30,7 +29,6 @@ class MLP(nn.Module):
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
         self.num_layers = num_layers
-        self.device = device
 
         curr_dim = head_dim
         hidden_dim = hidden_factor * head_dim
@@ -40,10 +38,8 @@ class MLP(nn.Module):
 
         for i in range(num_layers):
             out_dim = head_dim if i == num_layers - 1 else hidden_dim
-            w = nn.Parameter(torch.empty(num_heads, curr_dim, out_dim)).to(
-                self.device
-            )
-            b = nn.Parameter(torch.empty(num_heads, 1, out_dim)).to(self.device)
+            w = nn.Parameter(torch.empty(num_heads, curr_dim, out_dim))
+            b = nn.Parameter(torch.empty(num_heads, 1, out_dim))
 
             nn.init.kaiming_uniform_(w, a=math.sqrt(5))
             nn.init.zeros_(b)
