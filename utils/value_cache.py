@@ -42,6 +42,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.indices = None
         self.compressed_values = None
         self.is_compressed = False
+        self.prefill = True
         
     def lazy_initialization(
             self,
@@ -71,7 +72,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         errors = self.loss_func(v_approx, values, reduction='none').mean(dim=-1)
         return errors, v_approx   
     
-    def train(self, keys):
+    def train_mlp(self, keys):
         with torch.enable_grad():
             keys = keys
             values = self.tensor
@@ -117,21 +118,25 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
     def update(self, value_states: torch.Tensor, cache_kwargs: dict[str, Any] | None = None) -> torch.Tensor:
         
+        if cache_kwargs is None or "keys" not in cache_kwargs:
+            raise ValueError("MLPValueLayer requires keys in cache_kwargs")
+        
         keys = cache_kwargs["keys"]
 
         values = super().update(value_states)
 
-        is_prefill = self.compressed_values.numel() == 0
+        #is_prefill = self.compressed_values.numel() == 0
 
         print(f'Keys: {keys.shape}')
         print(f'Values: {values.shape}')
         
 
-        if is_prefill:
+        if self.is_prefill:
             #print(self.compressed_values.numel())
             #print("We are in prefill")
-            self.train(keys)
+            self.train_mlp(keys)
             self.compress(threshold_val=0.001, keys=keys)
+            self.is_prefill = False
             print(f'Indices {self.indices[0].shape}')
             print(f'Compressed values {self.compressed_values.shape}')
             return values
@@ -146,8 +151,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 "Prefill is set to False but the values where not compressed."
             ) 
 
+    # NEED TO FIX CROP POTENTIALLY NEED TO 1. REGENERATE FULL KEY, 
+    # 2. CROP KEY, 3. PASS FULL KEY (NOT CROPED) TO VALUE CACHE, 
+    # 4. DECOMPRESS AND CROP VALUE
     def crop(self, max_length: int) -> None:
-
         if self.is_compressed == True:
             self.decompress()
         
@@ -216,6 +223,7 @@ class MLPValueCache(SingleTensorCache):
         return values
 
     def calc_compression_ratio(self, keys):
+
         original_total = 0
         compressed_total = 0
 
@@ -223,6 +231,11 @@ class MLPValueCache(SingleTensorCache):
             _, h, t, d = keys.shape
 
             original = h * t * d
+
+            if not layer.is_compressed:
+                original_total += original
+                compressed_total += original
+                continue
 
             num_params = sum(p.numel() for p in layer.mlp.parameters())
             #print(num_params)
@@ -238,27 +251,6 @@ class MLPValueCache(SingleTensorCache):
             compressed_total += compressed
 
         return original_total / compressed_total
-
-    # NEED TO MOVE TRAIN TO PER LAYER?
-    def train(self, num_epochs: int = 5):
-        all_params = [p for layer in self.layers for p in layer.mlp.parameters()]
-        optimizer = self.optimizer_cls(all_params, lr=self.lr)
-        for _ in range(num_epochs):
-                optimizer.zero_grad()
-                total_loss = 0
-                
-                for layer in self.layers:
-                    keys = layer.keys               # NEED TO PASS THE KEYS SOMEHOW
-                    values = layer.tensor
-                    # keys/values shape: [1, num_head, num_token, head_dim]                    
-                    v_hat = layer.mlp(keys)
-                    loss = self.loss_func(v_hat, values)
-                    loss.backward()
-                    total_loss += loss.item()
-                
-                optimizer.step()
-
-                #print(f'Epoch {epoch} loss is {total_loss}')
 
     def compress(self, thresh) -> None:
         # runs train and then evict
