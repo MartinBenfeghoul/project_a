@@ -21,16 +21,21 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         mlp_num_layers: int,
         mlp_hidden_factor: int,
         mlp_num_heads: int,
+        target_perc: int = None,
+        threshold: int = None,
         optimizer_cls: str = "adam",
         num_epochs: int = 5,
         lr: float = 1.e-3,
         loss_func: str = "mse",
     ):
         super().__init__()
+        print(target_perc)
 
         self.mlp_num_layers = mlp_num_layers
         self.mlp_hidden_factor = mlp_hidden_factor
         self.mlp_num_heads = mlp_num_heads
+        self.target_perc = target_perc
+        self.threshold = threshold
 
         self.loss_func = LOSS_FUNC[loss_func]
         
@@ -87,13 +92,20 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 loss.backward()                
                 optimizer.step()
 
-    def compress(self, threshold_val, keys):
+    def compress(self, keys):
         v_approx = self.mlp(keys)
         errors = self.loss_func(self.tensor, v_approx, reduction='none').mean(dim=-1)
-        mask = errors > threshold_val
+        if self.threshold == None and self.target_perc == None:
+            raise ValueError("MLPValueLayer requires either a threshold or target_perc to compress values")
+        
+        if self.target_perc:
+            flatten_errors = errors.view(-1)
+            k = int(len(flatten_errors) * (self.target_perc / 100))
+            self.threshold = torch.topk(flatten_errors, k, largest=False).values[-1]
+
+        mask = errors > self.threshold
         self.indices = mask.nonzero(as_tuple=True)
         b, h, t = self.indices
-        num_kept = mask.sum().item()
         #print(f"Number of values kept (error > {threshold_val}): {num_kept}")
         self.compressed_values = self.tensor[b, h, t]
         #print(self.compressed_values.numel())
@@ -134,7 +146,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             #print(self.compressed_values.numel())
             #print("We are in prefill")
             self.train_mlp(keys)
-            self.compress(threshold_val=0.1, keys=keys)
+            self.compress(keys)
             self.prefill = False
             #print(f'Indices {self.indices[0].shape}')
             #print(f'Compressed values {self.compressed_values.shape}')
@@ -177,6 +189,7 @@ class MLPValueCache(SingleTensorCache):
         num_layers_per_mlp: list[int],
         hidden_factors_per_mlp: list[int],
         num_heads_per_mlp: list[int],
+        target_perc: list[int],
         target_model_num_heads: int = 8,
         lr: float = 1e-3,
         device: str = "cuda",
@@ -192,6 +205,7 @@ class MLPValueCache(SingleTensorCache):
         self.num_layers_per_mlp = num_layers_per_mlp
         self.hidden_factors_per_mlp = hidden_factors_per_mlp
         self.num_heads_per_mlp = num_heads_per_mlp
+        self.target_perc = target_perc
 
         self.target_model_num_heads = target_model_num_heads
 
@@ -207,6 +221,7 @@ class MLPValueCache(SingleTensorCache):
             mlp_num_layers=self.num_layers_per_mlp[layer_idx],
             mlp_hidden_factor=self.hidden_factors_per_mlp[layer_idx],
             mlp_num_heads=self.num_heads_per_mlp[layer_idx],
+            target_perc=self.target_perc[layer_idx],
             loss_func=self.loss_func,
             num_epochs=self.num_epochs
         )
