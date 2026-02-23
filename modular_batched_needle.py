@@ -123,10 +123,21 @@ def run_experiment(model, tokenizer, splits, config, device):
     pretrained_mlps_path = config.model.get("pretrained_mlps", None)
     num_epochs = config.training.num_epochs
     model_name = config.model.name.split("/")[-1]
-    output_file = f"results/{model_name}/{num_samples_per_split}_samples_{num_epochs}epoch.jsonl"
+    num_ml_epochs = OmegaConf.load(os.path.join(os.path.dirname(pretrained_mlps_path), "config.yaml")).training.num_meta_epochs if pretrained_mlps_path else 0
+    output_file = f"results/{model_name}/ml_{num_ml_epochs}_{num_samples_per_split}_samples_{num_epochs}_epoch.jsonl"
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     lr = config.training.lr
     loss_func = config.training.get("loss_func", "mse")
+
+    pretrained_checkpoint = None
+    inner_lr_params = None
+    if pretrained_mlps_path:
+        pretrained_checkpoint = torch.load(pretrained_mlps_path, map_location=device)
+        inner_lr_params = pretrained_checkpoint.get("inner_lr_params", None)
+        if inner_lr_params is not None:
+            inner_lr_params = [lr.to(device) for lr in inner_lr_params]
+            print(f"Loaded meta-learned inner LR params from {pretrained_mlps_path}")
+        print(f"Loaded pre-trained MLP parameters from {pretrained_mlps_path}")
 
     for split in splits:
         print(f"Currently running with sequence length {split}")
@@ -159,9 +170,13 @@ def run_experiment(model, tokenizer, splits, config, device):
             num_layer = len(kv_cache)
             old_total_nlls += avg_nll_
 
-            inner_lr_params = None
-            if pretrained_mlps_path:
-                layer_mlps, inner_lr_params = load_pretrained_mlps(pretrained_mlps_path, layer_mlps, device)
+            if pretrained_checkpoint is not None:
+                for i, mlp in enumerate(layer_mlps):
+                    layer_key = f"layer_{i}"
+                    if layer_key not in pretrained_checkpoint:
+                        raise KeyError(f"Expected '{layer_key}' in pretrained checkpoint but it was not found.")
+                    mlp.load_state_dict(pretrained_checkpoint[layer_key])
+
 
             layer_mlps = train_mlps(layer_mlps, kv_cache, config.training, inner_lr_params=inner_lr_params)
 

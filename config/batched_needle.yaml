@@ -1,6 +1,6 @@
 model:
   name: "meta-llama/Llama-3.1-8B-Instruct"
-  pretrained_mlps: "/home/t84411738/github/gist_vs_details/checkpoints/Llama-3.1-8B-Instruct/meta_learned_mlps_llama_epoch11.pt" 
+  pretrained_mlps: "checkpoints/Llama-3.1-8B-Instruct/meta_learned_mlps_llama_epoch11.pt" 
 
 training:
   num_epochs: 1

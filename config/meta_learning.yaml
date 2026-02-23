@@ -17,4 +17,4 @@ training:
 
 wandb:
   enabled: true
-project: "gist_vs_details"
+  project: "gist_vs_details"

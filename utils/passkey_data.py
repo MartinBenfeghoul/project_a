@@ -179,6 +179,3 @@ if __name__ == "__main__":
                 seq_length=length,
                 depth=depth,
             )
-
-
-    

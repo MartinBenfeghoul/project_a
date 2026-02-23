@@ -143,15 +143,3 @@ def avg_nll(ds, model, batch_size, tokenizer, device, num_head=0, updated_cache=
 
     final_mean = torch.cat(all_seq_means).mean().item()
     return final_mean, cache
-
-
-def compute_kv_loss(layer_mlps, kv_cache, token_slice=None, loss_fn=F.mse_loss):
-    total_loss = 0
-    for layer_idx, (keys, values) in enumerate(kv_cache):
-        if token_slice is not None:
-            keys = keys[:, :, token_slice, :]
-            values = values[:, :, token_slice, :]
-        v_hat = layer_mlps[layer_idx](keys)
-        total_loss += loss_fn(v_hat, values)
-    return total_loss
-

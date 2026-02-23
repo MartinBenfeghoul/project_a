@@ -50,5 +50,5 @@ cd "${base_dir}"
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate pem-llm
-  
+
 python3 meta_learning.py

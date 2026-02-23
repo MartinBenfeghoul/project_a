@@ -12,6 +12,7 @@ def parse_args():
     parser.add_argument(
         "-f", "--file_path",
         type=str,
+        required=True,
         help="Path to the JSONL results file",
     )
     parser.add_argument(

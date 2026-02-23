@@ -14,84 +14,95 @@ from tqdm import tqdm
 
 from utils import (
     get_model_and_tokenizer,
-    MLP,
     MetaLearningDataset,
     load_data,
     meta_collate,
     get_loss_func,
     generate_run_name,
     )
+from model.mlp import MLP
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 def inner_loop_functional(layer_mlps, kv_cache, support_slice, inner_lr, inner_steps, loss_fn=F.mse_loss, track_losses=False):
-    theta = [p for mlp in layer_mlps for p in mlp.parameters()]
-    phi = [p.detach().clone().requires_grad_(True) for p in theta]
+    theta = [p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)]
+    phi = [
+        (
+            [p.detach().clone().requires_grad_(True) for p in mlp.weights],
+            [p.detach().clone().requires_grad_(True) for p in mlp.biases],
+        )
+        for mlp in layer_mlps
+    ]
 
     inner_losses = [] if track_losses else None
 
     for _ in range(inner_steps):
         total_loss = 0.0
-        param_idx = 0
 
         for layer_idx, layer in enumerate(kv_cache.layers):
             k = layer.keys[:, :, support_slice, :].float()
             v = layer.values[:, :, support_slice, :].float()
 
             mlp = layer_mlps[layer_idx]
-            v_hat = functional_mlp_forward(mlp, k.float(), phi, param_idx)
-            param_idx += sum(1 for _ in mlp.parameters())
-
+            weights, biases = phi[layer_idx]
+            v_hat = functional_mlp_forward(mlp, k.float(), weights, biases)
             total_loss += loss_fn(v_hat, v)
 
         if track_losses:
             inner_losses.append(float(total_loss.detach().cpu()))
 
-        grads = torch.autograd.grad(total_loss, phi, create_graph=False, retain_graph=False)
+        phi_flat = [p for w, b in phi for p in w + b]
+        grads = torch.autograd.grad(total_loss, phi_flat, create_graph=False, retain_graph=False)
 
+        g_iter = iter(grads)
         if isinstance(inner_lr, list):
-            phi = [p - lr * g for p, lr, g in zip(phi, inner_lr, grads)]
+            lr_iter = iter(inner_lr)
+            phi = [
+                (
+                    [p - next(lr_iter) * next(g_iter) for p in w],
+                    [p - next(lr_iter) * next(g_iter) for p in b],
+                )
+                for w, b in phi
+            ]
         else:
-            phi = [p - inner_lr * g for p, g in zip(phi, grads)]
+            phi = [
+                (
+                    [p - inner_lr * next(g_iter) for p in w],
+                    [p - inner_lr * next(g_iter) for p in b],
+                )
+                for w, b in phi
+            ]
 
     final_support_loss = None
     if track_losses:
         with torch.no_grad():
             total = 0.0
-            param_idx = 0
             for layer_idx, layer in enumerate(kv_cache.layers):
                 k = layer.keys[:, :, support_slice, :].float()
                 v = layer.values[:, :, support_slice, :].float()
                 mlp = layer_mlps[layer_idx]
-                v_hat = functional_mlp_forward(mlp, k.float(), phi, param_idx)
-                param_idx += sum(1 for _ in mlp.parameters())
+                weights, biases = phi[layer_idx]
+                v_hat = functional_mlp_forward(mlp, k.float(), weights, biases)
                 total += loss_fn(v_hat, v).item()
             final_support_loss = total
 
     return theta, phi, {"inner_losses": inner_losses, "final_support_loss": final_support_loss}
 
 
-def functional_mlp_forward(mlp, x, all_params, start_idx):
+def functional_mlp_forward(mlp, x, weights, biases):
     # x: [B, H, T, D]
-    # params order from ParameterList: weights[0..N-1], then biases[0..N-1]
-    n = mlp.num_layers
     out = x
-
-    for i in range(n):
-        weight = all_params[start_idx + i]
-        bias = all_params[start_idx + n + i]
-        out = torch.matmul(out, weight) + bias
-        if i < n - 1:
+    for i in range(mlp.num_layers):
+        out = torch.matmul(out, weights[i]) + biases[i]
+        if i < mlp.num_layers - 1:
             out = mlp.intermediate_activation(out)
-
     return out
 
 
-def compute_query_loss_functional(layer_mlps, kv_cache, query_slice, adapted_params, loss_fn=F.mse_loss, track_per_layer=False):
+def compute_query_loss_functional(layer_mlps, kv_cache, query_slice, phi, loss_fn=F.mse_loss, track_per_layer=False):
     total_loss = 0
-    param_idx = 0
     per_layer_losses = [] if track_per_layer else None
 
     for layer_idx, layer in enumerate(kv_cache.layers):
@@ -99,8 +110,8 @@ def compute_query_loss_functional(layer_mlps, kv_cache, query_slice, adapted_par
         v = layer.values[:, :, query_slice, :].float()
 
         mlp = layer_mlps[layer_idx]
-        v_hat = functional_mlp_forward(mlp, k.float(), adapted_params, param_idx)
-        param_idx += sum(1 for _ in mlp.parameters())
+        weights, biases = phi[layer_idx]
+        v_hat = functional_mlp_forward(mlp, k.float(), weights, biases)
 
         layer_loss = loss_fn(v_hat, v)
         total_loss += layer_loss
@@ -131,7 +142,7 @@ def meta_train(
     learn_inner_lr = config.get("learn_inner_lr", False)
     grad_accum_steps = config.get("grad_accum_steps", 1)
 
-    theta = [p for mlp in layer_mlps for p in mlp.parameters()]
+    theta = [p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)]
 
     if learn_inner_lr: # TODO: maybe try doing this per head or per layer rather than per parameter
         inner_lr_params = [nn.Parameter(torch.tensor(inner_lr, dtype=torch.float32, device=device)) for _ in theta]
@@ -187,12 +198,13 @@ def meta_train(
                 track_per_layer=should_log
             )
 
+            phi_flat = [p for w, b in phi for p in w + b]
             if inner_lr_params is not None:
-                all_grads = torch.autograd.grad(query_loss, list(phi) + inner_lr_params, create_graph=False, retain_graph=False)
-                g_phi = all_grads[:len(phi)]
-                g_lr = all_grads[len(phi):]
+                all_grads = torch.autograd.grad(query_loss, phi_flat + inner_lr_params, create_graph=False, retain_graph=False)
+                g_phi = all_grads[:len(phi_flat)]
+                g_lr = all_grads[len(phi_flat):]
             else:
-                g_phi = torch.autograd.grad(query_loss, phi, create_graph=False, retain_graph=False)
+                g_phi = torch.autograd.grad(query_loss, phi_flat, create_graph=False, retain_graph=False)
                 g_lr = None
 
             scale = 1.0 / grad_accum_steps
@@ -383,8 +395,8 @@ def main():
     if use_wandb:
         wandb.finish()
     
-    return trained_params
+    return layer_mlps, inner_lr_params
 
 
 if __name__ == "__main__":
-    trained_params = main()
+    layer_mlps, inner_lr_params = main()
