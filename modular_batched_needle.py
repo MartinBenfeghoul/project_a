@@ -12,7 +12,6 @@ from utils import (
     generate_kv_batched,
     avg_nll,
     clean,
-    load_pretrained_mlps,
     train_mlps,
     set_seed,
     save_results,
