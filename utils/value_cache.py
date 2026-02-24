@@ -25,7 +25,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         optimizer_cls: str = "adam",
         num_epochs: int = 5,
         lr: float = 1.e-3,
-        loss_func: str = "mse",
+        loss_func: str = "mse"
     ):
         super().__init__()
 
@@ -49,10 +49,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.prefill = True
         self.compressed_len = 0
         
-    def lazy_initialization(
-            self,
-            value_states: torch.Tensor,
-            ) -> None:
+    def lazy_initialization(self, value_states: torch.Tensor) -> None:
         
         super().lazy_initialization(value_states)
         
@@ -71,7 +68,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             max_batch_size=value_states.shape[0] if self.per_sequence else None,
             ).to(device=value_states.device, dtype=value_states.dtype)  
         
-    def train_mlp(self, keys):
+    def train_mlp(self, keys: torch.Tensor) -> None:
         with torch.enable_grad():
             values = self.tensor.detach()
             keys = keys.detach()
@@ -85,7 +82,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 loss.backward()                
                 optimizer.step()
 
-    def compress(self, keys):
+    def compress(self, keys: torch.Tensor) -> None:
         v_approx = self.mlp(keys)
         errors = self.loss_func(self.tensor, v_approx, reduction='none').mean(dim=-1)
         if self.threshold == None and self.target_perc == None:
@@ -115,13 +112,13 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.seq_len = 0
         self.is_compressed = True
         
-    def temp_decompress(self, keys) -> torch.Tensor:
+    def temp_decompress(self, keys: torch.Tensor) -> torch.Tensor:
         values = self.mlp(keys[:, :, :self.compressed_len, :])
         b, h, t = self.indices
         values[b, h, t] = self.compressed_values
         return values
     
-    def decompress(self, keys) -> None:
+    def decompress(self, keys: torch.Tensor) -> None:
         if self.is_compressed == False:
             return
         values = self.mlp(keys)
@@ -136,7 +133,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             self.indices[2].new_empty(0),
         )
 
-    def update(self, value_states: torch.Tensor, cache_kwargs: dict[str, Any] | None = None) -> torch.Tensor:
+    def update(self, 
+               value_states: torch.Tensor, 
+               cache_kwargs: dict[str, Any] | None = None
+               ) -> torch.Tensor:
         
         if cache_kwargs is None or "keys" not in cache_kwargs:
             raise ValueError("MLPValueLayer requires keys in cache_kwargs")
@@ -216,6 +216,8 @@ class MLPValueCache(SingleTensorCache):
         self.optimizer_cls = optimizer
         self.loss_func = loss_func
         self.num_epochs = num_epochs
+        
+        self.comp_ratio = 0
 
     def _build_layer(self, layer_idx: int) -> MLPValueLayer:
         return MLPValueLayer(
@@ -233,7 +235,7 @@ class MLPValueCache(SingleTensorCache):
         value_states: torch.Tensor,
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
-    ):
+    ) -> torch.Tensor:
         while len(self.layers) <= layer_idx:
             new_idx = len(self.layers)
             self.layers.append(self._build_layer(new_idx))  
@@ -243,11 +245,9 @@ class MLPValueCache(SingleTensorCache):
             cache_kwargs=cache_kwargs,
         )
 
-        self.comp_ratio = self.calc_compression_ratio()
-
         return values
 
-    def calc_compression_ratio(self):
+    def calc_compression_ratio(self) -> float:
 
         original_total = 0
         compressed_total = 0

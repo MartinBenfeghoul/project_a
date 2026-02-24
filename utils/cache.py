@@ -247,7 +247,7 @@ class CompressedCache:
         else:
             key_cr = None
         if hasattr(self.value_cache, "comp_ratio"):
-            value_cr = self.value_cache.comp_ratio
+            value_cr = self.value_cache.calc_compression_ratio()
         else:
             value_cr = None
 
