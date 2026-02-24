@@ -4,7 +4,7 @@ from torch.nn.functional import mse_loss
 import torch
 from model.mlp import MLP
 from typing import Any
-from torch.nn import ModuleList
+
 LOSS_FUNC = {
     'mse': mse_loss
 }
@@ -112,6 +112,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.compressed_len = self.tensor.shape[2]
         B, H, _, D = self.tensor.shape
         self.tensor = self.tensor.new_empty((B, H, 0, D))
+        self.seq_len = 0
         self.is_compressed = True
         
     def temp_decompress(self, keys) -> torch.Tensor:
@@ -169,6 +170,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.compressed_len = max_length
         B, H, _, D = self.tensor.shape
         self.tensor = self.tensor.new_empty((B, H, 0, D))
+        self.seq_len = 0
         b, h, t = self.indices
 
         if self.indices[0].numel() == 0:
