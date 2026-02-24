@@ -67,11 +67,10 @@ class MLP(nn.Module):
             b = self.biases[i]
 
             if self.per_sequence:
-                w = w[:B]  # [B,H,Din,Dout]
-                b = b[:B]  # [B,H,1,Dout]
-                x = torch.einsum("bhtd,bhdo->bhto", x, w) + b
-            else:
-                x = torch.matmul(x, w) + b
+                w = w[:B]
+                b = b[:B]
+
+            x = torch.matmul(x, w) + b
 
             if i < self.num_layers - 1:
                 x = self.intermediate_activation(x)
