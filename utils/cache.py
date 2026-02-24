@@ -270,3 +270,7 @@ class CompressedCache:
 
     def __getattr__(self, name):
         return getattr(self.key_cache, name)
+
+    def __iter__(self):
+        for k_layer, v_layer in zip(self.key_cache.layers, self.value_cache.layers):
+            yield k_layer.tensor, v_layer.tensor
