@@ -1,12 +1,10 @@
 from .cache import SingleTensorCache, SingleTensorDynamicLayer
-from torch.optim import Optimizer, Adam
-from typing import Type
+from torch.optim import Adam
 from torch.nn.functional import mse_loss
 import torch
 from model.mlp import MLP
 from typing import Any
-import numpy as np
-
+from torch.nn import ModuleList
 LOSS_FUNC = {
     'mse': mse_loss
 }
@@ -21,6 +19,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         mlp_num_layers: int,
         mlp_hidden_factor: int,
         mlp_num_heads: int,
+        per_sequence: bool = False,
         target_perc: int = None,
         threshold: int = None,
         optimizer_cls: str = "adam",
@@ -29,11 +28,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         loss_func: str = "mse",
     ):
         super().__init__()
-        print(target_perc)
 
         self.mlp_num_layers = mlp_num_layers
         self.mlp_hidden_factor = mlp_hidden_factor
         self.mlp_num_heads = mlp_num_heads
+        self.per_sequence = per_sequence
         self.target_perc = target_perc
         self.threshold = threshold
 
@@ -67,17 +66,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             head_dim=self.head_dim, 
             num_layers=self.mlp_num_layers, 
             hidden_factor=self.mlp_hidden_factor, 
-            num_heads=self.num_heads, 
-            ).to(device=value_states.device, dtype=value_states.dtype)
+            num_heads=self.num_heads,
+            per_sequence=self.per_sequence,
+            max_batch_size=value_states.shape[0] if self.per_sequence else None,
+            ).to(device=value_states.device, dtype=value_states.dtype)  
         
-    def eval(self, keys) -> None:
-        values = self.tensor # [1, num_head, num_token, head_dim]
-        mlp = self.mlp
-        v_approx = mlp(keys)                 
-        # shape: [1, num_head, num_token]
-        errors = self.loss_func(v_approx, values, reduction='none').mean(dim=-1)
-        return errors, v_approx   
-    
     def train_mlp(self, keys):
         with torch.enable_grad():
             values = self.tensor.detach()
@@ -86,7 +79,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             optimizer = self.optimizer_cls(all_params, lr=self.lr)
             for _ in range(self.num_epochs):
                 optimizer.zero_grad()
-                # keys/values shape: [1, num_head, num_token, head_dim]                    
+                # keys/values shape: [num_sequences, num_head, num_token, head_dim]                    
                 v_hat = self.mlp(keys)
                 loss = self.loss_func(v_hat, values)
                 loss.backward()                
@@ -98,19 +91,27 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         if self.threshold == None and self.target_perc == None:
             raise ValueError("MLPValueLayer requires either a threshold or target_perc to compress values")
         
-        if self.target_perc:
-            flatten_errors = errors.view(-1)
-            k = int(len(flatten_errors) * (self.target_perc / 100))
-            self.threshold = torch.topk(flatten_errors, k, largest=False).values[-1]
+        if self.target_perc is not None:
+            if self.per_sequence:
+                B = errors.shape[0]
+                errors_b = errors.view(B, -1)
+                k = int(errors_b.shape[1] * (self.target_perc / 100))
+                thresh = torch.topk(errors_b, k, largest=False).values[:, -1]
+                mask = errors > thresh[:, None, None]
+            else:
+                flatten_errors = errors.view(-1)
+                k = int(len(flatten_errors) * (self.target_perc / 100))
+                self.threshold = torch.topk(flatten_errors, k, largest=False).values[-1]
+                mask = errors > self.threshold
+        elif self.threshold is not None:
+            mask = errors > self.threshold
 
-        mask = errors > self.threshold
         self.indices = mask.nonzero(as_tuple=True)
         b, h, t = self.indices
-        #print(f"Number of values kept (error > {threshold_val}): {num_kept}")
         self.compressed_values = self.tensor[b, h, t]
-        #print(self.compressed_values.numel())
         self.compressed_len = self.tensor.shape[2]
-        self.tensor = self.tensor.new_empty(0)
+        B, H, _, D = self.tensor.shape
+        self.tensor = self.tensor.new_empty((B, H, 0, D))
         self.is_compressed = True
         
     def temp_decompress(self, keys) -> torch.Tensor:
@@ -128,7 +129,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.tensor = values
         self.is_compressed = False
         self.compressed_values = self.compressed_values.new_empty(0)
-        self.indices = self.indices.new_empty(0)
+        self.indices = (
+            self.indices[0].new_empty(0),
+            self.indices[1].new_empty(0),
+            self.indices[2].new_empty(0),
+        )
 
     def update(self, value_states: torch.Tensor, cache_kwargs: dict[str, Any] | None = None) -> torch.Tensor:
         
@@ -138,24 +143,15 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         keys = cache_kwargs["keys"]
 
         values = super().update(value_states)
-
-        print(f'Keys: {keys.shape}')
-        print(f'Values: {values.shape}')
         
         if self.prefill:
-            #print(self.compressed_values.numel())
-            #print("We are in prefill")
             self.train_mlp(keys)
             self.compress(keys)
             self.prefill = False
-            #print(f'Indices {self.indices[0].shape}')
-            #print(f'Compressed values {self.compressed_values.shape}')
             return values
         elif self.is_compressed:
-            #print("We are generating")
             decomp_values = self.temp_decompress(keys)
             decomp_values = torch.cat([decomp_values, self.tensor], dim=-2)
-            print(f'Decompressed values {decomp_values.shape}')
             return decomp_values
         else:
             raise Exception(
@@ -171,7 +167,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         
         # Otherwise we generate a mask of the idx to keep and update the different tensors
         self.compressed_len = max_length
-        self.tensor = self.tensor.new_empty(0)
+        B, H, _, D = self.tensor.shape
+        self.tensor = self.tensor.new_empty((B, H, 0, D))
         b, h, t = self.indices
 
         if self.indices[0].numel() == 0:
@@ -191,6 +188,7 @@ class MLPValueCache(SingleTensorCache):
         num_heads_per_mlp: list[int],
         target_perc: list[int],
         target_model_num_heads: int = 8,
+        per_sequence: bool = False,
         lr: float = 1e-3,
         device: str = "cuda",
         optimizer: str = "adam",
@@ -206,6 +204,7 @@ class MLPValueCache(SingleTensorCache):
         self.hidden_factors_per_mlp = hidden_factors_per_mlp
         self.num_heads_per_mlp = num_heads_per_mlp
         self.target_perc = target_perc
+        self.per_sequence = per_sequence
 
         self.target_model_num_heads = target_model_num_heads
 
@@ -222,6 +221,7 @@ class MLPValueCache(SingleTensorCache):
             mlp_hidden_factor=self.hidden_factors_per_mlp[layer_idx],
             mlp_num_heads=self.num_heads_per_mlp[layer_idx],
             target_perc=self.target_perc[layer_idx],
+            per_sequence=self.per_sequence,
             loss_func=self.loss_func,
             num_epochs=self.num_epochs
         )
@@ -234,16 +234,12 @@ class MLPValueCache(SingleTensorCache):
     ):
         while len(self.layers) <= layer_idx:
             new_idx = len(self.layers)
-            self.layers.append(self._build_layer(new_idx))
-        
-        #print(f'This is layer {layer_idx}')
+            self.layers.append(self._build_layer(new_idx))  
 
         values = self.layers[layer_idx].update(
             value_states=value_states,
             cache_kwargs=cache_kwargs,
         )
-
-        #keys = cache_kwargs["keys"]
 
         self.comp_ratio = self.calc_compression_ratio()
 
@@ -266,7 +262,6 @@ class MLPValueCache(SingleTensorCache):
                 continue
 
             num_params = sum(p.numel() for p in layer.mlp.parameters())
-            #print(num_params)
             num_stored = layer.indices[0].numel() if layer.is_compressed else 0
 
             compressed = (
@@ -275,27 +270,11 @@ class MLPValueCache(SingleTensorCache):
                 + num_stored * 3
             )
 
-            print(f'{num_stored}')
-
             original_total += original
             compressed_total += compressed
 
         return original_total / compressed_total
-
-    def compress(self, thresh) -> None:
-        # runs train and then evict
-        self.train()
-        for layer in self.layers:
-            layer.compress(thresh)
     
-    def decompress(self, keys) -> None:  
-        for layer in self.layers:
-            layer.decompress(keys)
-    
-    #def __iter__(self):
-    #    for layer in self.layers:
-    #        yield layer.keys, layer.values, layer.mlp, getattr(layer, "_sliding_window_tensor", None)
-
 
 VALUE_CACHE_CLASSES = {
     "baseline": SingleTensorCache,
