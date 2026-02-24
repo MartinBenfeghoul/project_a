@@ -90,6 +90,7 @@ class SingleTensorDynamicLayer:
         if self.get_seq_length() <= max_length:
             return
         self.tensor = self.tensor[..., :max_length, :]
+        self.seq_len = max_length
 
     def batch_repeat_interleave(self, repeats: int) -> None:
         if self.get_seq_length() > 0:
@@ -267,6 +268,11 @@ class CompressedCache:
             self.key_cache.update_events(*args, **kwargs)
         if hasattr(self.value_cache, "update_events"):
             self.value_cache.update_events(*args, **kwargs)
+
+    def crop(self, max_length: int) -> None:
+         for k_layer, v_layer in zip(self.key_cache.layers, self.value_cache.layers):
+             k_layer.crop(max_length)
+             v_layer.crop(max_length)
 
     def __getattr__(self, name):
         return getattr(self.key_cache, name)
