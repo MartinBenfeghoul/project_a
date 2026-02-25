@@ -228,6 +228,7 @@ class MLPValueCache(SingleTensorCache):
             loss_func=self.loss_func,
             num_epochs=self.num_epochs,
             lr=self.lr,
+            optimizer_cls=self.optimizer_cls
         )
 
     def update(
