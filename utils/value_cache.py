@@ -37,7 +37,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.threshold = threshold
 
         self.loss_func = LOSS_FUNC[loss_func]
-        
         self.optimizer_cls = OPTIMIZER[optimizer_cls]
         self.num_epochs = num_epochs
         self.lr = lr
