@@ -27,7 +27,8 @@ def collate(batch):
     # batch is list of dicts containing 1D tensors of same length
     input_ids = torch.stack([b["input_ids"] for b in batch], dim=0)
     labels = torch.stack([b["labels"] for b in batch], dim=0)
-    return {"input_ids": input_ids, "labels": labels}
+    attn_mask = torch.stack([b["attention_mask"] for b in batch], dim=0)
+    return {"input_ids": input_ids, "labels": labels, "attention_mask": attn_mask}
 
 
 class PackedTokens(IterableDataset):
@@ -86,3 +87,23 @@ class PackedTokens(IterableDataset):
                 drop = buf_len - self.buffer_tokens
                 buf = buf[drop:]
                 buf_len = len(buf)
+
+
+class Dataset(PackedTokens):
+
+    def __iter__(self):
+        for sample in super().__iter__():
+            input_ids = sample["input_ids"]
+            yield {
+                "input_ids": input_ids,
+                "labels": input_ids.clone(),
+                "attention_mask": torch.ones_like(input_ids),
+            }
+
+
+def collate(batch):
+    return {
+        "input_ids": torch.stack([b["input_ids"] for b in batch]),
+        "labels": torch.stack([b["labels"] for b in batch]),
+        "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
+    }

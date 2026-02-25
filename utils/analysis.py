@@ -1,10 +1,38 @@
 import os
+import json
 import math
-import torch
-import numpy as np
+import argparse
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
+import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+SEQ_LENGTH_BUCKETS = [500, 1000, 2000, 4000, 8000, 10000]
+SEQ_LENGTH_LABELS = {
+    500: "500",
+    1000: "1k",
+    2000: "2k",
+    4000: "4k",
+    8000: "8k",
+    10000: "10k",
+}
+PLOTS = ["heatmap", "needle"]
+
+
+def load_results(results_file):
+    results = []
+    with open(results_file, "r") as f:
+        for line in f:
+            if line.strip():
+                results.append(json.loads(line))
+    return pd.DataFrame(results)
+
+
+def snap_to_bucket(n):
+    return min(SEQ_LENGTH_BUCKETS, key=lambda b: abs(b - n))
 
 
 def plot_energy_at_rank_k(energy, k):
@@ -138,17 +166,13 @@ def plot_success_matrix(
     fig.savefig(save_path, dpi=300)
 
 
-import json
-import pandas as pd
-
-if __name__ == "__main__":
-    # TODO: move this block to use functions above (namely plot_success_matrix - may need to adjust it)
-    path = "./results/needle_mse_long.jsonl"
-    save_path = "nll_heatmap_needle_mse.png"
-    colums = "num_token_per_training"
-    # values = "avg_nll_change_perc"
-    values = "avg_accuracy_modified_cache"
-    index = "percentage_changed_kv"
+def plot_needle_results(
+    path="./results/needle_mse_long.jsonl",
+    save_path="nll_heatmap_needle_mse.png",
+    columns="num_token_per_training",
+    values="avg_accuracy_modified_cache",
+    index="percentage_changed_kv",
+):
     ds = []
     with open(path) as f:
         for line in f:
@@ -163,31 +187,114 @@ if __name__ == "__main__":
                 new_l["avg_accuracy_modified_cache"] * 100
             )
             ds.append(new_l)
+
     if values == "avg_accuracy_modified_cache":
         vmin, vmax = 70, 98
     else:
         vmin, vmax = 2.70, 3
+
     df = pd.DataFrame(ds)
-    heatmap_df = df.pivot(
-        index=index,
-        columns=colums,
-        values=values,
-    )
+    heatmap_df = df.pivot(index=index, columns=columns, values=values)
+
     plt.figure(figsize=(10, 6))
-
     sns.heatmap(
-        heatmap_df,
-        annot=True,
-        fmt=".3f",
-        cmap="YlOrRd",
-        vmin=vmin,
-        vmax=vmax,
+        heatmap_df, annot=True, fmt=".3f", cmap="YlOrRd", vmin=vmin, vmax=vmax
     )
-
     plt.title("NLL with updated KV cache", fontsize=16)
     plt.xlabel("Sequence length")
     plt.ylabel("Percentage KV changed")
     plt.tight_layout()
-
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.show()
+
+
+def plot_heatmap(df, output_path, title=None):
+    df = df.copy()
+    df["seq_length"] = df["num_token"].apply(snap_to_bucket)
+
+    pivot = df.pivot(
+        index="avg_nll_change_perc",
+        columns="seq_length",
+        values="avg_accuracy_modified_cache",
+    )
+    pivot = pivot.sort_index(ascending=True)
+    pivot = pivot[sorted(pivot.columns)]
+
+    pivot.columns = [SEQ_LENGTH_LABELS[c] for c in pivot.columns]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    sns.heatmap(
+        pivot,
+        annot=True,
+        fmt=".3f",
+        cmap="YlGn",
+        vmin=pivot.min().min(),
+        vmax=pivot.max().max(),
+        cbar_kws={"label": "Accuracy"},
+        ax=ax,
+    )
+
+    ax.set_xlabel("Sequence Length")
+    ax.set_ylabel("Percentage of KV Changed")
+
+    if title:
+        ax.set_title(title)
+    else:
+        num_epochs = df.iloc[0].get("num_epoch", "?")
+        ax.set_title(f"{num_epochs} Test-Time Training Epochs")
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    print(f"Plot saved to {output_path}")
+
+    print("\nSummary Table:")
+    print(pivot)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Visualise experiment results")
+    parser.add_argument(
+        "-f",
+        "--file_path",
+        type=str,
+        required=True,
+        help="Path to the JSONL results file",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        default=None,
+        help="Output path for the plot (default: results_file stem + .png)",
+    )
+    parser.add_argument(
+        "--title",
+        type=str,
+        default=None,
+        help="Custom title for the plot",
+    )
+    parser.add_argument(
+        "--plot",
+        type=str,
+        choices=PLOTS,
+        default="heatmap",
+        help=f"Which plot to produce (default: heatmap). Choices: {PLOTS}",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    output_path = args.output or Path(args.file_path).stem + ".png"
+
+    if args.plot == "heatmap":
+        df = load_results(args.file_path)
+        plot_heatmap(df, output_path, args.title)
+    elif args.plot == "needle":
+        plot_needle_results(path=args.file_path, save_path=output_path)
+
+
+if __name__ == "__main__":
+    main()
