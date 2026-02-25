@@ -6,8 +6,7 @@ from .dataloader import (
     PackedTokens,
     load_data,
     collate,
-    MetaLearningDataset,
-    meta_collate,
+    Dataset,
 )
 from .training import train_mlps, set_seed
 from .cache import CompressedCache, SingleTensorCache, SingleTensorDynamicLayer

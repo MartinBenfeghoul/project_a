@@ -22,9 +22,9 @@ from tqdm import tqdm
 
 from utils import (
     get_model_and_tokenizer,
-    MetaLearningDataset,
+    Dataset,
     load_data,
-    meta_collate,
+    collate,
     get_loss_func,
     generate_run_name,
     save_checkpoint,
@@ -486,7 +486,7 @@ def main():
     print("Loading dataset...")
     hf_dataset = load_data()
 
-    meta_dataset = MetaLearningDataset(
+    meta_dataset = Dataset(
         hf_dataset,
         tokenizer,
         seq_len=training_config.seq_len,  # TODO: check whether sampling sequence length from a list of possible seq_lens improves
@@ -496,7 +496,7 @@ def main():
     dataloader = DataLoader(
         meta_dataset,
         batch_size=training_config.batch_size,
-        collate_fn=meta_collate,
+        collate_fn=collate,
     )
 
     batches_per_epoch = training_config.get("batches_per_epoch", None)
