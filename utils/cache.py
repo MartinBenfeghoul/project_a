@@ -233,6 +233,8 @@ class CompressedCache:
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
+        if cache_kwargs is None:
+            cache_kwargs = {}
         cache_kwargs["keys"] = keys
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
         return keys, values
