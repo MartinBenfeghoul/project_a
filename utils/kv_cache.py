@@ -36,8 +36,8 @@ def generate_kv_batched(ds, model, batch_size, tokenizer, device):
                         use_cache=True,
                     )
                     cache = out.past_key_values
-            
-    return cache, batch_ids[:, token_idx : token_idx+1]
+
+    return cache, batch_ids[:, token_idx : token_idx + 1]
 
 def generate_kv(seq, model, batch_len, tokenizer, device):
     inputs = tokenizer(seq["prompt"], return_tensors='pt', padding=True).to(device)
