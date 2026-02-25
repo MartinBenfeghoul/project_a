@@ -191,7 +191,6 @@ class MLPValueCache(SingleTensorCache):
         target_model_num_heads: int = 8,
         per_sequence: bool = False,
         lr: float = 1e-3,
-        device: str = "cuda",
         optimizer: str = "adam",
         loss_func: str = "mse",
         num_epochs: int = 5,
@@ -210,7 +209,6 @@ class MLPValueCache(SingleTensorCache):
         self.target_model_num_heads = target_model_num_heads
 
         self.lr = lr
-        self.device = device
 
         self.optimizer_cls = optimizer
         self.loss_func = loss_func
