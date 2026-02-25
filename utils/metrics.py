@@ -87,11 +87,21 @@ def update_cache(cache, updated_cache, num_head, token_idx, std=0, end=1):
         ]
     return cache
 
-def avg_nll(ds, model, batch_size, tokenizer, device, num_head=0, updated_cache=None, already_tokenized=False):
-    #texts = [ds["prompt"][i] + ds["answer"][i] for i in range(len(ds["prompt"]))]
+
+def avg_nll(
+    ds,
+    model,
+    batch_size,
+    tokenizer,
+    device,
+    num_head=0,
+    updated_cache=None,
+    already_tokenized=False,
+):
+    # texts = [ds["prompt"][i] + ds["answer"][i] for i in range(len(ds["prompt"]))]
     if not already_tokenized:
         texts = [ds[i]["prompt"] for i in range(len(ds))]
-        ds = tokenizer(texts, return_tensors='pt', padding=True).to(device)
+        ds = tokenizer(texts, return_tensors="pt", padding=True).to(device)
 
     input_ids = ds["input_ids"].to(device)
     attention_mask = ds["attention_mask"].to(device)

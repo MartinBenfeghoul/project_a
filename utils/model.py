@@ -10,8 +10,9 @@ load_dotenv()
 def download_model_to_hub(model_name, **kwargs):
     snapshot_download(model_name, **kwargs)
 
+
 def get_model_and_tokenizer(
-    model_name, device, pad_token=None, pad_token_side='left', torch_dtype=None
+    model_name, device, pad_token=None, pad_token_side="left", torch_dtype=None
 ):
     print(f"Loading model and tokenizer for {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -22,13 +23,13 @@ def get_model_and_tokenizer(
         device_map="auto",
     )
 
-
     tokenizer.pad_token = (
         tokenizer.eos_token if pad_token is None else pad_token
     )
     tokenizer.padding_side = pad_token_side
     model.eval()
     return model, tokenizer
+
 
 def clone_mlp_params(layer_mlps):
     return [[p.clone() for p in mlp.parameters()] for mlp in layer_mlps]

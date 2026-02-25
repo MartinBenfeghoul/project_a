@@ -3,6 +3,7 @@ import torch
 
 from .metrics import get_loss_func
 
+
 def set_seed(seed):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -30,7 +31,10 @@ def train_mlps(layer_mlps, kv_cache, config, inner_lr_params=None):
 
     all_params = [p for mlp in layer_mlps for p in mlp.parameters()]
     if inner_lr_params is not None:
-        param_groups = [{"params": [p], "lr": float(lr_val)} for p, lr_val in zip(all_params, inner_lr_params)]
+        param_groups = [
+            {"params": [p], "lr": float(lr_val)}
+            for p, lr_val in zip(all_params, inner_lr_params)
+        ]
         if optimizer_name.lower() == "sgd":
             optimizer = torch.optim.SGD(param_groups)
         else:

@@ -88,7 +88,7 @@ class PackedTokens(IterableDataset):
                 buf_len = len(buf)
 
 
-class MetaLearningDataset(PackedTokens):
+class Dataset(PackedTokens):
 
     def __iter__(self):
         for sample in super().__iter__():
@@ -100,7 +100,7 @@ class MetaLearningDataset(PackedTokens):
             }
 
 
-def meta_collate(batch):
+def collate(batch):
     return {
         "input_ids": torch.stack([b["input_ids"] for b in batch]),
         "labels": torch.stack([b["labels"] for b in batch]),
