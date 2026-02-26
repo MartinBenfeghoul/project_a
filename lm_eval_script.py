@@ -2,12 +2,14 @@ import os
 import json
 import argparse
 import time
+from omegaconf import OmegaConf
 import torch
 
 from lm_eval import evaluator
 from lm_eval.utils import make_table
 from lm_eval.tasks import TaskManager
 from lm_eval.models.huggingface import HFLM
+from lm_eval.models.utils_hf import stop_sequences_criteria
 
 from utils import CompressedCache, Logger, get_model_and_tokenizer
 
@@ -18,6 +20,15 @@ GEN_KWARGS = {
     "use_cache": True,
     "max_new_tokens": 512,
 }
+
+def get_tasks(tasks, print_tasks=True):
+    if len(tasks) == 1:
+        task_conf = OmegaConf.load('config/tasks.yaml')
+        if tasks[0] in task_conf:
+            tasks = OmegaConf.to_container(task_conf[tasks[0]], resolve=True)
+    if print_tasks:
+        print(f"Evaluating tasks: {tasks}")
+    return tasks
 
 
 def get_device(model):
@@ -48,38 +59,29 @@ def get_device_type():
 def list_of_strings(arg):
     return arg.split(",")
 
-def make_hook(logger):                                                                                                                                                                                                                                                                                                                            
-    """Forward hook matching the one in niah.py."""                                                                                                                                                                                                                                                                                               
-    def hook(module, args, kwargs, output):                                                                                                                                                                                                                                                                                                       
-        input_ids = kwargs["input_ids"]                                                                                                                                                                                                                                                                                                           
-        seq_len = input_ids.size(-1)                                                                                                                                                                                                                                                                                                              
-        pkv = output.past_key_values                                                                                                                                                                                                                                                                                                              
-        if seq_len > 1:                                                                                                                                                                                                                                                                                                                           
-            nll = output.loss                                                                                                                                                                                                                                                                                                                     
-            logits = output.logits                                                                                                                                                                                                                                                                                                                
-            if nll is None:                                                                                                                                                                                                                                                                                                                       
-                nll = module.loss_function(                                                                                                                                                                                                                                                                                                       
-                    logits=logits,                                                                                                                                                                                                                                                                                                                
-                    labels=input_ids,                                                                                                                                                                                                                                                                                                             
-                    vocab_size=module.config.vocab_size,                                                                                                                                                                                                                                                                                          
-                    **kwargs,                                                                                                                                                                                                                                                                                                                     
-                )                                                                                                                                                                                                                                                                                                                                 
-            ppl = torch.exp(nll)                                                                                                                                                                                                                                                                                                                  
-            print(f"Prefill: nll={nll.item():.1f}, ppl={ppl.item():.1f}, seq_len={seq_len}")                                                                                                                                                                                                                                                      
-            if hasattr(pkv, "update_events"):                                                                                                                                                                                                                                                                                                     
-                pkv.update_events(logits[..., :-1, :], input_ids[..., 1:])                                                                                                                                                                                                                                                                        
+def make_hook(logger):
+    def hook(module, args, kwargs, output):
+        # input_ids may be positional (e.g. self.model(inps, ...)) or keyword
+        input_ids = kwargs.get("input_ids", args[0] if args else None)
+        if input_ids is None:
+            return
+        seq_len = input_ids.size(-1)
+        pkv = output.past_key_values
+        if seq_len > 1:
+            if hasattr(pkv, "update_events"):
+                logits = output.logits
+                pkv.update_events(logits[..., :-1, :], input_ids[..., 1:])
         else:
-            if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:                                                                                                                                                                                                                                                                             
-                cr = pkv.comp_ratio                                                                                                                                                                                                                                                                                                               
-                if cr is not None:                                                                                                                                                                                                                                                                                                                
-                    print(f"Compression ratio: {cr:.2f}")                                                                                                                                                                                                                                                                                         
-                    logger.add_log("crs", cr)                                                                                                                                                                                                                                                                                                     
-                    logger.recorded_cr = True                                                                                                                                                                                                                                                                                                     
-    return hook                                      
-
+            if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
+                cr = pkv.comp_ratio
+                if cr is not None:
+                    print(f"Compression ratio: {cr:.2f}")
+                    logger.add_log("crs", cr)
+                    logger.recorded_cr = True
+    return hook
 
 class CompressedCacheHFLM(HFLM):
-    """HFLM subclass that injects a fresh CompressedCache into every model call."""
+    """HFLM subclass that injects a new CompressedCache into every model call."""
 
     def __init__(self, key_cache_kwargs, value_cache_kwargs, logger, **kwargs):
         super().__init__(**kwargs)
@@ -92,6 +94,7 @@ class CompressedCacheHFLM(HFLM):
             config=self.model.config,
             key_cache_kwargs=self._key_cache_kwargs,
             value_cache_kwargs=self._value_cache_kwargs,
+            verbose=False
         )
 
     def _model_call(self, inps, attn_mask=None, labels=None):
@@ -114,7 +117,29 @@ class CompressedCacheHFLM(HFLM):
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         self._logger.recorded_cr = False
         generation_kwargs["past_key_values"] = self._make_cache()
-        return super()._model_generate(context, max_length, stop, **generation_kwargs)
+        generation_kwargs["temperature"] = generation_kwargs.get("temperature", 0.0)
+        do_sample = generation_kwargs.get("do_sample")
+
+        if (temp := generation_kwargs.get("temperature")) == 0.0 and do_sample is None:
+            generation_kwargs["do_sample"] = do_sample = False
+
+        if do_sample is False and temp == 0.0:
+            generation_kwargs.pop("temperature", None)
+        stopping_criteria = stop_sequences_criteria(
+            self.tokenizer, stop, context.shape[1], context.shape[0]
+        )
+        with torch.autocast(
+            device_type=self.device.type,
+            dtype=self.mixed_precision_dtype,
+            enabled=self.mixed_precision_dtype is not None,
+        ):
+            return self.model.generate(
+                input_ids=context,
+                max_length=max_length,
+                stopping_criteria=stopping_criteria,
+                pad_token_id=self.tokenizer.pad_token_id,
+                **generation_kwargs,
+            )
 
 
 @torch.no_grad()
@@ -124,7 +149,7 @@ def main(args):
 
     model, tokenizer = get_model_and_tokenizer(args.model_name, device)
     logger = Logger()
-    # model.register_forward_hook(make_hook(logger), with_kwargs=True) # TODO: is this needed?
+    model.register_forward_hook(make_hook(logger), with_kwargs=True)
 
     key_cache_kwargs = {
         "cache_type": args.cache_type,
@@ -149,9 +174,8 @@ def main(args):
         truncation=False,
         trust_remote_code=True,
     )
-
-    print(f"Evaluating tasks: {args.tasks}")
-    tm = TaskManager(metadata={"tokenizer": args.model_name})
+    args.tasks = get_tasks(args.tasks)
+    tm = TaskManager(metadata={"tokenizer": args.model_name}) # TODO: this was only needed for running scrolls, check if still needed
 
     if args.log_efficiency_metrics:
         torch.cuda.empty_cache()
@@ -204,7 +228,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="LM eval harness script")
     parser.add_argument("-m", "--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
     parser.add_argument("-o", "--output_dir", type=str, default="./results")
-    parser.add_argument("-t", "--tasks", type=list_of_strings, default="lm_eval")
+    parser.add_argument("-t", "--tasks", type=list_of_strings, default=["lm_eval"])
     parser.add_argument("--limit", type=int, default=None, help="Max number of samples per task.")
     parser.add_argument("--log_efficiency_metrics", action="store_true")
     parser.add_argument("--debug", action="store_true")
