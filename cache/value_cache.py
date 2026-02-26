@@ -67,13 +67,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             batch_size=value_states.shape[0] if self.per_sequence else None,
             ).to(device=value_states.device, dtype=value_states.dtype)
     
-    def get_seq_length(self) -> int:
-        if self.is_compressed:
-            # logical KV = compressed prefix + uncompressed suffix
-            suffix = 0 if self.tensor is None else self.tensor.shape[2]
-            return self.compressed_len + suffix
-        return super().get_seq_length()
-    
     def train_mlp(self, keys: torch.Tensor) -> None:
         with torch.enable_grad():
             values = self.tensor.detach()
@@ -107,8 +100,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         b, h, t = self.indices
         self.value_residuals = self.tensor[b, h, t] - v_approx[b, h, t]
         self.compressed_len = self.tensor.shape[2]
-        self.tensor = self.tensor[..., :0, :] 
-        self.seq_len = 0
+        self.tensor = self.tensor[..., :0, :]
         self.is_compressed = True
 
     def decompress(self, keys: torch.Tensor, temp: bool = True) -> torch.Tensor:
