@@ -105,17 +105,16 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
         self.indices = mask.nonzero(as_tuple=True)
         b, h, t = self.indices
-        self.value_residuals = self.tensor[b, h, t]
+        self.value_residuals = self.tensor[b, h, t] - v_approx[b, h, t]
         self.compressed_len = self.tensor.shape[2]
-        B, H, _, D = self.tensor.shape
-        self.tensor = self.tensor.new_empty((B, H, 0, D))
+        self.tensor = self.tensor[..., :0, :] 
         self.seq_len = 0
         self.is_compressed = True
 
     def decompress(self, keys: torch.Tensor, temp: bool = True) -> torch.Tensor:
         values = self.mlp(keys[:, :, :self.compressed_len, :])
         b, h, t = self.indices
-        values[b, h, t] = self.value_residuals
+        values[b, h, t] += self.value_residuals
         if not temp:
             self.tensor = values
             self._reset_residuals()
@@ -125,9 +124,9 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.is_compressed = False
         self.value_residuals = self.value_residuals.new_empty(0)
         self.indices = (
-            self.indices[0].new_empty(0),
-            self.indices[1].new_empty(0),
-            self.indices[2].new_empty(0),
+            self.indices[0][:0],
+            self.indices[1][:0],
+            self.indices[2][:0],
         )        
 
     def update(self, 
@@ -157,6 +156,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             )
 
     def crop(self, max_length: int) -> None:
+        raise NotImplementedError("crop not implemented")
         logical_len = self.get_seq_length()
         if logical_len <= max_length:
             return
