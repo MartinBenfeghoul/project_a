@@ -3,6 +3,18 @@ import re
 import torch.nn.functional as F
 
 
+def cosine_loss(v_hat, v_true):
+    """Cosine similarity loss between predicted and true values."""
+    return 1 - F.cosine_similarity(v_hat, v_true, dim=-1).mean()
+
+
+def get_loss_func(loss_func_name):
+    """Get loss function by name."""
+    if loss_func_name == "cosine":
+        return cosine_loss
+    return F.mse_loss
+
+
 def clean(text):
     pre_dot = text.split(".")[0]
     digits = "".join(re.findall(r"\d", pre_dot))
@@ -77,14 +89,22 @@ def update_cache(cache, updated_cache, num_head, token_idx, std=0, end=1):
 
 
 def avg_nll(
-    ds, model, batch_size, tokenizer, device, num_head=0, updated_cache=None
+    ds,
+    model,
+    batch_size,
+    tokenizer,
+    device,
+    num_head=0,
+    updated_cache=None,
+    already_tokenized=False,
 ):
     # texts = [ds["prompt"][i] + ds["answer"][i] for i in range(len(ds["prompt"]))]
-    texts = [ds[i]["prompt"] for i in range(len(ds))]
-    inputs = tokenizer(texts, return_tensors="pt", padding=True).to(device)
+    if not already_tokenized:
+        texts = [ds[i]["prompt"] for i in range(len(ds))]
+        ds = tokenizer(texts, return_tensors="pt", padding=True).to(device)
 
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
+    input_ids = ds["input_ids"].to(device)
+    attention_mask = ds["attention_mask"].to(device)
     num_seq, seq_len = input_ids.shape
 
     all_seq_means = []
@@ -115,15 +135,14 @@ def avg_nll(
             step_loss = step_loss * batch_mask[:, token_idx]
             batch_loss += step_loss
 
-            if token_idx < seq_len:
-                with torch.no_grad():
-                    out = model(
-                        input_ids=batch_ids[:, token_idx : token_idx + 1],
-                        past_key_values=cache,
-                        use_cache=True,
-                    )
-                    cache = out.past_key_values
-                    logits = out.logits[:, -1, :]
+            with torch.no_grad():
+                out = model(
+                    input_ids=batch_ids[:, token_idx : token_idx + 1],
+                    past_key_values=cache,
+                    use_cache=True,
+                )
+                cache = out.past_key_values
+                logits = out.logits[:, -1, :]
 
             if updated_cache:
                 cache = update_cache(

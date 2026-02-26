@@ -4,6 +4,11 @@ wget-log*
 
 *.out
 *.pt
+.env
+
+wandb/*
+
+checkpoints/*
 *.json
 *.jsonl
 *.png
