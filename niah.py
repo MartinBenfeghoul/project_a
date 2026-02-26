@@ -65,27 +65,8 @@ def main(
     model_name: str,
     dataset: str,
     n_samples: int,
-    # key cache params
-    k_cache_type: str,
-    decomposition_method: str,
-    comp_ratio: float,
-    energy_threshold: float,
-    rank_selection: str,
-    k_lr: float,
-    n_iter: int,
-    # value cache params
-    v_cache_type: str,
-    num_layers_per_mlp: list[int],
-    hidden_factors_per_mlp: list[int],
-    num_heads_per_mlp: list[int],
-    per_sequence: bool,
-    target_perc: list[int],
-    target_model_num_heads: int,
-    v_lr: float,
-    optimizer: str,
-    loss_func: str,
-    num_epochs: int,
-    # generation
+    key_cache_kwargs: dict,
+    value_cache_kwargs: dict,
     max_new_tokens: int,
 ):
     """Evaluate NIAH retrieval accuracy with a custom compressed KV cache setup.
@@ -94,24 +75,8 @@ def main(
         model_name: Hugging Face model ID or local model path.
         dataset: Path to a disk-backed NIAH dataset.
         n_samples: Number of dataset samples to evaluate.
-        k_cache_type: Key-cache compression strategy name.
-        decomposition_method: Low-rank decomposition method for keys.
-        comp_ratio: Target compression ratio when using ratio-based rank selection.
-        energy_threshold: Energy retention target when using energy-based rank selection.
-        rank_selection: Rank selection mode (e.g., by ratio or energy).
-        k_lr: Learning rate for iterative decomposition methods.
-        n_iter: Number of decomposition refinement iterations (used in both SVD and LoRA).
-        v_cache_type: Name of the value-cache compression strategy.
-        num_layers_per_mlp: Number of layers in each per-layer MLP of the base model.
-        hidden_factors_per_mlp: Hidden dimensionality (factor size) of each per-layer MLP.
-        num_heads_per_mlp: Number of heads used by each per-layer MLP.
-        per_sequence: Whether MLP parameters are shared across sequences within a batch.
-        target_perc: Percentage of value residuals that are not stored for each base model layer.
-        target_model_num_heads: Number of attention heads in the base model.
-        v_lr: Learning rate for MLP test-time training.
-        optimizer: Optimizer class used for MLP test-time training.
-        loss_func: Loss function used for MLP test-time training.
-        num_epochs: Number of training epochs for MLP test-time training.
+        key_cache_kwargs: Dictionary of key-cache compression parameters passed to CompressedCache.
+        value_cache_kwargs: Dictionary of value-cache compression parameters passed to CompressedCache.
         max_new_tokens: Maximum tokens to generate per sample.
 
     Returns:
@@ -135,33 +100,6 @@ def main(
         input_ids = tokenizer(
             prompt, return_tensors="pt", add_special_tokens=False
         )["input_ids"].to(device)
-
-        key_cache_kwargs = {
-            "cache_type": k_cache_type,
-            "decomposition_method": decomposition_method,
-            "comp_ratio": comp_ratio,
-            "energy_threshold": energy_threshold,
-            "rank_selection": rank_selection,
-            "lr": k_lr,
-            "n_iter": n_iter,
-            "gamma": 3.0,
-            "min_size": 8.0,
-        }
-
-        value_cache_kwargs = {
-            "cache_type": v_cache_type,
-            "num_layers_per_mlp": num_layers_per_mlp,
-            "hidden_factors_per_mlp": hidden_factors_per_mlp,
-            "num_heads_per_mlp": num_heads_per_mlp,
-            "per_sequence": per_sequence,
-            "target_perc": target_perc,
-            "target_model_num_heads": target_model_num_heads,
-            "lr": v_lr,
-            "device": device,
-            "optimizer": optimizer,
-            "loss_func": loss_func,
-            "num_epochs": num_epochs,
-        }
 
         past_key_values = CompressedCache(
             config=model.config,
@@ -238,4 +176,37 @@ def get_parser():
 if __name__ == "__main__":
     parser = get_parser()
     args, unknown = parser.parse_known_args()
-    main(**vars(args))
+    key_cache_kwargs = {
+        "cache_type": args.k_cache_type,
+        "decomposition_method": args.decomposition_method,
+        "comp_ratio": args.comp_ratio,
+        "energy_threshold": args.energy_threshold,
+        "rank_selection": args.rank_selection,
+        "lr": args.k_lr,
+        "n_iter": args.n_iter,
+        "gamma": 3.0,
+        "min_size": 8.0,
+    }
+
+    value_cache_kwargs = {
+        "cache_type": args.v_cache_type,
+        "num_layers_per_mlp": args.num_layers_per_mlp,
+        "hidden_factors_per_mlp": args.hidden_factors_per_mlp,
+        "num_heads_per_mlp": args.num_heads_per_mlp,
+        "per_sequence": args.per_sequence,
+        "target_perc": args.target_perc,
+        "target_model_num_heads": args.target_model_num_heads,
+        "lr": args.v_lr,
+        "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        "optimizer": args.optimizer,
+        "loss_func": args.loss_func,
+        "num_epochs": args.num_epochs,
+    }
+    main(
+        model_name=args.model_name,
+        dataset=args.dataset,
+        n_samples=args.n_samples,
+        key_cache_kwargs=key_cache_kwargs,
+        value_cache_kwargs=value_cache_kwargs,
+        max_new_tokens=args.max_new_tokens,
+    )
