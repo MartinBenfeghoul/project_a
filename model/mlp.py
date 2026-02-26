@@ -19,7 +19,7 @@ class MLP(nn.Module):
         hidden_factor: int = 2,
         num_heads: int = 8,
         per_sequence: bool = False,
-        max_batch_size: int | None = None,
+        batch_size: int | None = None,
         deterministic_init: bool = True,
         intermediate_activation: str = "gelu",
     ):
@@ -29,7 +29,7 @@ class MLP(nn.Module):
         self.num_layers = num_layers
         self.per_sequence = per_sequence
         self.num_heads = num_heads
-        self.max_batch_size = max_batch_size
+        self.batch_size = batch_size
 
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
@@ -44,12 +44,12 @@ class MLP(nn.Module):
             out_dim = head_dim if i == num_layers - 1 else hidden_dim
 
             if per_sequence:
-                assert max_batch_size is not None
-                w = nn.Parameter(torch.empty(max_batch_size, num_heads, curr_dim, out_dim))
-                b = nn.Parameter(torch.empty(max_batch_size, num_heads, 1, out_dim))
+                assert batch_size is not None
+                w = nn.Parameter(torch.empty(batch_size, num_heads, curr_dim, out_dim))
+                b = nn.Parameter(torch.empty(batch_size, num_heads, 1, out_dim))
             else:
-                w = nn.Parameter(torch.empty(num_heads, curr_dim, out_dim))
-                b = nn.Parameter(torch.empty(num_heads, 1, out_dim))
+                w = nn.Parameter(torch.empty(1, num_heads, curr_dim, out_dim))
+                b = nn.Parameter(torch.empty(1, num_heads, 1, out_dim))
 
             nn.init.kaiming_uniform_(w, a=math.sqrt(5))
             nn.init.zeros_(b)
@@ -60,15 +60,9 @@ class MLP(nn.Module):
 
     def forward(self, x):
         # x: [B, H, T, D]
-        B = x.shape[0]
-
         for i in range(self.num_layers):
             w = self.weights[i]
             b = self.biases[i]
-
-            if self.per_sequence:
-                w = w[:B]
-                b = b[:B]
 
             x = torch.matmul(x, w) + b
 

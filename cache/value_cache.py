@@ -43,7 +43,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
         self.mlp = None
         self.indices = None
-        self.compressed_values = None
+        self.value_residuals = None
         self.is_compressed = False
         self.prefill = True
         self.compressed_len = 0
@@ -56,17 +56,24 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
         self.indices = torch.tensor([], dtype=torch.long, device=value_states.device)
 
-        self.compressed_values = torch.tensor([], dtype=value_states.dtype, device=value_states.device)
+        self.value_residuals = torch.tensor([], dtype=value_states.dtype, device=value_states.device)
 
         self.mlp = MLP(
             head_dim=self.head_dim, 
             num_layers=self.mlp_num_layers, 
             hidden_factor=self.mlp_hidden_factor, 
-            num_heads=self.num_heads,
+            num_heads=self.mlp_num_heads,
             per_sequence=self.per_sequence,
-            max_batch_size=value_states.shape[0] if self.per_sequence else None,
+            batch_size=value_states.shape[0] if self.per_sequence else None,
             ).to(device=value_states.device, dtype=value_states.dtype)
-        
+    
+    def get_seq_length(self) -> int:
+        if self.is_compressed:
+            # logical KV = compressed prefix + uncompressed suffix
+            suffix = 0 if self.tensor is None else self.tensor.shape[2]
+            return self.compressed_len + suffix
+        return super().get_seq_length()
+    
     def train_mlp(self, keys: torch.Tensor) -> None:
         with torch.enable_grad():
             values = self.tensor.detach()
@@ -88,49 +95,40 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             raise ValueError("MLPValueLayer requires either a threshold or target_perc to compress values")
         
         if self.target_perc is not None:
-            if self.per_sequence:
-                B = errors.shape[0]
-                errors_b = errors.view(B, -1)
-                k = int(errors_b.shape[1] * (self.target_perc / 100))
-                thresh = torch.topk(errors_b, k, largest=False).values[:, -1]
-                mask = errors > thresh[:, None, None]
-            else:
-                flatten_errors = errors.view(-1)
-                k = int(len(flatten_errors) * (self.target_perc / 100))
-                self.threshold = torch.topk(flatten_errors, k, largest=False).values[-1]
-                mask = errors > self.threshold
+            B = errors.shape[0]
+            errors_b = errors.view(B, -1)
+            k = int(errors_b.shape[1] * (self.target_perc / 100))
+            thresh = torch.topk(errors_b, k, largest=False).values[:, -1]
+            mask = errors > thresh[:, None, None]
         elif self.threshold is not None:
             mask = errors > self.threshold
 
         self.indices = mask.nonzero(as_tuple=True)
         b, h, t = self.indices
-        self.compressed_values = self.tensor[b, h, t]
+        self.value_residuals = self.tensor[b, h, t]
         self.compressed_len = self.tensor.shape[2]
         B, H, _, D = self.tensor.shape
         self.tensor = self.tensor.new_empty((B, H, 0, D))
         self.seq_len = 0
         self.is_compressed = True
 
-    def temp_decompress(self, keys: torch.Tensor) -> torch.Tensor:
+    def decompress(self, keys: torch.Tensor, temp: bool = True) -> torch.Tensor:
         values = self.mlp(keys[:, :, :self.compressed_len, :])
         b, h, t = self.indices
-        values[b, h, t] = self.compressed_values
+        values[b, h, t] = self.value_residuals
+        if not temp:
+            self.tensor = values
+            self._reset_residuals()
         return values
     
-    def decompress(self, keys: torch.Tensor) -> None:
-        if not self.is_compressed:
-            return
-        values = self.mlp(keys)
-        b, h, t = self.indices
-        values[b, h, t] = self.compressed_values
-        self.tensor = values
+    def _reset_residuals(self):
         self.is_compressed = False
-        self.compressed_values = self.compressed_values.new_empty(0)
+        self.value_residuals = self.value_residuals.new_empty(0)
         self.indices = (
             self.indices[0].new_empty(0),
             self.indices[1].new_empty(0),
             self.indices[2].new_empty(0),
-        )
+        )        
 
     def update(self, 
                value_states: torch.Tensor, 
@@ -148,10 +146,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             self.train_mlp(keys)
             self.compress(keys)
             self.prefill = False
-            return values.detach()
+            return values
         elif self.is_compressed:
-            decomp_values = self.temp_decompress(keys)
-            decomp_values = torch.cat([decomp_values, self.tensor], dim=-2).detach()
+            decomp_values = self.decompress(keys)
+            decomp_values = torch.cat([decomp_values, self.tensor], dim=-2)
             return decomp_values
         else:
             raise Exception(
@@ -159,26 +157,34 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             )
 
     def crop(self, max_length: int) -> None:
-        if self.compressed_len < max_length: 
-            # If the cache isn't compressed or max_length is larger just crop the suffix tensor
-            new_max_length = max_length - self.compressed_len
-            super().crop(new_max_length)
+        logical_len = self.get_seq_length()
+        if logical_len <= max_length:
             return
-        
-        # Otherwise we generate a mask of the idx to keep and update the different tensors
-        self.compressed_len = max_length
-        B, H, _, D = self.tensor.shape
-        self.tensor = self.tensor.new_empty((B, H, 0, D))
-        self.seq_len = 0
-        b, h, t = self.indices
 
-        if self.indices[0].numel() == 0:
+        if self.is_compressed:
+            # case 1: crop inside compressed prefix
+            if self.compressed_len >= max_length:
+                b, h, t = self.indices
+                keep = t < max_length
+                self.indices = (b[keep], h[keep], t[keep])
+                self.value_residuals = self.value_residuals[keep]
+                self.compressed_len = max_length
+                # suffix is emptied
+                self.tensor = self.tensor[..., :0, :]
+                return
+            # case 2: crop suffix only
+            suffix_max = max_length - self.compressed_len
+
+            if suffix_max < 0:
+                suffix_max = 0
+
+            if self.tensor.shape[2] > suffix_max:
+                self.tensor = self.tensor[..., :suffix_max, :]
             return
-    
-        keep_idx = t < max_length
 
-        self.indices = (b[keep_idx], h[keep_idx], t[keep_idx])
-        self.compressed_values = self.compressed_values[keep_idx]
+        # uncompressed we use parent as everything is store in self.tensor
+        super().crop(max_length)
+
 
 class MLPValueCache(SingleTensorCache):
     def __init__(
@@ -273,6 +279,8 @@ class MLPValueCache(SingleTensorCache):
 
             original_total += original
             compressed_total += compressed
+
+        assert compressed_total != 0
 
         return original_total / compressed_total
 

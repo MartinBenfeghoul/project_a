@@ -1,19 +1,11 @@
 import argparse
 import torch
 from datasets import load_from_disk
-
+from cache import CompressedCache
 from utils import (
-    CompressedCache,
     Logger,
     get_model_and_tokenizer,
 )
-
-
-def measure_perplexity(logits, target):
-    nll = torch.nn.functional.cross_entropy(logits, target, reduction="mean")
-    ppl = torch.exp(nll)
-    return nll, ppl
-
 
 def make_hook(logger, uncompressed_window=0):
     """
@@ -102,19 +94,31 @@ def main(
         model_name: Hugging Face model ID or local model path.
         dataset: Path to a disk-backed NIAH dataset.
         n_samples: Number of dataset samples to evaluate.
-        cache_type: Key-cache compression strategy name.
+        k_cache_type: Key-cache compression strategy name.
         decomposition_method: Low-rank decomposition method for keys.
         comp_ratio: Target compression ratio when using ratio-based rank selection.
         energy_threshold: Energy retention target when using energy-based rank selection.
         rank_selection: Rank selection mode (e.g., by ratio or energy).
-        lr: Learning rate for iterative decomposition methods.
+        k_lr: Learning rate for iterative decomposition methods.
         n_iter: Number of decomposition refinement iterations (used in both SVD and LoRA).
+        v_cache_type: Name of the value-cache compression strategy.
+        num_layers_per_mlp: Number of layers in each per-layer MLP of the base model.
+        hidden_factors_per_mlp: Hidden dimensionality (factor size) of each per-layer MLP.
+        num_heads_per_mlp: Number of heads used by each per-layer MLP.
+        per_sequence: Whether MLP parameters are shared across sequences within a batch.
+        target_perc: Percentage of value residuals that are not stored for each base model layer.
+        target_model_num_heads: Number of attention heads in the base model.
+        v_lr: Learning rate for MLP test-time training.
+        optimizer: Optimizer class used for MLP test-time training.
+        loss_func: Loss function used for MLP test-time training.
+        num_epochs: Number of training epochs for MLP test-time training.
         max_new_tokens: Maximum tokens to generate per sample.
 
     Returns:
         Tuple of `(success_rate, (compression_ratio_mean, compression_ratio_std))`.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
 
@@ -143,8 +147,6 @@ def main(
             "gamma": 3.0,
             "min_size": 8.0,
         }
-
-        #key_cache_kwargs = {"cache_type": "baseline"}
 
         value_cache_kwargs = {
             "cache_type": v_cache_type,
