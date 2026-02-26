@@ -9,8 +9,6 @@ from .dataloader import (
     Dataset,
 )
 from .training import train_mlps, set_seed
-from .cache import CompressedCache, SingleTensorCache, SingleTensorDynamicLayer
-from .key_cache import KEY_CACHE_CLASSES
 from .args import str2bool, list_of_strings, list_of_floats, args_type
 from .analysis import plot_success_matrix
 from .logging import (
