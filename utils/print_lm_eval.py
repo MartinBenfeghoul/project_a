@@ -12,6 +12,22 @@ LM_EVAL_TASKS = {
     "mmlu": "acc,none"
 }
 
+RULER_TASKS = {
+    "niah_single_1": "4096,none",
+    "niah_single_2": "4096,none",
+    "niah_single_3": "4096,none",
+    "niah_multikey_1": "4096,none",
+    "niah_multikey_2": "4096,none",
+    "niah_multikey_3": "4096,none",
+    "niah_multiquery": "4096,none",
+    "niah_multivalue": "4096,none",
+    "ruler_vt": "4096,none",
+    "ruler_cwe": "4096,none",
+    "ruler_fwe": "4096,none",
+    "ruler_qa_hotpot": "4096,none",
+    "ruler_qa_squad": "4096,none"
+}
+
 LONGBENCH_TASKS = {
     "longbench_2wikimqa": "qa_f1_score,none",
     "longbench_gov_report": "rouge_score,none",
@@ -31,7 +47,7 @@ LONGBENCH_TASKS = {
 }
 
 
-ALL_TASKS = {**LM_EVAL_TASKS, **LONGBENCH_TASKS}
+ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS}
 
 
 def get_task_dict(benchmark_name):
@@ -39,6 +55,8 @@ def get_task_dict(benchmark_name):
         task_dict = LONGBENCH_TASKS
     elif benchmark_name == 'lm_eval':
         task_dict = LM_EVAL_TASKS
+    elif benchmark_name == 'ruler':
+        task_dict = RULER_TASKS
     else:
         raise ValueError(f"Unknown benchmark: {benchmark_name}")
     return task_dict
@@ -63,7 +81,7 @@ def parse_args():
     )
     parser.add_argument(
         "-b", "--benchmark", type=str, default='lm_eval',
-        choices=['lm_eval', 'longbench'],
+        choices=['lm_eval', 'ruler', 'longbench'],
         help="Benchmark to use for evaluation. Default is 'lm_eval'."
     )
     return parser.parse_args()
