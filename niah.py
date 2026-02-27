@@ -83,7 +83,7 @@ def main(
         Tuple of `(success_rate, (compression_ratio_mean, compression_ratio_std))`.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
 
