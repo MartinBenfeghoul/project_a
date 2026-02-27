@@ -4,8 +4,8 @@ from transformers.cache_utils import Any
 
 # from transformers.models.llama.modeling_llama import LlamaAttention
 
-from .matrix_decomposition import DECOMP_METHODS
-from .segmentation import find_thresholds
+from utils.matrix_decomposition import DECOMP_METHODS
+from utils.segmentation import find_thresholds
 from .cache import SingleTensorCache
 
 

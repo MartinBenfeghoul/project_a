@@ -2,7 +2,6 @@ import warnings
 import torch
 
 from transformers.cache_utils import (
-    DynamicCache,
     Any,
     Iterable,
     PreTrainedConfig,
@@ -86,11 +85,13 @@ class SingleTensorDynamicLayer:
             )
 
     def crop(self, max_length: int) -> None:
+        raise NotImplementedError("crop not implemented")
         if max_length < 0:
             max_length = self.get_seq_length() - abs(max_length)
         if self.get_seq_length() <= max_length:
             return
         self.tensor = self.tensor[..., :max_length, :]
+        self.seq_len = max_length
 
     def batch_repeat_interleave(self, repeats: int) -> None:
         if self.get_seq_length() > 0:
@@ -163,6 +164,7 @@ class SingleTensorCache:
             layer.reorder_cache(beam_idx)
 
     def crop(self, max_length: int):
+        raise NotImplementedError("crop not implemented")
         for layer in self.layers:
             layer.crop(max_length)
 
@@ -233,6 +235,9 @@ class CompressedCache:
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
+        if cache_kwargs is None:
+            cache_kwargs = {}
+        cache_kwargs["keys"] = keys
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
         return keys, values
 
@@ -246,7 +251,7 @@ class CompressedCache:
         else:
             key_cr = None
         if hasattr(self.value_cache, "comp_ratio"):
-            value_cr = self.value_cache.comp_ratio
+            value_cr = self.value_cache.calc_compression_ratio()
         else:
             value_cr = None
 
@@ -268,5 +273,15 @@ class CompressedCache:
         if hasattr(self.value_cache, "update_events"):
             self.value_cache.update_events(*args, **kwargs)
 
+    def crop(self, max_length: int) -> None:
+        raise NotImplementedError("crop not implemented")
+        for k_layer, v_layer in zip(self.key_cache.layers, self.value_cache.layers):
+            k_layer.crop(max_length)
+            v_layer.crop(max_length)
+
     def __getattr__(self, name):
         return getattr(self.key_cache, name)
+
+    def __iter__(self):
+        for k_layer, v_layer in zip(self.key_cache.layers, self.value_cache.layers):
+            yield k_layer.tensor, v_layer.tensor

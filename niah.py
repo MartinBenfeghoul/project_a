@@ -1,19 +1,11 @@
 import argparse
 import torch
 from datasets import load_from_disk
-
+from cache import CompressedCache
 from utils import (
-    CompressedCache,
     Logger,
     get_model_and_tokenizer,
 )
-
-
-def measure_perplexity(logits, target):
-    nll = torch.nn.functional.cross_entropy(logits, target, reduction="mean")
-    ppl = torch.exp(nll)
-    return nll, ppl
-
 
 def make_hook(logger, uncompressed_window=0):
     """
@@ -73,13 +65,8 @@ def main(
     model_name: str,
     dataset: str,
     n_samples: int,
-    cache_type: str,
-    decomposition_method: str,
-    comp_ratio: float,
-    energy_threshold: float,
-    rank_selection: str,
-    lr: float,
-    n_iter: int,
+    key_cache_kwargs: dict,
+    value_cache_kwargs: dict,
     max_new_tokens: int,
 ):
     """Evaluate NIAH retrieval accuracy with a custom compressed KV cache setup.
@@ -88,19 +75,15 @@ def main(
         model_name: Hugging Face model ID or local model path.
         dataset: Path to a disk-backed NIAH dataset.
         n_samples: Number of dataset samples to evaluate.
-        cache_type: Key-cache compression strategy name.
-        decomposition_method: Low-rank decomposition method for keys.
-        comp_ratio: Target compression ratio when using ratio-based rank selection.
-        energy_threshold: Energy retention target when using energy-based rank selection.
-        rank_selection: Rank selection mode (e.g., by ratio or energy).
-        lr: Learning rate for iterative decomposition methods.
-        n_iter: Number of decomposition refinement iterations (used in both SVD and LoRA).
+        key_cache_kwargs: Dictionary of key-cache compression parameters passed to CompressedCache.
+        value_cache_kwargs: Dictionary of value-cache compression parameters passed to CompressedCache.
         max_new_tokens: Maximum tokens to generate per sample.
 
     Returns:
         Tuple of `(success_rate, (compression_ratio_mean, compression_ratio_std))`.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
 
@@ -120,18 +103,8 @@ def main(
 
         past_key_values = CompressedCache(
             config=model.config,
-            key_cache_kwargs={
-                "cache_type": cache_type,  # CompressedCache resolves class internally
-                "decomposition_method": decomposition_method,
-                "comp_ratio": comp_ratio,
-                "energy_threshold": energy_threshold,
-                "rank_selection": rank_selection,
-                "lr": lr,
-                "n_iter": n_iter,
-                "gamma": 3.0,
-                "min_size": 8.0,
-            },
-            value_cache_kwargs={"cache_type": "baseline"},
+            key_cache_kwargs=key_cache_kwargs,
+            value_cache_kwargs=value_cache_kwargs,
         )
 
         out = model.generate(
@@ -171,34 +144,69 @@ def get_parser():
     parser.add_argument(
         "-d", "--dataset", type=str, default="data/NIAH/multi-keys/1k"
     )
-    parser.add_argument(
-        "-c",
-        "--cache_type",
-        type=str,
-        default="surprise_lr",
-    )
-    parser.add_argument(
-        "--decomposition_method",
-        type=str,
-        default="svd",
-        choices=["svd", "lora"],
-    )
+    parser.add_argument("-n", "--n_samples", type=int, default=100)
+
+    parser.add_argument("--max_new_tokens", type=int, default=4)
+
+    # key cache
+    parser.add_argument("--k_cache_type", type=str, default="surprise_lr")
+    parser.add_argument("--decomposition_method", type=str, default="svd", choices=["svd", "lora"])
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
-    parser.add_argument(
-        "--rank_selection",
-        type=str,
-        default="comp_ratio",
-        choices=["comp_ratio", "energy"],
-    )
-    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--rank_selection", type=str, default="comp_ratio", choices=["comp_ratio", "energy"])
+    parser.add_argument("--k_lr", type=float, default=1e-2)
     parser.add_argument("--n_iter", type=int, default=3)
-    parser.add_argument("-n", "--n_samples", type=int, default=100)
-    parser.add_argument("--max_new_tokens", type=int, default=4)
+
+    # value cache
+    parser.add_argument("--v_cache_type", type=str, default="mlp")
+    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=[2]*16)
+    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=[1]*16)
+    parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=[1]*16)
+    parser.add_argument("--per_sequence", action="store_true")
+    parser.add_argument("--target_perc", type=int, nargs="+", default=[100]*8+[85]*8)
+    parser.add_argument("--target_model_num_heads", type=int, default=8)
+    parser.add_argument("--v_lr", type=float, default=1e-3)
+    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--loss_func", type=str, default="mse")
+    parser.add_argument("--num_epochs", type=int, default=1)
+
     return parser
 
 
 if __name__ == "__main__":
     parser = get_parser()
     args, unknown = parser.parse_known_args()
-    main(**vars(args))
+    key_cache_kwargs = {
+        "cache_type": args.k_cache_type,
+        "decomposition_method": args.decomposition_method,
+        "comp_ratio": args.comp_ratio,
+        "energy_threshold": args.energy_threshold,
+        "rank_selection": args.rank_selection,
+        "lr": args.k_lr,
+        "n_iter": args.n_iter,
+        "gamma": 3.0,
+        "min_size": 8.0,
+    }
+
+    value_cache_kwargs = {
+        "cache_type": args.v_cache_type,
+        "num_layers_per_mlp": args.num_layers_per_mlp,
+        "hidden_factors_per_mlp": args.hidden_factors_per_mlp,
+        "num_heads_per_mlp": args.num_heads_per_mlp,
+        "per_sequence": args.per_sequence,
+        "target_perc": args.target_perc,
+        "target_model_num_heads": args.target_model_num_heads,
+        "lr": args.v_lr,
+        "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        "optimizer": args.optimizer,
+        "loss_func": args.loss_func,
+        "num_epochs": args.num_epochs,
+    }
+    main(
+        model_name=args.model_name,
+        dataset=args.dataset,
+        n_samples=args.n_samples,
+        key_cache_kwargs=key_cache_kwargs,
+        value_cache_kwargs=value_cache_kwargs,
+        max_new_tokens=args.max_new_tokens,
+    )
