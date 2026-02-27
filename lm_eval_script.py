@@ -18,6 +18,7 @@ from utils import Logger, get_model_and_tokenizer
 GEN_KWARGS = {
     "do_sample": False,
     "use_cache": True,
+    "logits_to_keep": 0,
 }
 
 def get_tasks(tasks, print_tasks=True):
