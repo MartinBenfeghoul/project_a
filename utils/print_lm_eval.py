@@ -1,7 +1,6 @@
 import json
 import argparse
 
-# TODO: add RULER
 
 LM_EVAL_TASKS = {
     "piqa": "acc,none",

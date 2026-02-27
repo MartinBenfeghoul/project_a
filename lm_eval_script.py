@@ -14,12 +14,10 @@ from lm_eval.models.utils_hf import stop_sequences_criteria
 from cache import CompressedCache
 from utils import Logger, get_model_and_tokenizer
 
-# TODO: not sure if this is needed, isn't it defined in the task config yaml?
-# Also, if needed, these will change for ruler and longbench, need to update
+
 GEN_KWARGS = {
     "do_sample": False,
     "use_cache": True,
-    "max_new_tokens": 512,
 }
 
 def get_tasks(tasks, print_tasks=True):
@@ -62,7 +60,6 @@ def list_of_strings(arg):
 
 def make_hook(logger):
     def hook(module, args, kwargs, output):
-        # input_ids may be positional (e.g. self.model(inps, ...)) or keyword
         input_ids = kwargs.get("input_ids", args[0] if args else None)
         if input_ids is None:
             return
@@ -108,7 +105,6 @@ class CompressedCacheHFLM(HFLM):
             ),
         ):
             if attn_mask is not None or labels is not None:
-                # seq2seq path — pass through unchanged
                 assert attn_mask is not None and labels is not None
                 return self.model(
                     input_ids=inps, attention_mask=attn_mask, labels=labels
@@ -166,11 +162,11 @@ def main(args):
 
     value_cache_kwargs = {
         "cache_type": args.v_cache_type,
-        "num_layers_per_mlp": args.num_layers_per_mlp,
-        "hidden_factors_per_mlp": args.hidden_factors_per_mlp,
-        "num_heads_per_mlp": args.num_heads_per_mlp,
+        "num_layers_per_mlp": [args.num_layers_per_mlp] * model.config.num_hidden_layers,
+        "hidden_factors_per_mlp":[ args.hidden_factors_per_mlp] * model.config.num_hidden_layers,
+        "num_heads_per_mlp": [args.num_heads_per_mlp] * model.config.num_hidden_layers,
         "per_sequence": args.per_sequence,
-        "target_perc": args.target_perc,
+        "target_perc": [args.target_perc] * model.config.num_hidden_layers,
         "target_model_num_heads": args.target_model_num_heads,
         "lr": args.v_lr,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
@@ -232,7 +228,7 @@ def main(args):
 
     output_dir = os.path.join(args.output_dir, args.model_name.replace("/", "_"))
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"lm_eval_{args.cache_type}" + "_{}.json")
+    output_path = os.path.join(output_dir, f"lm_eval_kc_{args.k_cache_type}_vc_{args.v_cache_type}_ml_{bool(args.meta_weights_path)}" + "_{}.json")
     output_path = get_output_path(output_path)
     with open(output_path, "w") as f:
         json.dump(results["results"], f, ensure_ascii=False, indent=4)
@@ -242,7 +238,7 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LM eval harness script")
-    parser.add_argument("-m", "--model_name", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
+    parser.add_argument("-m", "--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
     parser.add_argument("-o", "--output_dir", type=str, default="./results")
     parser.add_argument("-t", "--tasks", type=list_of_strings, default=["lm_eval"])
     parser.add_argument("--limit", type=int, default=None, help="Max number of samples per task.")
@@ -260,19 +256,19 @@ def parse_args():
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=[2]*16) # TODO: define parameters based on model specs
-    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=[1]*16)
-    parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=[1]*16)
+    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=4)
+    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=2)
+    parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=8) 
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument("--target_perc", type=int, nargs="+", default=[100]*8+[85]*8)
+    parser.add_argument("--target_perc", type=int, nargs="+", default=85) # TODO: I think this would be better as a dictionary with number of layers for each target perc
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", type=str, default="adam")
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--meta_weights_path", type=str, default=None)
+    # TODO: if meta weights provided, infer config for MLP (e.g., num_layers_per_mlp, hidden_factors_per_mlp, etc.,)
 
-    # meta-learning
 
     return parser.parse_args()
 
