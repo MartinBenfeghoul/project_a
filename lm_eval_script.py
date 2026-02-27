@@ -11,7 +11,8 @@ from lm_eval.tasks import TaskManager
 from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils_hf import stop_sequences_criteria
 
-from utils import CompressedCache, Logger, get_model_and_tokenizer
+from cache import CompressedCache
+from utils import Logger, get_model_and_tokenizer
 
 # TODO: not sure if this is needed, isn't it defined in the task config yaml?
 # Also, if needed, these will change for ruler and longbench, need to update
@@ -152,17 +153,32 @@ def main(args):
     model.register_forward_hook(make_hook(logger), with_kwargs=True)
 
     key_cache_kwargs = {
-        "cache_type": args.cache_type,
+        "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
         "comp_ratio": args.comp_ratio,
         "energy_threshold": args.energy_threshold,
         "rank_selection": args.rank_selection,
-        "lr": args.lr,
+        "lr": args.k_lr,
         "n_iter": args.n_iter,
         "gamma": 3.0,
         "min_size": 8.0,
     }
-    value_cache_kwargs = {"cache_type": args.v_cache_type}
+
+    value_cache_kwargs = {
+        "cache_type": args.v_cache_type,
+        "num_layers_per_mlp": args.num_layers_per_mlp,
+        "hidden_factors_per_mlp": args.hidden_factors_per_mlp,
+        "num_heads_per_mlp": args.num_heads_per_mlp,
+        "per_sequence": args.per_sequence,
+        "target_perc": args.target_perc,
+        "target_model_num_heads": args.target_model_num_heads,
+        "lr": args.v_lr,
+        "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        "optimizer": args.optimizer,
+        "loss_func": args.loss_func,
+        "num_epochs": args.num_epochs,
+        "meta_weights_path": args.meta_weights_path
+    }
 
     model.eval()
     lm = CompressedCacheHFLM(
@@ -226,7 +242,7 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LM eval harness script")
-    parser.add_argument("-m", "--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
+    parser.add_argument("-m", "--model_name", type=str, default="meta-llama/Llama-3.2-1B-Instruct")
     parser.add_argument("-o", "--output_dir", type=str, default="./results")
     parser.add_argument("-t", "--tasks", type=list_of_strings, default=["lm_eval"])
     parser.add_argument("--limit", type=int, default=None, help="Max number of samples per task.")
@@ -234,16 +250,27 @@ def parse_args():
     parser.add_argument("--debug", action="store_true")
 
     # key cache
-    parser.add_argument("-c", "--cache_type", type=str, default="surprise_lr")
+    parser.add_argument("-kc", "--k_cache_type", type=str, default="surprise_lr")
     parser.add_argument("--decomposition_method", type=str, default="svd", choices=["svd", "lora"])
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
     parser.add_argument("--rank_selection", type=str, default="comp_ratio", choices=["comp_ratio", "energy"])
-    parser.add_argument("--lr", type=float, default=1e-2)
+    parser.add_argument("--k_lr", type=float, default=1e-2)
     parser.add_argument("--n_iter", type=int, default=3)
 
     # value cache
-    parser.add_argument("--v_cache_type", type=str, default="baseline")
+    parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
+    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=[2]*16) # TODO: define parameters based on model specs
+    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=[1]*16)
+    parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=[1]*16)
+    parser.add_argument("--per_sequence", action="store_true")
+    parser.add_argument("--target_perc", type=int, nargs="+", default=[100]*8+[85]*8)
+    parser.add_argument("--target_model_num_heads", type=int, default=8)
+    parser.add_argument("--v_lr", type=float, default=1e-3)
+    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--loss_func", type=str, default="mse")
+    parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument("--meta_weights_path", type=str, default=None)
 
     # meta-learning
 
