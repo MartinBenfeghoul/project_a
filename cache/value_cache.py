@@ -1,5 +1,5 @@
 from .cache import SingleTensorCache, SingleTensorDynamicLayer
-from torch.optim import Adam
+from torch.optim import Adam, SGD
 from torch.nn.functional import mse_loss
 from torch.func import functional_call
 import torch
@@ -11,7 +11,8 @@ LOSS_FUNC = {
 }
 
 OPTIMIZER = {
-    'adam': Adam
+    'adam': Adam,
+    'sgd': SGD
 }
 
 class MLPValueLayer(SingleTensorDynamicLayer):
@@ -259,7 +260,7 @@ class MLPValueCache(SingleTensorCache):
                 for k, v in checkpoint.items()
                 if k.startswith("layer_")
             }
-            if "inner_lr_params" in checkpoint: # TODO: test that this is working fine
+            if "inner_lr_params" in checkpoint:
                 flat_lrs = checkpoint["inner_lr_params"]
                 self._meta_inner_lrs: dict[int, list] = {}
                 offset = 0

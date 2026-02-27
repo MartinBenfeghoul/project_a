@@ -79,7 +79,11 @@ def make_hook(logger):
     return hook
 
 class CompressedCacheHFLM(HFLM):
-    """HFLM subclass that injects a new CompressedCache into every model call."""
+    """
+    HFLM subclass that injects a new CompressedCache into every model call.
+    Note: once CompressiveCache is implemented in transformers, subclassing won't be needed
+    simply pass "cache_implementation": "compressive_cache" in generation kwargs
+    """
 
     def __init__(self, key_cache_kwargs, value_cache_kwargs, logger, **kwargs):
         super().__init__(**kwargs)
@@ -187,7 +191,6 @@ def main(args):
         trust_remote_code=True,
     )
     args.tasks = get_tasks(args.tasks)
-    tm = TaskManager(metadata={"tokenizer": args.model_name}) # TODO: this was only needed for running scrolls, check if still needed
 
     if args.log_efficiency_metrics:
         torch.cuda.empty_cache()
@@ -203,7 +206,6 @@ def main(args):
         batch_size=1,
         max_batch_size=1,
         device=get_device(lm),
-        task_manager=tm,
         limit=args.limit,
     )
 
@@ -267,12 +269,57 @@ def parse_args():
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--meta_weights_path", type=str, default=None)
-    # TODO: if meta weights provided, infer config for MLP (e.g., num_layers_per_mlp, hidden_factors_per_mlp, etc.,)
+
+    args = parser.parse_args()
+    if args.meta_weights_path is not None:
+        args = override_args_from_meta_weights(args)
+
+    return args
 
 
-    return parser.parse_args()
+def override_args_from_meta_weights(args):
+    """Infer MLP architecture and inner-loop config from a meta-weights checkpoint."""
+    # TODO: this super ugly. In the future, save MLP config in meta learning config file
+    ckpt = torch.load(args.meta_weights_path, map_location="cpu")
+
+    config_path = os.path.join(os.path.dirname(args.meta_weights_path), "config.yaml")
+    if os.path.exists(config_path):
+        train_cfg = OmegaConf.load(config_path).training
+        args.num_epochs = train_cfg.inner_steps
+        args.loss_func  = train_cfg.loss_func
+
+    layer0 = next(v for k, v in ckpt.items() if k.startswith("layer_"))
+    weight_keys = sorted(k for k in layer0 if k.startswith("weights."))
+    w0, wlast = layer0[weight_keys[0]], layer0[weight_keys[-1]]
+
+    n_layers = len(weight_keys)
+    n_heads = w0.shape[1] if w0.dim() == 4 else w0.shape[0] # in case batch dim not present
+    head_dim = wlast.shape[-1]
+    hidden_factor = (w0.shape[-1] // head_dim) if n_layers > 1 else 1
+
+    for attr, ckpt_val in [
+        ("num_layers_per_mlp", n_layers),
+        ("hidden_factors_per_mlp", hidden_factor),
+        ("num_heads_per_mlp", n_heads),
+    ]:
+        cli_val = getattr(args, attr)
+        if cli_val != ckpt_val:
+            print(f"Warning: overriding --{attr} {cli_val} → {ckpt_val} to match checkpoint.")
+        setattr(args, attr, ckpt_val)
+
+    # TODO: unless we update meta learning to have option to use adam in inner loop update
+    args.optimizer = "sgd"
+
+    print(
+        f"[meta_weights] Inferred: num_layers={n_layers}, hidden_factor={hidden_factor}, "
+        f"num_heads={n_heads}, "
+        f"num_epochs={args.num_epochs}, loss_func={args.loss_func}, optimizer overridden to sgd"
+    )
+    return args
 
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.meta_weights_path is not None:
+        args = override_args_from_meta_weights(args)
     main(args)
