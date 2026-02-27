@@ -58,7 +58,7 @@ def get_device_type():
 def list_of_strings(arg):
     return arg.split(",")
 
-def make_hook(logger):
+def make_hook(logger, uncompressed_window=0):
     def hook(module, args, kwargs, output):
         input_ids = kwargs.get("input_ids", args[0] if args else None)
         if input_ids is None:
@@ -67,8 +67,15 @@ def make_hook(logger):
         pkv = output.past_key_values
         if seq_len > 1:
             if hasattr(pkv, "update_events"):
+                if uncompressed_window > 0:
+                    label_ed = -uncompressed_window
+                else:
+                    label_ed = None
                 logits = output.logits
-                pkv.update_events(logits[..., :-1, :], input_ids[..., 1:])
+                pkv.update_events(
+                    logits[..., :-1 - uncompressed_window, :],
+                    input_ids[..., 1:label_ed]
+                    )
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
@@ -192,6 +199,7 @@ def main(args):
     )
     args.tasks = get_tasks(args.tasks)
 
+    tm = TaskManager(metadata={"tokenizer": args.model_name})
     if args.log_efficiency_metrics:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -206,6 +214,7 @@ def main(args):
         batch_size=1,
         max_batch_size=1,
         device=get_device(lm),
+        task_manager=tm,
         limit=args.limit,
     )
 
@@ -273,6 +282,8 @@ def parse_args():
     args = parser.parse_args()
     if args.meta_weights_path is not None:
         args = override_args_from_meta_weights(args)
+
+    print(args)
 
     return args
 
