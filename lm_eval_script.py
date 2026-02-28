@@ -59,8 +59,23 @@ def get_device_type():
 def list_of_strings(arg):
     return arg.split(",")
 
-def make_hook(logger, uncompressed_window=0):
-    def hook(module, args, kwargs, output):
+def make_hooks(logger, uncompressed_window=0, measure_latency=False):
+    """
+    When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
+    """
+    _start_evt = [None]
+
+    def pre_hook(module, args, kwargs):
+        if measure_latency:
+            evt = torch.cuda.Event(enable_timing=True)
+            evt.record()
+            _start_evt[0] = evt
+
+    def post_hook(module, args, kwargs, output):
+        if measure_latency:
+            end_evt = torch.cuda.Event(enable_timing=True)
+            end_evt.record()
+
         input_ids = kwargs.get("input_ids", args[0] if args else None)
         if input_ids is None:
             return
@@ -77,6 +92,8 @@ def make_hook(logger, uncompressed_window=0):
                     logits[..., :-1 - uncompressed_window, :],
                     input_ids[..., 1:label_ed]
                     )
+            if measure_latency:
+                logger.prefill_events.append((_start_evt[0], end_evt))
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
@@ -84,7 +101,11 @@ def make_hook(logger, uncompressed_window=0):
                     print(f"Compression ratio: {cr:.2f}")
                     logger.add_log("crs", cr)
                     logger.recorded_cr = True
-    return hook
+            if measure_latency:
+                logger.decode_events.append((_start_evt[0], end_evt))
+
+    return pre_hook, post_hook
+
 
 class CompressedCacheHFLM(HFLM):
     """
@@ -158,7 +179,8 @@ def main(args):
 
     model, tokenizer = get_model_and_tokenizer(args.model_name, device)
     logger = Logger()
-    model.register_forward_hook(make_hook(logger), with_kwargs=True)
+    logger.prefill_events = []
+    logger.decode_events = []
 
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
@@ -189,6 +211,22 @@ def main(args):
     }
 
     model.eval()
+
+    if args.log_efficiency_metrics:
+        # warm up cuda kernels before benchmarking to avoid inflated first-pass times
+        print("Warming up GPU...")
+        _warmup_ids = torch.ones((1, 32), dtype=torch.long, device=device)
+        for _ in range(3):
+            model(_warmup_ids)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        # model-weights-only footprint
+        model_baseline_mem = torch.cuda.memory_allocated()
+
+    pre_hook, post_hook = make_hooks(logger, measure_latency=args.log_efficiency_metrics)
+    model.register_forward_pre_hook(pre_hook, with_kwargs=True)
+    model.register_forward_hook(post_hook, with_kwargs=True)
+
     lm = CompressedCacheHFLM(
         key_cache_kwargs=key_cache_kwargs,
         value_cache_kwargs=value_cache_kwargs,
@@ -199,10 +237,9 @@ def main(args):
         trust_remote_code=True,
     )
     args.tasks = get_tasks(args.tasks)
-
     tm = TaskManager(metadata={"tokenizer": args.model_name})
+
     if args.log_efficiency_metrics:
-        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
         start_time = time.perf_counter()
@@ -221,13 +258,21 @@ def main(args):
 
     if args.log_efficiency_metrics:
         torch.cuda.synchronize()
-        peak_mem_bytes = torch.cuda.max_memory_allocated()
         wall_time_sec = time.perf_counter() - start_time
+        peak_mem = torch.cuda.max_memory_allocated()
+        prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
+        decode_ms  = [s.elapsed_time(e) for s, e in logger.decode_events]
+
         efficiency_metrics = {
             "eval_wall_time_seconds": wall_time_sec,
             "eval_wall_time_minutes": wall_time_sec / 60.0,
-            "gpu_peak_mem_bytes": peak_mem_bytes,
-            "gpu_peak_mem_gib": peak_mem_bytes / (1024 ** 3),
+            "gpu_peak_mem_gib": peak_mem / (1024**3), # (weights + kv cache + activations)
+            "gpu_kv_cache_overhead_gib": (peak_mem - model_baseline_mem) / (1024**3), # (kv cache + activations)
+            "prefill_latency_ms_mean": sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0,
+            "decode_latency_ms_mean": sum(decode_ms) / len(decode_ms) if decode_ms else 0.0, # per-token
+            "decode_tokens_per_sec":  1000.0 / (sum(decode_ms) / len(decode_ms)) if decode_ms else 0.0,
+            "n_prefill_passes": len(prefill_ms),
+            "n_decode_steps":   len(decode_ms),
         }
         print("Efficiency metrics:", efficiency_metrics)
         results["results"]["efficiency_metrics"] = efficiency_metrics
@@ -284,7 +329,7 @@ def parse_args():
     if args.meta_weights_path is not None:
         args = override_args_from_meta_weights(args)
 
-    print(args)
+    print("Config for lm-eval: ", vars(args))
 
     return args
 
