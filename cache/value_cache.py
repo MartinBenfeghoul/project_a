@@ -138,7 +138,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         b, h, t = self.indices
         self.value_residuals = self.tensor[b, h, t] - v_approx[b, h, t]
         self.compressed_len = self.tensor.shape[2]
-        self.tensor = self.tensor[..., :0, :]
+        self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
         self.is_compressed = True
 
     def decompress(self, keys: torch.Tensor, temp: bool = True) -> torch.Tensor:

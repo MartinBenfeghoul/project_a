@@ -237,7 +237,10 @@ def main(args):
         trust_remote_code=True,
     )
     args.tasks = get_tasks(args.tasks)
-    tm = TaskManager(metadata={"tokenizer": args.model_name})
+    metadata = {"tokenizer": args.model_name}
+    if args.max_seq_lengths is not None:
+        metadata["max_seq_lengths"] = args.max_seq_lengths
+    tm = TaskManager(metadata=metadata)
 
     if args.log_efficiency_metrics:
         torch.cuda.reset_peak_memory_stats()
@@ -299,6 +302,7 @@ def parse_args():
     parser.add_argument("-o", "--output_dir", type=str, default="./results")
     parser.add_argument("-t", "--tasks", type=list_of_strings, default=["lm_eval"])
     parser.add_argument("--limit", type=int, default=None, help="Max number of samples per task.")
+    parser.add_argument("--max_seq_lengths", type=int, nargs="+", default=None, help="Sequence lengths for RULER tasks.")
     parser.add_argument("--log_efficiency_metrics", action="store_true")
     parser.add_argument("--debug", action="store_true")
 
@@ -313,8 +317,8 @@ def parse_args():
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=4)
-    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=2)
+    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=2)
+    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=1)
     parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=8) 
     parser.add_argument("--per_sequence", action="store_true")
     parser.add_argument("--target_perc", type=int, nargs="+", default=85) # TODO: I think this would be better as a dictionary with number of layers for each target perc
