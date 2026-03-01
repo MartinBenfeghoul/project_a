@@ -317,11 +317,11 @@ def parse_args():
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=2)
-    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=1)
-    parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=8) 
+    parser.add_argument("--num_layers_per_mlp", type=int, default=4)
+    parser.add_argument("--hidden_factors_per_mlp", type=int, default=2)
+    parser.add_argument("--num_heads_per_mlp", type=int, default=8) 
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument("--target_perc", type=int, nargs="+", default=85) # TODO: I think this would be better as a dictionary with number of layers for each target perc
+    parser.add_argument("--target_perc", type=int, default=85) # TODO: I think this would be better as a dictionary with number of layers for each target perc
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", type=str, default="adam")
