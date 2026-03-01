@@ -381,6 +381,4 @@ def override_args_from_meta_weights(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.meta_weights_path is not None:
-        args = override_args_from_meta_weights(args)
     main(args)
