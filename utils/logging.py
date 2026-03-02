@@ -68,16 +68,15 @@ class Logger:
 
 def generate_run_name(config):
     """Generate a run name based on config parameters."""
-    model_name = config.model.name.split("/")[-1]
     t = config.training
 
     run_name = (
-        f"{model_name}_"
         f"seq{t.seq_len}_"
         f"steps{t.inner_steps}_"
         f"mlr{t.meta_lr}_"
         f"ilr{t.inner_lr}_"
         f"learnlr{t.get('learn_inner_lr', False)}_"
+        f"learnperc{t.get('learn_target_perc', False)}_"
         f"gradaccum{t.grad_accum_steps}"
     )
     return run_name
@@ -164,6 +163,7 @@ def log_batch(
     batch_time_ms,
     global_step,
     use_wandb,
+    target_perc_params=None,
 ):
     initial_support_loss = (
         inner_metrics["inner_losses"][0]
@@ -173,11 +173,20 @@ def log_batch(
     final_support_loss = inner_metrics["final_support_loss"] or 0.0
     generalisation_gap = q - final_support_loss
 
+    perc_str = ""
+    if target_perc_params is not None:
+        mean_perc = (
+            sum(torch.sigmoid(p).item() * 100 for p in target_perc_params)
+            / len(target_perc_params)
+        )
+        perc_str = f", Target Perc: {mean_perc:.1f}%"
+
     print(
         f"Epoch {epoch}, Batch {batch_idx}, "
         f"Query Loss: {q:.6f}, "
         f"Gen Gap: {generalisation_gap:.6f}, "
         f"Time: {batch_time_ms:.1f}ms"
+        f"{perc_str}"
     )
 
     if use_wandb:
@@ -204,10 +213,18 @@ def log_batch(
             log_dict["inner/learned_lr_min"] = min(lr_values)
             log_dict["inner/learned_lr_max"] = max(lr_values)
 
+        if target_perc_params is not None:
+            perc_values = [torch.sigmoid(p).item() * 100 for p in target_perc_params]
+            log_dict["meta/target_perc_mean"] = sum(perc_values) / len(perc_values)
+            log_dict["meta/target_perc_min"] = min(perc_values)
+            log_dict["meta/target_perc_max"] = max(perc_values)
+            for layer_idx, pv in enumerate(perc_values):
+                log_dict[f"meta/target_perc_layer_{layer_idx}"] = pv
+
         wandb.log(log_dict, step=global_step)
 
 
-def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch):
+def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params=None):
     base, ext = os.path.splitext(checkpoint_path)
     epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
     epoch_params = {
@@ -216,6 +233,10 @@ def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch):
     if inner_lr_params is not None:
         epoch_params["inner_lr_params"] = [
             lr.detach().cpu() for lr in inner_lr_params
+        ]
+    if target_perc_params is not None:
+        epoch_params["target_perc_params"] = [
+            p.detach().cpu() for p in target_perc_params
         ]
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
