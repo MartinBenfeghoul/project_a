@@ -194,13 +194,19 @@ def main(args):
         "min_size": 8.0,
     }
 
+    num_layers = model.config.num_hidden_layers
+    target_perc_per_layer = (
+        args.target_perc
+        if isinstance(args.target_perc, list)
+        else [args.target_perc] * num_layers
+    )
     value_cache_kwargs = {
         "cache_type": args.v_cache_type,
-        "num_layers_per_mlp": [args.num_layers_per_mlp] * model.config.num_hidden_layers,
-        "hidden_factors_per_mlp":[ args.hidden_factors_per_mlp] * model.config.num_hidden_layers,
-        "num_heads_per_mlp": [args.num_heads_per_mlp] * model.config.num_hidden_layers,
+        "num_layers_per_mlp": [args.num_layers_per_mlp] * num_layers,
+        "hidden_factors_per_mlp": [args.hidden_factors_per_mlp] * num_layers,
+        "num_heads_per_mlp": [args.num_heads_per_mlp] * num_layers,
         "per_sequence": args.per_sequence,
-        "target_perc": [args.target_perc] * model.config.num_hidden_layers,
+        "target_perc": target_perc_per_layer,
         "target_model_num_heads": args.target_model_num_heads,
         "lr": args.v_lr,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
@@ -317,11 +323,11 @@ def parse_args():
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=2)
-    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=1)
-    parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=8) 
+    parser.add_argument("--num_layers_per_mlp", type=int, default=4)
+    parser.add_argument("--hidden_factors_per_mlp", type=int, default=2)
+    parser.add_argument("--num_heads_per_mlp", type=int, default=8) 
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument("--target_perc", type=int, nargs="+", default=85) # TODO: I think this would be better as a dictionary with number of layers for each target perc
+    parser.add_argument("--target_perc", type=int, default=85) # TODO: I think this would be better as a dictionary with number of layers for each target perc
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", type=str, default="adam")
@@ -371,6 +377,15 @@ def override_args_from_meta_weights(args):
     # TODO: unless we update meta learning to have option to use adam in inner loop update
     args.optimizer = "sgd"
 
+    if "target_perc_params" in ckpt:
+        meta_percs = [torch.sigmoid(t).item() * 100 for t in ckpt["target_perc_params"]]
+        args.target_perc = meta_percs
+        print(
+            f"[meta_weights] Loaded per-layer target_perc: "
+            f"mean={sum(meta_percs)/len(meta_percs):.1f}%, "
+            f"min={min(meta_percs):.1f}%, max={max(meta_percs):.1f}%"
+        )
+
     print(
         f"[meta_weights] Inferred: num_layers={n_layers}, hidden_factor={hidden_factor}, "
         f"num_heads={n_heads}, "
@@ -381,6 +396,4 @@ def override_args_from_meta_weights(args):
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.meta_weights_path is not None:
-        args = override_args_from_meta_weights(args)
     main(args)

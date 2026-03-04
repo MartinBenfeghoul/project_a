@@ -5,6 +5,7 @@ Each MLP learns to predict value vectors from key vectors. The inner loop adapts
 MLP weights to a support set of KV pairs; the outer (meta) loop optimises the
 initial weights so that adapted MLPs generalise to the query set.
 """
+import math
 import os
 import time
 
@@ -29,6 +30,7 @@ from utils import (
     generate_run_name,
     save_checkpoint,
     log_batch,
+    Logger,
 )
 from model.mlp import MLP
 
@@ -61,7 +63,7 @@ def inner_loop_functional(
 
     for _ in range(inner_steps):
         total_loss = 0.0
-
+    
         for layer_idx, layer in enumerate(kv_cache.layers):
             k = layer.keys[:, :, support_slice, :].float()
             v = layer.values[:, :, support_slice, :].float()
@@ -151,14 +153,100 @@ def compute_loss_functional(
     return total_loss, per_layer_losses
 
 
-def setup_optimizer(layer_mlps, config, device):
+def compute_compressed_loss(
+    layer_mlps,
+    kv_cache,
+    query_slice,
+    phi,
+    target_perc_params,
+    tau=0.01,
+    lambda_compression=0.0,
+    track_per_layer=False,
+):
+    """
+    Differentiable outer-loop query loss with soft compression.
+
+    For each layer:
+      - MLP errors on query tokens are computed with detached values so the
+        threshold does not create circular gradients back through the MLP.
+      - A differentiable threshold is derived from target_perc_params[layer_idx]
+        via linear interpolation of the sorted error distribution.
+      - A soft sigmoid mask (1 = keep residual, 0 = use MLP) gates the loss so
+        only "compressed" tokens (soft_mask ≈ 0) contribute reconstruction error.
+      - Optionally, lambda_compression * (1 - perc) is added to prevent the
+        trivial solution of target_perc → 0 (no compression).
+
+    Gradient flow:
+      - target_perc_params[l]  ←  soft_mask  ←  thresh  ←  frac  ←  perc
+      - phi (adapted MLP)      ←  mse_per_token  ←  v_hat
+    """
+    total_loss = 0
+    per_layer_losses = [] if track_per_layer else None
+
+    for layer_idx, layer in enumerate(kv_cache.layers):
+        k_q = layer.keys[:, :, query_slice, :].float()
+        v_q = layer.values[:, :, query_slice, :].float()
+
+        mlp = layer_mlps[layer_idx]
+        weights, biases = phi[layer_idx]
+        v_hat_q = functional_mlp_forward(mlp, k_q, weights, biases)
+
+        B, H, T, _ = v_q.shape
+        N = H * T
+
+        # Detach errors for threshold/mask so gradients don't flow back through
+        # the MLP into the compression policy (avoids circular gradients).
+        with torch.no_grad():
+            errors_det = (v_q - v_hat_q).pow(2).mean(dim=-1)  # [B, H, T]
+        errors_flat = errors_det.view(B, -1)  # [B, N]
+
+        perc = torch.sigmoid(target_perc_params[layer_idx])  # fraction to compress
+        k_float = (perc * N).clamp(1.0, float(N - 1))
+
+        # Differentiable threshold: linearly interpolate adjacent sorted errors.
+        # k_lo is detached (integer index), frac carries the gradient through perc.
+        sorted_errors, _ = torch.sort(errors_flat, dim=1)  # [B, N], ascending
+        k_lo = k_float.detach().long().clamp(0, N - 2)
+        k_hi = k_lo + 1
+        frac = k_float - k_lo.float()  # scalar, differentiable w.r.t. perc
+
+        # Per-sequence threshold [B], differentiable w.r.t. frac → perc
+        thresh = (
+            sorted_errors[:, k_lo] + frac * (sorted_errors[:, k_hi] - sorted_errors[:, k_lo])
+        ).view(B, 1, 1)  # [B, 1, 1] for broadcasting with [B, H, T]
+
+        # soft_mask ≈ 1: keep residual (high error); ≈ 0: use MLP (low error)
+        soft_mask = torch.sigmoid((errors_det - thresh) / tau)  # [B, H, T]
+
+        # Loss = MLP error weighted by (1 - soft_mask): compressed tokens must be
+        # well-predicted; residual tokens are "free" (stored explicitly).
+        mse_per_token = (v_q - v_hat_q).pow(2).mean(dim=-1)  # [B, H, T], grad → phi
+        layer_loss = ((1.0 - soft_mask) * mse_per_token).mean()
+
+        # Compression encouragement: penalise low perc to prevent trivial perc → 0
+        if lambda_compression > 0.0:
+            layer_loss = layer_loss + lambda_compression * (1.0 - perc)
+
+        total_loss = total_loss + layer_loss
+
+        if track_per_layer:
+            per_layer_losses.append(layer_loss.item())
+
+    return total_loss, per_layer_losses
+
+
+def setup_optimizer(layer_mlps, target_perc_params, config, device):
     theta = [
         p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)
     ]
     learn_inner_lr = config.get("learn_inner_lr", False)
-    if (
-        learn_inner_lr
-    ):  # TODO: maybe try doing this per head or per layer rather than per parameter
+    learn_target_perc = config.get("learn_target_perc", False)
+
+    meta_params = list(theta)
+    if learn_target_perc and target_perc_params is not None:
+        meta_params = meta_params + list(target_perc_params)
+
+    if learn_inner_lr:  # TODO: maybe try doing this per head or per layer rather than per parameter
         inner_lr_params = [
             nn.Parameter(
                 torch.tensor(
@@ -168,14 +256,14 @@ def setup_optimizer(layer_mlps, config, device):
             for _ in theta
         ]
         meta_optimizer = torch.optim.Adam(
-            theta + inner_lr_params, lr=config.meta_lr
+            meta_params + inner_lr_params, lr=config.meta_lr
         )
         print(
             f"Meta-learning inner LR: {len(inner_lr_params)} learnable LR params (init={config.inner_lr})"
         )
     else:
         inner_lr_params = None
-        meta_optimizer = torch.optim.Adam(theta, lr=config.meta_lr)
+        meta_optimizer = torch.optim.Adam(meta_params, lr=config.meta_lr)
     return theta, inner_lr_params, meta_optimizer
 
 
@@ -188,6 +276,9 @@ def meta_step(
     inner_steps,
     loss_fn,
     inner_lr_params,
+    target_perc_params,
+    tau,
+    lambda_compression,
     should_log,
     device,
 ):
@@ -219,14 +310,26 @@ def meta_step(
         )
     )
 
-    query_loss, per_layer_losses = compute_loss_functional(
-        layer_mlps,
-        kv_cache,
-        query_slice,
-        phi,
-        loss_fn,
-        track_per_layer=should_log,
-    )
+    if target_perc_params is not None:
+        query_loss, per_layer_losses = compute_compressed_loss(
+            layer_mlps,
+            kv_cache,
+            query_slice,
+            phi,
+            target_perc_params,
+            tau=tau,
+            lambda_compression=lambda_compression,
+            track_per_layer=should_log,
+        )
+    else:
+        query_loss, per_layer_losses = compute_loss_functional(
+            layer_mlps,
+            kv_cache,
+            query_slice,
+            phi,
+            loss_fn,
+            track_per_layer=should_log,
+        )
 
     del kv_cache
     batch_time_ms = (time.time() - batch_start_time) * 1000
@@ -240,22 +343,25 @@ def meta_step(
     )
 
 
-def accumulate_gradients(query_loss, theta_list, phi, inner_lr_params, scale):
+def accumulate_gradients(
+    query_loss, theta_list, phi, inner_lr_params, target_perc_params, scale
+):
     phi_flat = [p for w, b in phi for p in w + b]
+
+    extra_params = []
     if inner_lr_params is not None:
-        all_grads = torch.autograd.grad(
-            query_loss,
-            phi_flat + inner_lr_params,
-            create_graph=False,
-            retain_graph=False,
-        )
-        g_phi = all_grads[: len(phi_flat)]
-        g_lr = all_grads[len(phi_flat) :]
-    else:
-        g_phi = torch.autograd.grad(
-            query_loss, phi_flat, create_graph=False, retain_graph=False
-        )
-        g_lr = None
+        extra_params.extend(inner_lr_params)
+    if target_perc_params is not None:
+        extra_params.extend(target_perc_params)
+
+    all_grads = torch.autograd.grad(
+        query_loss,
+        phi_flat + extra_params,
+        create_graph=False,
+        retain_graph=False,
+    )
+    g_phi = all_grads[: len(phi_flat)]
+    g_extra = all_grads[len(phi_flat):]
 
     for p_theta, g in zip(theta_list, g_phi):
         if g is None:
@@ -265,12 +371,23 @@ def accumulate_gradients(query_loss, theta_list, phi, inner_lr_params, scale):
         else:
             p_theta.grad.add_(g.detach() * scale)
 
-    if g_lr is not None:
-        for lr_param, g in zip(inner_lr_params, g_lr):
+    offset = 0
+    if inner_lr_params is not None:
+        for lr_param, g in zip(inner_lr_params, g_extra[: len(inner_lr_params)]):
             if lr_param.grad is None:
                 lr_param.grad = g.detach() * scale
             else:
                 lr_param.grad.add_(g.detach() * scale)
+        offset += len(inner_lr_params)
+
+    if target_perc_params is not None:
+        for perc_param, g in zip(
+            target_perc_params, g_extra[offset : offset + len(target_perc_params)]
+        ):
+            if perc_param.grad is None:
+                perc_param.grad = g.detach() * scale
+            else:
+                perc_param.grad.add_(g.detach() * scale)
 
 
 def run_epoch(
@@ -279,6 +396,7 @@ def run_epoch(
     dataloader,
     meta_optimizer,
     inner_lr_params,
+    target_perc_params,
     config,
     epoch,
     global_step,
@@ -292,6 +410,8 @@ def run_epoch(
     log_interval = config.get("log_interval", 10)
     batches_per_epoch = config.get("batches_per_epoch", None)
     grad_accum_steps = config.get("grad_accum_steps", 1)
+    tau = config.get("tau", 0.01)
+    lambda_compression = config.get("lambda_compression", 0.0)
 
     epoch_loss = 0
     num_batches = 0
@@ -322,6 +442,9 @@ def run_epoch(
             inner_steps,
             loss_fn,
             inner_lr_params,
+            target_perc_params,
+            tau,
+            lambda_compression,
             should_log,
             device,
         )
@@ -331,6 +454,7 @@ def run_epoch(
             theta_list,
             phi,
             inner_lr_params,
+            target_perc_params,
             scale=1.0 / grad_accum_steps,
         )
 
@@ -355,6 +479,7 @@ def run_epoch(
                 batch_time_ms,
                 global_step,
                 use_wandb,
+                target_perc_params=target_perc_params,
             )
 
     # Flush any remaining accumulated gradients at end of epoch
@@ -366,21 +491,132 @@ def run_epoch(
     return epoch_loss, num_batches, global_step
 
 
+def evaluate_ruler(
+    model,
+    model_name,
+    tokenizer,
+    target_perc_params,
+    training_config,
+    epoch_checkpoint_path,
+    device,
+    epoch,
+    global_step,
+    use_wandb,
+    num_samples=10,
+):
+    """Run RULER benchmark with current MLP weights and log average score to wandb."""
+    from lm_eval import evaluator
+    from lm_eval.tasks import TaskManager
+    from lm_eval_script import CompressedCacheHFLM, get_tasks, get_device, GEN_KWARGS
+
+    print(f"Running RULER evaluation (epoch {epoch}, {num_samples} samples)...")
+
+    num_layers = model.config.num_hidden_layers
+    num_kv_heads = model.config.num_key_value_heads
+
+    if target_perc_params is not None:
+        target_perc = [torch.sigmoid(p).item() * 100 for p in target_perc_params]
+    else:
+        default_perc = training_config.get("target_perc", 50.0)
+        target_perc = [default_perc] * num_layers
+
+    logger = Logger()
+    logger.prefill_events = []
+    logger.decode_events = []
+
+    key_cache_kwargs = {
+        "cache_type": "baseline",
+        "decomposition_method": "svd",
+        "comp_ratio": 1.0,
+        "energy_threshold": 1.0,
+        "rank_selection": "comp_ratio",
+        "lr": 1e-2,
+        "n_iter": 3,
+        "gamma": 3.0,
+        "min_size": 8.0,
+    }
+
+    value_cache_kwargs = {
+        "cache_type": "mlp",
+        "num_layers_per_mlp": [training_config.mlp_num_layers] * num_layers,
+        "hidden_factors_per_mlp": [training_config.mlp_hidden_factor] * num_layers,
+        "num_heads_per_mlp": [num_kv_heads] * num_layers,
+        "per_sequence": False,
+        "target_perc": target_perc,
+        "target_model_num_heads": num_kv_heads,
+        "lr": training_config.inner_lr,
+        "device": device,
+        "optimizer": "sgd",
+        "loss_func": training_config.get("loss_func", "mse"),
+        "num_epochs": training_config.inner_steps,
+        "meta_weights_path": epoch_checkpoint_path,
+    }
+
+    lm = CompressedCacheHFLM(
+        key_cache_kwargs=key_cache_kwargs,
+        value_cache_kwargs=value_cache_kwargs,
+        logger=logger,
+        pretrained=model,
+        tokenizer=tokenizer,
+        truncation=False,
+        trust_remote_code=True,
+    )
+
+    ruler_tasks = get_tasks(["ruler"])
+    metadata = {"tokenizer": model_name}
+    tm = TaskManager(metadata=metadata)
+
+    results = evaluator.simple_evaluate(
+        model=lm,
+        gen_kwargs=GEN_KWARGS,
+        tasks=ruler_tasks,
+        num_fewshot=0,
+        batch_size=1,
+        device=get_device(lm),
+        task_manager=tm,
+        limit=num_samples,
+    )
+
+    task_scores = {}
+    for task_name, task_results in results["results"].items():
+        for key, val in task_results.items():
+            if isinstance(val, (int, float)) and "stderr" not in key and key not in ("alias", "samples"):
+                task_scores[task_name] = val
+                break
+
+    avg_score = sum(task_scores.values()) / len(task_scores) if task_scores else 0.0
+    print(f"RULER eval epoch {epoch}: avg={avg_score:.4f}, per-task={task_scores}")
+
+    if use_wandb:
+        log_data = {"benchmark/ruler_avg": avg_score, "epoch/epoch": epoch}
+        for task_name, score in task_scores.items():
+            log_data[f"benchmark/{task_name}"] = score
+        wandb.log(log_data)
+
+    return avg_score
+
+
 def meta_train(
     model,
+    model_name,
     layer_mlps,
     dataloader,
     device,
     config,
     checkpoint_path,
+    tokenizer=None,
+    target_perc_params=None,
     loss_fn=F.mse_loss,
     use_wandb=False,
 ):
     _, inner_lr_params, meta_optimizer = setup_optimizer(
-        layer_mlps, config, device
+        layer_mlps, target_perc_params, config, device
     )
     model.eval()
     global_step = 0
+
+    if use_wandb:
+        wandb.define_metric("benchmark/*", step_metric="epoch/epoch")
 
     for epoch in range(config.num_meta_epochs):
         epoch_start_time = time.time()
@@ -391,6 +627,7 @@ def meta_train(
             dataloader,
             meta_optimizer,
             inner_lr_params,
+            target_perc_params,
             config,
             epoch,
             global_step,
@@ -416,9 +653,27 @@ def meta_train(
                 step=global_step,
             )
 
-        save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch)
+        save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params)
 
-    return layer_mlps, inner_lr_params
+        eval_ruler = config.get("eval_ruler", True)
+        if eval_ruler and tokenizer is not None:
+            base, ext = os.path.splitext(checkpoint_path)
+            epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
+            evaluate_ruler(
+                model=model,
+                model_name=model_name,
+                tokenizer=tokenizer,
+                target_perc_params=target_perc_params,
+                training_config=config,
+                epoch_checkpoint_path=epoch_checkpoint_path,
+                device=device,
+                epoch=epoch,
+                global_step=global_step,
+                use_wandb=use_wandb,
+                num_samples=config.get("eval_ruler_samples", 10),
+            )
+
+    return layer_mlps, inner_lr_params, target_perc_params
 
 
 def load_config():
@@ -449,8 +704,13 @@ def main():
     model_folder = model_name.split("/")[-1]
 
     run_name = generate_run_name(config)
-    checkpoint_dir = os.path.join("checkpoints", model_folder, run_name)
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_dir_base = os.path.join("checkpoints", model_folder, run_name)
+    checkpoint_dir = checkpoint_dir_base
+    idx = 0
+    while os.path.exists(checkpoint_dir):
+        checkpoint_dir = f"{checkpoint_dir_base}_{idx}"
+        idx += 1
+    os.makedirs(checkpoint_dir)
     print(f"Checkpoints will be saved to: {checkpoint_dir}/")
 
     config_save_path = os.path.join(checkpoint_dir, "config.yaml")
@@ -478,10 +738,32 @@ def main():
             }
         )
 
+    mlp_num_layers = training_config.get("mlp_num_layers", 4)
+    mlp_hidden_factor = training_config.get("mlp_hidden_factor", 2)
     layer_mlps = [
-        MLP(num_heads=num_kv_heads, head_dim=head_dim).to(device)
+        MLP(
+            num_heads=num_kv_heads,
+            head_dim=head_dim,
+            num_layers=mlp_num_layers,
+            hidden_factor=mlp_hidden_factor,
+        ).to(device)
         for _ in range(num_layers)
     ]
+
+    learn_target_perc = training_config.get("learn_target_perc", False)
+    if learn_target_perc:
+        default_perc = training_config.get("target_perc", 75.0) / 100.0
+        init_logit = math.log(default_perc / (1.0 - default_perc))
+        target_perc_params = [
+            nn.Parameter(torch.tensor(init_logit, dtype=torch.float32, device=device))
+            for _ in range(num_layers)
+        ]
+        print(
+            f"Meta-learning target_perc: {num_layers} per-layer params "
+            f"(init={default_perc * 100:.1f}%)"
+        )
+    else:
+        target_perc_params = None
 
     print("Loading dataset...")
     hf_dataset = load_data()
@@ -505,13 +787,16 @@ def main():
     print(
         f"Starting meta-training... (batches_per_epoch: {batches_per_epoch or 'unlimited'})"
     )
-    layer_mlps, inner_lr_params = meta_train(
+    layer_mlps, inner_lr_params, target_perc_params = meta_train(
         model=model,
+        model_name=model_name,
         layer_mlps=layer_mlps,
         dataloader=dataloader,
         device=device,
         config=training_config,
         checkpoint_path=checkpoint_path,
+        tokenizer=tokenizer,
+        target_perc_params=target_perc_params,
         loss_fn=loss_fn,
         use_wandb=use_wandb,
     )
@@ -519,8 +804,8 @@ def main():
     if use_wandb:
         wandb.finish()
 
-    return layer_mlps, inner_lr_params
+    return layer_mlps, inner_lr_params, target_perc_params
 
 
 if __name__ == "__main__":
-    layer_mlps, inner_lr_params = main()
+    layer_mlps, inner_lr_params, target_perc_params = main()

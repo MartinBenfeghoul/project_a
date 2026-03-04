@@ -103,6 +103,15 @@ def main(benchmark, file_path, decimal_points=4):
         else:
             print("")
 
+    eff = results.get("efficiency_metrics", {})
+    if eff:
+        print("\nEfficiency metrics:\n")
+        print(round(eff.get("eval_wall_time_minutes", "N/A"), decimal_points))
+        print(round(eff.get("prefill_latency_ms_mean", "N/A"), decimal_points))
+        print(round(eff.get("decode_latency_ms_mean", "N/A"), decimal_points))
+        print(round(eff.get("gpu_peak_mem_gib", "N/A"), decimal_points))
+        print(round(eff.get("gpu_kv_cache_overhead_gib", "N/A"), decimal_points))
+
 if __name__ == "__main__":
     args = parse_args()
     file_path = args.file_path

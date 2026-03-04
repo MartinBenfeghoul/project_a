@@ -270,16 +270,26 @@ class MLPValueCache(SingleTensorCache):
                     offset += chunk
             else:
                 self._meta_inner_lrs = {}
+            if "target_perc_params" in checkpoint:
+                # Convert logits → percentages (mirrors meta_learning.py sigmoid parameterisation)
+                self._meta_target_percs: dict[int, float] = {
+                    i: torch.sigmoid(t).item() * 100
+                    for i, t in enumerate(checkpoint["target_perc_params"])
+                }
+            else:
+                self._meta_target_percs = {}
         else:
             self._meta_weights = {}
             self._meta_inner_lrs = {}
+            self._meta_target_percs = {}
 
     def _build_layer(self, layer_idx: int) -> MLPValueLayer:
+        target_perc = self._meta_target_percs.get(layer_idx, self.target_perc[layer_idx])
         return MLPValueLayer(
             mlp_num_layers=self.num_layers_per_mlp[layer_idx],
             mlp_hidden_factor=self.hidden_factors_per_mlp[layer_idx],
             mlp_num_heads=self.num_heads_per_mlp[layer_idx],
-            target_perc=self.target_perc[layer_idx],
+            target_perc=target_perc,
             per_sequence=self.per_sequence,
             loss_func=self.loss_func,
             num_epochs=self.num_epochs,

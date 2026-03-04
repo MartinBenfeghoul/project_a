@@ -8,6 +8,12 @@ training:
   meta_lr: 3e-4
   inner_lr: 3e-2
   learn_inner_lr: true
+  learn_target_perc: true
+  target_perc: 50.0 # initial value (same for all layers)
+  tau: 0.01 # soft sigmoid temperature        
+  lambda_compression: 0.1 # penalises low target_perc
+  mlp_num_layers: 2
+  mlp_hidden_factor: 2
   support_ratio: 0.7
   num_meta_epochs: 20
   loss_func: "mse"
