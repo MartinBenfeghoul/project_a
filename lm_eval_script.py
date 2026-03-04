@@ -336,6 +336,7 @@ def parse_args():
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
+    parser.add_argument("--override_target_perc", action="store_true", help="Use --target_perc instead of the per-layer values stored in the meta-weights checkpoint.")
     parser.add_argument("--un_rope", action="store_true", help="Undo RoPE on keys before MLP training and inference.")
     parser.add_argument("--rope_theta", type=float, default=500_000.0, help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).")
 
@@ -383,12 +384,18 @@ def override_args_from_meta_weights(args):
 
     if "target_perc_params" in ckpt:
         meta_percs = [torch.sigmoid(t).item() * 100 for t in ckpt["target_perc_params"]]
-        args.target_perc = meta_percs
-        print(
-            f"[meta_weights] Loaded per-layer target_perc: "
-            f"mean={sum(meta_percs)/len(meta_percs):.1f}%, "
-            f"min={min(meta_percs):.1f}%, max={max(meta_percs):.1f}%"
-        )
+        if args.override_target_perc:
+            print(
+                f"[meta_weights] Ignoring per-layer target_perc from checkpoint "
+                f"(mean={sum(meta_percs)/len(meta_percs):.1f}%); using --target_perc={args.target_perc}."
+            )
+        else:
+            args.target_perc = meta_percs
+            print(
+                f"[meta_weights] Loaded per-layer target_perc: "
+                f"mean={sum(meta_percs)/len(meta_percs):.1f}%, "
+                f"min={min(meta_percs):.1f}%, max={max(meta_percs):.1f}%"
+            )
 
     print(
         f"[meta_weights] Inferred: num_layers={n_layers}, hidden_factor={hidden_factor}, "
