@@ -33,10 +33,21 @@ from utils import (
     Logger,
 )
 from model.mlp import MLP
+from utils import inverse_rope, compute_rope_cos_sin
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def unrope(keys: torch.Tensor, token_slice: slice, rope_theta: float) -> torch.Tensor:
+    """Un-rope keys extracted from the KV cache at positions given by token_slice."""
+    start_pos = token_slice.start or 0
+    T = keys.shape[2]
+    cos, sin = compute_rope_cos_sin(
+        start_pos + T, keys.shape[-1], rope_theta, keys.device, keys.dtype
+    )
+    return inverse_rope(keys, cos[:, :, start_pos:], sin[:, :, start_pos:])
 
 
 def inner_loop_functional(
@@ -47,6 +58,8 @@ def inner_loop_functional(
     inner_steps,
     loss_fn=F.mse_loss,
     track_losses=False,
+    un_rope=False,
+    rope_theta=500_000.0,
 ):
     theta = [
         p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)
@@ -66,6 +79,8 @@ def inner_loop_functional(
     
         for layer_idx, layer in enumerate(kv_cache.layers):
             k = layer.keys[:, :, support_slice, :].float()
+            if un_rope:
+                k = unrope(k, support_slice, rope_theta)
             v = layer.values[:, :, support_slice, :].float()
 
             mlp = layer_mlps[layer_idx]
@@ -104,7 +119,8 @@ def inner_loop_functional(
     if track_losses:
         with torch.no_grad():
             final_support_loss, _ = compute_loss_functional(
-                layer_mlps, kv_cache, support_slice, phi, loss_fn
+                layer_mlps, kv_cache, support_slice, phi, loss_fn,
+                un_rope=un_rope, rope_theta=rope_theta,
             )
             final_support_loss = final_support_loss.item()
 
@@ -132,12 +148,16 @@ def compute_loss_functional(
     phi,
     loss_fn=F.mse_loss,
     track_per_layer=False,
+    un_rope=False,
+    rope_theta=500_000.0,
 ):
     total_loss = 0
     per_layer_losses = [] if track_per_layer else None
 
     for layer_idx, layer in enumerate(kv_cache.layers):
         k = layer.keys[:, :, token_slice, :].float()
+        if un_rope:
+            k = unrope(k, token_slice, rope_theta)
         v = layer.values[:, :, token_slice, :].float()
 
         mlp = layer_mlps[layer_idx]
@@ -162,6 +182,8 @@ def compute_compressed_loss(
     tau=0.01,
     lambda_compression=0.0,
     track_per_layer=False,
+    un_rope=False,
+    rope_theta=500_000.0,
 ):
     """
     Differentiable outer-loop query loss with soft compression.
@@ -185,6 +207,8 @@ def compute_compressed_loss(
 
     for layer_idx, layer in enumerate(kv_cache.layers):
         k_q = layer.keys[:, :, query_slice, :].float()
+        if un_rope:
+            k_q = unrope(k_q, query_slice, rope_theta)
         v_q = layer.values[:, :, query_slice, :].float()
 
         mlp = layer_mlps[layer_idx]
@@ -281,6 +305,8 @@ def meta_step(
     lambda_compression,
     should_log,
     device,
+    un_rope=False,
+    rope_theta=500_000.0,
 ):
     batch_start_time = time.time()
 
@@ -307,6 +333,8 @@ def meta_step(
             inner_steps,
             loss_fn,
             track_losses=should_log,
+            un_rope=un_rope,
+            rope_theta=rope_theta,
         )
     )
 
@@ -320,6 +348,8 @@ def meta_step(
             tau=tau,
             lambda_compression=lambda_compression,
             track_per_layer=should_log,
+            un_rope=un_rope,
+            rope_theta=rope_theta,
         )
     else:
         query_loss, per_layer_losses = compute_loss_functional(
@@ -329,6 +359,8 @@ def meta_step(
             phi,
             loss_fn,
             track_per_layer=should_log,
+            un_rope=un_rope,
+            rope_theta=rope_theta,
         )
 
     del kv_cache
@@ -412,6 +444,8 @@ def run_epoch(
     grad_accum_steps = config.get("grad_accum_steps", 1)
     tau = config.get("tau", 0.01)
     lambda_compression = config.get("lambda_compression", 0.0)
+    un_rope = config.get("un_rope", False)
+    rope_theta = config.get("rope_theta", 500_000.0)
 
     epoch_loss = 0
     num_batches = 0
@@ -447,6 +481,8 @@ def run_epoch(
             lambda_compression,
             should_log,
             device,
+            un_rope=un_rope,
+            rope_theta=rope_theta,
         )
 
         accumulate_gradients(
@@ -550,6 +586,8 @@ def evaluate_ruler(
         "loss_func": training_config.get("loss_func", "mse"),
         "num_epochs": training_config.inner_steps,
         "meta_weights_path": epoch_checkpoint_path,
+        "un_rope": training_config.get("un_rope", False),
+        "rope_theta": training_config.get("rope_theta", 500_000.0),
     }
 
     lm = CompressedCacheHFLM(

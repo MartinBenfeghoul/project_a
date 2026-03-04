@@ -213,7 +213,9 @@ def main(args):
         "optimizer": args.optimizer,
         "loss_func": args.loss_func,
         "num_epochs": args.num_epochs,
-        "meta_weights_path": args.meta_weights_path
+        "meta_weights_path": args.meta_weights_path,
+        "un_rope": args.un_rope,
+        "rope_theta": args.rope_theta,
     }
 
     model.eval()
@@ -332,8 +334,10 @@ def parse_args():
     parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", type=str, default="adam")
     parser.add_argument("--loss_func", type=str, default="mse")
-    parser.add_argument("--num_epochs", type=int, default=1)
+    parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
+    parser.add_argument("--un_rope", action="store_true", help="Undo RoPE on keys before MLP training and inference.")
+    parser.add_argument("--rope_theta", type=float, default=500_000.0, help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).")
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:

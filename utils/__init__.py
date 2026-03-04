@@ -19,3 +19,4 @@ from .logging import (
     save_checkpoint,
     log_batch,
 )
+from .rope import inverse_rope, compute_rope_cos_sin
