@@ -5,6 +5,7 @@ Each MLP learns to predict value vectors from key vectors. The inner loop adapts
 MLP weights to a support set of KV pairs; the outer (meta) loop optimises the
 initial weights so that adapted MLPs generalise to the query set.
 """
+import itertools
 import math
 import os
 import time
@@ -425,7 +426,7 @@ def accumulate_gradients(
 def run_epoch(
     model,
     layer_mlps,
-    dataloader,
+    data_iter,
     meta_optimizer,
     inner_lr_params,
     target_perc_params,
@@ -452,12 +453,8 @@ def run_epoch(
     accum_count = 0
     meta_optimizer.zero_grad()
 
-    for batch_idx, batch in enumerate(
-        tqdm(dataloader, total=batches_per_epoch or len(dataloader))
-    ):
-        if batches_per_epoch is not None and batch_idx >= batches_per_epoch:
-            break
-
+    batch_iter = itertools.islice(data_iter, batches_per_epoch)
+    for batch_idx, batch in enumerate(tqdm(batch_iter, total=batches_per_epoch)):
         should_log = batch_idx % log_interval == 0
 
         (
@@ -652,6 +649,7 @@ def meta_train(
     )
     model.eval()
     global_step = 0
+    data_iter = iter(dataloader)
 
     if use_wandb:
         wandb.define_metric("benchmark/*", step_metric="epoch/epoch")
@@ -662,7 +660,7 @@ def meta_train(
         epoch_loss, num_batches, global_step = run_epoch(
             model,
             layer_mlps,
-            dataloader,
+            data_iter,
             meta_optimizer,
             inner_lr_params,
             target_perc_params,

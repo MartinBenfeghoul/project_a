@@ -7,6 +7,7 @@ from torch.utils.data import IterableDataset
 def load_data(
     dataset_path: str = "HuggingFaceFW/fineweb-edu",
     subset_name: str = "sample-100BT",
+    shuffle_buffer_size: int = 10_000,
 ):
     if dataset_path == "example_dataset":
         # Example dataset
@@ -20,6 +21,8 @@ def load_data(
         split="train",
         streaming=True,
     )
+    if shuffle_buffer_size > 0:
+        ds = ds.shuffle(buffer_size=shuffle_buffer_size)
     return ds
 
 
