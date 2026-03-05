@@ -337,6 +337,7 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
     parser.add_argument("--override_target_perc", action="store_true", help="Use --target_perc instead of the per-layer values stored in the meta-weights checkpoint.")
+    parser.add_argument("--override_num_epochs", action="store_true", help="Use --num_epochs instead of the inner_steps value stored in the meta-weights checkpoint.")
     parser.add_argument("--un_rope", action="store_true", help="Undo RoPE on keys before MLP training and inference.")
     parser.add_argument("--rope_theta", type=float, default=500_000.0, help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).")
 
@@ -357,7 +358,10 @@ def override_args_from_meta_weights(args):
     config_path = os.path.join(os.path.dirname(args.meta_weights_path), "config.yaml")
     if os.path.exists(config_path):
         train_cfg = OmegaConf.load(config_path).training
-        args.num_epochs = train_cfg.inner_steps
+        if args.override_num_epochs:
+            print(f"[meta_weights] Ignoring num_epochs from checkpoint ({train_cfg.inner_steps}); using --num_epochs={args.num_epochs}.")
+        else:
+            args.num_epochs = train_cfg.inner_steps
         args.loss_func  = train_cfg.loss_func
 
     layer0 = next(v for k, v in ckpt.items() if k.startswith("layer_"))
