@@ -32,6 +32,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         meta_inner_lrs: list | None = None,
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
+        global_compression: bool = False,
     ):
         super().__init__()
 
@@ -41,6 +42,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.per_sequence = per_sequence
         self.target_perc = target_perc
         self.threshold = threshold
+        self.global_compression = global_compression
 
         self.loss_func = LOSS_FUNC[loss_func]
         self.optimizer_cls = OPTIMIZER[optimizer_cls]
@@ -129,6 +131,14 @@ class MLPValueLayer(SingleTensorDynamicLayer):
     def compress(self, keys: torch.Tensor) -> None:
         v_approx = self.mlp(keys)
         errors = self.loss_func(self.tensor, v_approx, reduction='none').mean(dim=-1)
+        self.compressed_len = self.tensor.shape[2]
+
+        if self.global_compression:
+            self.errors = errors
+            self.value_residuals = (self.tensor - v_approx).detach()
+            self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
+            return
+
         if self.threshold is None and self.target_perc is None:
             raise ValueError("MLPValueLayer requires either a threshold or target_perc to compress values")
         
@@ -138,13 +148,12 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             k = int(errors_b.shape[1] * (self.target_perc / 100))
             thresh = torch.topk(errors_b, k, largest=False).values[:, -1]
             mask = errors > thresh[:, None, None]
-        elif self.threshold is not None:
+        else:
             mask = errors > self.threshold
 
         self.indices = mask.nonzero(as_tuple=True)
         b, h, t = self.indices
         self.value_residuals = (self.tensor[b, h, t] - v_approx[b, h, t]).detach()
-        self.compressed_len = self.tensor.shape[2]
         self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
         self.is_compressed = True
 
@@ -280,6 +289,7 @@ class MLPValueCache(SingleTensorCache):
         meta_weights_path: str | None = None,
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
+        global_compression: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -301,6 +311,8 @@ class MLPValueCache(SingleTensorCache):
         self.num_epochs = num_epochs
         self.un_rope = un_rope
         self.rope_theta = rope_theta
+        self.global_compression = global_compression
+        self._global_compression_done = False
         self.comp_ratio = 0
 
         if meta_weights_path is not None:
@@ -325,12 +337,11 @@ class MLPValueCache(SingleTensorCache):
             self._meta_inner_lrs = {}
 
     def _build_layer(self, layer_idx: int) -> MLPValueLayer:
-        target_perc = self.target_perc[layer_idx]
         return MLPValueLayer(
             mlp_num_layers=self.num_layers_per_mlp[layer_idx],
             mlp_hidden_factor=self.hidden_factors_per_mlp[layer_idx],
             mlp_num_heads=self.num_heads_per_mlp[layer_idx],
-            target_perc=target_perc,
+            target_perc=None if self.global_compression else self.target_perc[layer_idx],
             per_sequence=self.per_sequence,
             loss_func=self.loss_func,
             num_epochs=self.num_epochs,
@@ -340,7 +351,23 @@ class MLPValueCache(SingleTensorCache):
             meta_inner_lrs=self._meta_inner_lrs.get(layer_idx),
             un_rope=self.un_rope,
             rope_theta=self.rope_theta,
+            global_compression=self.global_compression,
         )
+
+    def _run_global_compression(self):
+        all_errors = torch.cat([layer.errors.reshape(-1) for layer in self.layers])
+        global_perc = sum(self.target_perc) / len(self.target_perc)
+        k = int(all_errors.numel() * (global_perc / 100))
+        thresh = torch.topk(all_errors, k, largest=False).values[-1]
+
+        for layer in self.layers:
+            mask = layer.errors > thresh
+            layer.indices = mask.nonzero(as_tuple=True)
+            b, h, t = layer.indices
+            layer.value_residuals = layer.value_residuals[b, h, t]
+            layer.is_compressed = True
+
+        self._global_compression_done = True
 
     def update(
         self,
@@ -356,6 +383,10 @@ class MLPValueCache(SingleTensorCache):
             value_states=value_states,
             cache_kwargs=cache_kwargs,
         )
+
+        if self.global_compression and not self._global_compression_done:
+            if layer_idx == len(self.num_layers_per_mlp) - 1:
+                self._run_global_compression()
 
         return values
 

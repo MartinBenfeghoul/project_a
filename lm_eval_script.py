@@ -216,6 +216,7 @@ def main(args):
         "meta_weights_path": args.meta_weights_path,
         "un_rope": args.un_rope,
         "rope_theta": args.rope_theta,
+        "global_compression": args.global_compression,
     }
 
     model.eval()
@@ -338,6 +339,7 @@ def parse_args():
     parser.add_argument("--meta_weights_path", type=str, default=None)
     parser.add_argument("--override_target_perc", action="store_true", help="Use --target_perc instead of the per-layer values stored in the meta-weights checkpoint.")
     parser.add_argument("--override_num_epochs", action="store_true", help="Use --num_epochs instead of the inner_steps value stored in the meta-weights checkpoint.")
+    parser.add_argument("--global_compression", action="store_true", help="Pool errors across all layers and apply a single global threshold instead of per-layer thresholds.")
     parser.add_argument("--un_rope", action="store_true", help="Undo RoPE on keys before MLP training and inference.")
     parser.add_argument("--rope_theta", type=float, default=500_000.0, help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).")
 
