@@ -173,11 +173,13 @@ class SurpriseLRKCache(SingleTensorCache):
 
     def update_events(self, logits, labels):
         B, T, V = logits.shape
-        surprise = F.cross_entropy( # to avoid materialising (B, T, V) probs tensor
-            logits.reshape(B * T, V),
-            labels.reshape(B * T),
-            reduction='none',
-        ).reshape(B, T)
+        surprise = (
+            F.cross_entropy(  # to avoid materialising (B, T, V) probs tensor
+                logits.reshape(B * T, V),
+                labels.reshape(B * T),
+                reduction="none",
+            ).reshape(B, T)
+        )
 
         self.events = []
         for b in range(B):

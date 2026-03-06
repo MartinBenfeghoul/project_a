@@ -175,10 +175,9 @@ def log_batch(
 
     perc_str = ""
     if target_perc_params is not None:
-        mean_perc = (
-            sum(torch.sigmoid(p).item() * 100 for p in target_perc_params)
-            / len(target_perc_params)
-        )
+        mean_perc = sum(
+            torch.sigmoid(p).item() * 100 for p in target_perc_params
+        ) / len(target_perc_params)
         perc_str = f", Target Perc: {mean_perc:.1f}%"
 
     print(
@@ -214,8 +213,12 @@ def log_batch(
             log_dict["inner/learned_lr_max"] = max(lr_values)
 
         if target_perc_params is not None:
-            perc_values = [torch.sigmoid(p).item() * 100 for p in target_perc_params]
-            log_dict["meta/target_perc_mean"] = sum(perc_values) / len(perc_values)
+            perc_values = [
+                torch.sigmoid(p).item() * 100 for p in target_perc_params
+            ]
+            log_dict["meta/target_perc_mean"] = sum(perc_values) / len(
+                perc_values
+            )
             log_dict["meta/target_perc_min"] = min(perc_values)
             log_dict["meta/target_perc_max"] = max(perc_values)
             for layer_idx, pv in enumerate(perc_values):
@@ -224,7 +227,9 @@ def log_batch(
         wandb.log(log_dict, step=global_step)
 
 
-def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params=None):
+def save_checkpoint(
+    layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params=None
+):
     base, ext = os.path.splitext(checkpoint_path)
     epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
     epoch_params = {

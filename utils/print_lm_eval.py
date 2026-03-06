@@ -1,14 +1,13 @@
 import json
 import argparse
 
-
 LM_EVAL_TASKS = {
     "piqa": "acc,none",
     "arc_easy": "acc,none",
     "arc_challenge": "acc_norm,none",
     "hellaswag": "acc_norm,none",
     "winogrande": "acc,none",
-    "mmlu": "acc,none"
+    "mmlu": "acc,none",
 }
 
 RULER_TASKS = {
@@ -24,7 +23,7 @@ RULER_TASKS = {
     "ruler_cwe": "4096,none",
     "ruler_fwe": "4096,none",
     "ruler_qa_hotpot": "4096,none",
-    "ruler_qa_squad": "4096,none"
+    "ruler_qa_squad": "4096,none",
 }
 
 LONGBENCH_TASKS = {
@@ -50,15 +49,16 @@ ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS}
 
 
 def get_task_dict(benchmark_name):
-    if benchmark_name == 'longbench':
+    if benchmark_name == "longbench":
         task_dict = LONGBENCH_TASKS
-    elif benchmark_name == 'lm_eval':
+    elif benchmark_name == "lm_eval":
         task_dict = LM_EVAL_TASKS
-    elif benchmark_name == 'ruler':
+    elif benchmark_name == "ruler":
         task_dict = RULER_TASKS
     else:
         raise ValueError(f"Unknown benchmark: {benchmark_name}")
     return task_dict
+
 
 def geometric_mean(numbers):
     product = 1
@@ -66,39 +66,55 @@ def geometric_mean(numbers):
         product *= num
     return product ** (1 / len(numbers))
 
+
 def process_rouge(task_results, metric):
-    if metric == 'rouge_geo_mean':
-        scores = [task_results[key] for key in ["rouge1,none", "rouge2,none", "rougeL,none"]]
+    if metric == "rouge_geo_mean":
+        scores = [
+            task_results[key]
+            for key in ["rouge1,none", "rouge2,none", "rougeL,none"]
+        ]
         return geometric_mean(scores)
     return task_results[metric]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Print LM evaluation results.")
     parser.add_argument(
-        "-f", "--file_path", type=str, required=True,
-        help="Path to the input JSON file with evaluation results."
+        "-f",
+        "--file_path",
+        type=str,
+        required=True,
+        help="Path to the input JSON file with evaluation results.",
     )
     parser.add_argument(
-        "-b", "--benchmark", type=str, default='lm_eval',
-        choices=['lm_eval', 'ruler', 'longbench'],
-        help="Benchmark to use for evaluation. Default is 'lm_eval'."
+        "-b",
+        "--benchmark",
+        type=str,
+        default="lm_eval",
+        choices=["lm_eval", "ruler", "longbench"],
+        help="Benchmark to use for evaluation. Default is 'lm_eval'.",
     )
     return parser.parse_args()
+
 
 def main(benchmark, file_path, decimal_points=4):
     task_dict = get_task_dict(benchmark)
     # Load the evaluation results from the JSON file
-    with open(file_path, 'r') as f:
+    with open(file_path, "r") as f:
         results = json.load(f)
 
     for task, metric in task_dict.items():
         if task in results:
             if isinstance(metric, list):
                 for m in metric:
-                    score = round(process_rouge(results[task], m), decimal_points)
+                    score = round(
+                        process_rouge(results[task], m), decimal_points
+                    )
                     print(f"{score}")
             else:
-                score = round(process_rouge(results[task], metric), decimal_points)
+                score = round(
+                    process_rouge(results[task], metric), decimal_points
+                )
                 print(f"{score}")
         else:
             print("")
@@ -110,7 +126,10 @@ def main(benchmark, file_path, decimal_points=4):
         print(round(eff.get("prefill_latency_ms_mean", "N/A"), decimal_points))
         print(round(eff.get("decode_latency_ms_mean", "N/A"), decimal_points))
         print(round(eff.get("gpu_peak_mem_gib", "N/A"), decimal_points))
-        print(round(eff.get("gpu_kv_cache_overhead_gib", "N/A"), decimal_points))
+        print(
+            round(eff.get("gpu_kv_cache_overhead_gib", "N/A"), decimal_points)
+        )
+
 
 if __name__ == "__main__":
     args = parse_args()

@@ -7,6 +7,7 @@ from utils import (
     get_model_and_tokenizer,
 )
 
+
 def make_hook(logger, uncompressed_window=0):
     """
     :param logger: persistent logger object to record metrics
@@ -83,7 +84,7 @@ def main(
         Tuple of `(success_rate, (compression_ratio_mean, compression_ratio_std))`.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
 
@@ -150,20 +151,38 @@ def get_parser():
 
     # key cache
     parser.add_argument("--k_cache_type", type=str, default="surprise_lr")
-    parser.add_argument("--decomposition_method", type=str, default="svd", choices=["svd", "lora"])
+    parser.add_argument(
+        "--decomposition_method",
+        type=str,
+        default="svd",
+        choices=["svd", "lora"],
+    )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
-    parser.add_argument("--rank_selection", type=str, default="comp_ratio", choices=["comp_ratio", "energy"])
+    parser.add_argument(
+        "--rank_selection",
+        type=str,
+        default="comp_ratio",
+        choices=["comp_ratio", "energy"],
+    )
     parser.add_argument("--k_lr", type=float, default=1e-2)
     parser.add_argument("--n_iter", type=int, default=3)
 
     # value cache
     parser.add_argument("--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=[2]*16)
-    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=[1]*16)
-    parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=[1]*16)
+    parser.add_argument(
+        "--num_layers_per_mlp", type=int, nargs="+", default=[2] * 16
+    )
+    parser.add_argument(
+        "--hidden_factors_per_mlp", type=int, nargs="+", default=[1] * 16
+    )
+    parser.add_argument(
+        "--num_heads_per_mlp", type=int, nargs="+", default=[1] * 16
+    )
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument("--target_perc", type=int, nargs="+", default=[100]*8+[85]*8)
+    parser.add_argument(
+        "--target_perc", type=int, nargs="+", default=[100] * 8 + [85] * 8
+    )
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", type=str, default="adam")

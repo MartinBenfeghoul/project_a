@@ -5,6 +5,7 @@ Each MLP learns to predict value vectors from key vectors. The inner loop adapts
 MLP weights to a support set of KV pairs; the outer (meta) loop optimises the
 initial weights so that adapted MLPs generalise to the query set.
 """
+
 import itertools
 import math
 import os
@@ -42,7 +43,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def unrope(keys: torch.Tensor, token_slice: slice, rope_theta: float) -> torch.Tensor:
+def unrope(
+    keys: torch.Tensor, token_slice: slice, rope_theta: float
+) -> torch.Tensor:
     """Un-rope keys extracted from the KV cache at positions given by token_slice."""
     start_pos = token_slice.start or 0
     T = keys.shape[2]
@@ -78,7 +81,7 @@ def inner_loop_functional(
 
     for _ in range(inner_steps):
         total_loss = 0.0
-    
+
         for layer_idx, layer in enumerate(kv_cache.layers):
             k = layer.keys[:, :, support_slice, :].float()
             if un_rope:
@@ -121,8 +124,13 @@ def inner_loop_functional(
     if track_losses:
         with torch.no_grad():
             final_support_loss, _ = compute_loss_functional(
-                layer_mlps, kv_cache, support_slice, phi, loss_fn,
-                un_rope=un_rope, rope_theta=rope_theta,
+                layer_mlps,
+                kv_cache,
+                support_slice,
+                phi,
+                loss_fn,
+                un_rope=un_rope,
+                rope_theta=rope_theta,
             )
             final_support_loss = final_support_loss.item()
 
@@ -226,7 +234,9 @@ def compute_compressed_loss(
             errors_det = (v_q - v_hat_q).pow(2).mean(dim=-1)  # [B, H, T]
         errors_flat = errors_det.view(B, -1)  # [B, N]
 
-        perc = torch.sigmoid(target_perc_params[layer_idx])  # fraction to compress
+        perc = torch.sigmoid(
+            target_perc_params[layer_idx]
+        )  # fraction to compress
         k_float = (perc * N).clamp(1.0, float(N - 1))
 
         # Differentiable threshold: linearly interpolate adjacent sorted errors.
@@ -238,15 +248,20 @@ def compute_compressed_loss(
 
         # Per-sequence threshold [B], differentiable w.r.t. frac → perc
         thresh = (
-            sorted_errors[:, k_lo] + frac * (sorted_errors[:, k_hi] - sorted_errors[:, k_lo])
-        ).view(B, 1, 1)  # [B, 1, 1] for broadcasting with [B, H, T]
+            sorted_errors[:, k_lo]
+            + frac * (sorted_errors[:, k_hi] - sorted_errors[:, k_lo])
+        ).view(
+            B, 1, 1
+        )  # [B, 1, 1] for broadcasting with [B, H, T]
 
         # soft_mask ≈ 1: keep residual (high error); ≈ 0: use MLP (low error)
         soft_mask = torch.sigmoid((errors_det - thresh) / tau)  # [B, H, T]
 
         # Loss = MLP error weighted by (1 - soft_mask): compressed tokens must be
         # well-predicted; residual tokens are "free" (stored explicitly).
-        mse_per_token = (v_q - v_hat_q).pow(2).mean(dim=-1)  # [B, H, T], grad → phi
+        mse_per_token = (
+            (v_q - v_hat_q).pow(2).mean(dim=-1)
+        )  # [B, H, T], grad → phi
         layer_loss = ((1.0 - soft_mask) * mse_per_token).mean()
 
         # Compression encouragement: penalise low perc to prevent trivial perc → 0
@@ -272,7 +287,9 @@ def setup_optimizer(layer_mlps, target_perc_params, config, device):
     if learn_target_perc and target_perc_params is not None:
         meta_params = meta_params + list(target_perc_params)
 
-    if learn_inner_lr:  # TODO: maybe try doing this per head or per layer rather than per parameter
+    if (
+        learn_inner_lr
+    ):  # TODO: maybe try doing this per head or per layer rather than per parameter
         inner_lr_params = [
             nn.Parameter(
                 torch.tensor(
@@ -386,7 +403,11 @@ def accumulate_gradients(
 ):
     phi_flat = [p for w, b in phi for p in w + b]
 
-    learnable_perc = [p for p in target_perc_params if p.requires_grad] if target_perc_params else []
+    learnable_perc = (
+        [p for p in target_perc_params if p.requires_grad]
+        if target_perc_params
+        else []
+    )
 
     extra_params = []
     if inner_lr_params is not None:
@@ -400,7 +421,7 @@ def accumulate_gradients(
         retain_graph=False,
     )
     g_phi = all_grads[: len(phi_flat)]
-    g_extra = all_grads[len(phi_flat):]
+    g_extra = all_grads[len(phi_flat) :]
 
     for p_theta, g in zip(theta_list, g_phi):
         if g is None:
@@ -412,7 +433,9 @@ def accumulate_gradients(
 
     offset = 0
     if inner_lr_params is not None:
-        for lr_param, g in zip(inner_lr_params, g_extra[: len(inner_lr_params)]):
+        for lr_param, g in zip(
+            inner_lr_params, g_extra[: len(inner_lr_params)]
+        ):
             if lr_param.grad is None:
                 lr_param.grad = g.detach() * scale
             else:
@@ -459,7 +482,9 @@ def run_epoch(
     meta_optimizer.zero_grad()
 
     batch_iter = itertools.islice(data_iter, batches_per_epoch)
-    for batch_idx, batch in enumerate(tqdm(batch_iter, total=batches_per_epoch)):
+    for batch_idx, batch in enumerate(
+        tqdm(batch_iter, total=batches_per_epoch)
+    ):
         should_log = batch_idx % log_interval == 0
 
         (
@@ -496,7 +521,7 @@ def run_epoch(
         )
 
         accum_count += 1
-        if accum_count >= grad_accum_steps: # gradient update every 32 batches
+        if accum_count >= grad_accum_steps:  # gradient update every 32 batches
             meta_optimizer.step()
             meta_optimizer.zero_grad()
             global_step += 1
@@ -544,7 +569,12 @@ def evaluate_ruler(
     """Run RULER benchmark with current MLP weights and log average score to wandb."""
     from lm_eval import evaluator
     from lm_eval.tasks import TaskManager
-    from lm_eval_script import CompressedCacheHFLM, get_tasks, get_device, GEN_KWARGS
+    from lm_eval_script import (
+        CompressedCacheHFLM,
+        get_tasks,
+        get_device,
+        GEN_KWARGS,
+    )
 
     print(f"Running RULER evaluation (epoch {epoch}, {num_samples} samples)...")
 
@@ -552,7 +582,9 @@ def evaluate_ruler(
     num_kv_heads = model.config.num_key_value_heads
 
     if target_perc_params is not None:
-        target_perc = [torch.sigmoid(p).item() * 100 for p in target_perc_params]
+        target_perc = [
+            torch.sigmoid(p).item() * 100 for p in target_perc_params
+        ]
     else:
         default_perc = training_config.get("target_perc", 50.0)
         target_perc = [default_perc] * num_layers
@@ -576,7 +608,8 @@ def evaluate_ruler(
     value_cache_kwargs = {
         "cache_type": "mlp",
         "num_layers_per_mlp": [training_config.mlp_num_layers] * num_layers,
-        "hidden_factors_per_mlp": [training_config.mlp_hidden_factor] * num_layers,
+        "hidden_factors_per_mlp": [training_config.mlp_hidden_factor]
+        * num_layers,
         "num_heads_per_mlp": [num_kv_heads] * num_layers,
         "per_sequence": False,
         "target_perc": target_perc,
@@ -619,12 +652,20 @@ def evaluate_ruler(
     task_scores = {}
     for task_name, task_results in results["results"].items():
         for key, val in task_results.items():
-            if isinstance(val, (int, float)) and "stderr" not in key and key not in ("alias", "samples"):
+            if (
+                isinstance(val, (int, float))
+                and "stderr" not in key
+                and key not in ("alias", "samples")
+            ):
                 task_scores[task_name] = val
                 break
 
-    avg_score = sum(task_scores.values()) / len(task_scores) if task_scores else 0.0
-    print(f"RULER eval epoch {epoch}: avg={avg_score:.4f}, per-task={task_scores}")
+    avg_score = (
+        sum(task_scores.values()) / len(task_scores) if task_scores else 0.0
+    )
+    print(
+        f"RULER eval epoch {epoch}: avg={avg_score:.4f}, per-task={task_scores}"
+    )
 
     if use_wandb:
         log_data = {"benchmark/ruler_avg": avg_score, "epoch/epoch": epoch}
@@ -693,7 +734,13 @@ def meta_train(
                 step=global_step,
             )
 
-        save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params)
+        save_checkpoint(
+            layer_mlps,
+            inner_lr_params,
+            checkpoint_path,
+            epoch,
+            target_perc_params,
+        )
 
         eval_ruler = config.get("eval_ruler", True)
         if eval_ruler and tokenizer is not None:
@@ -795,7 +842,9 @@ def main():
     init_logit = math.log(default_perc / (1.0 - default_perc))
     if learn_target_perc:
         target_perc_params = [
-            nn.Parameter(torch.tensor(init_logit, dtype=torch.float32, device=device))
+            nn.Parameter(
+                torch.tensor(init_logit, dtype=torch.float32, device=device)
+            )
             for _ in range(num_layers)
         ]
         print(
@@ -807,7 +856,9 @@ def main():
             torch.tensor(init_logit, dtype=torch.float32, device=device)
             for _ in range(num_layers)
         ]
-        print(f"Fixed target_perc: {default_perc * 100:.1f}% (not meta-learned)")
+        print(
+            f"Fixed target_perc: {default_perc * 100:.1f}% (not meta-learned)"
+        )
 
     print("Loading dataset...")
     hf_dataset = load_data()
