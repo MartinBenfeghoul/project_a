@@ -2,7 +2,7 @@ model:
   name: "meta-llama/Llama-3.1-8B-Instruct"
 
 training:
-  seq_len: 512
+  seq_len: 4096
   batch_size: 1 
   inner_steps: 1
   meta_lr: 3e-4
@@ -14,14 +14,13 @@ training:
   lambda_compression: 0.1 # penalises low target_perc
   mlp_num_layers: 2
   mlp_hidden_factor: 2
-  support_ratio: 0.7
   num_meta_epochs: 20
   loss_func: "mse"
   grad_accum_steps: 32  # accumulate gradients over N tasks before each optimizer step
   log_interval: 10  # log metrics every N batches
   batches_per_epoch: 3200  # limit batches per epoch (null for unlimited)
   eval_ruler: true # evaluate RULER benchmark at end of each epoch
-  eval_ruler_samples: 10
+  eval_ruler_samples: 15
   un_rope: false # undo RoPE on keys before MLP training/inference
   rope_theta: 500000.0 # RoPE theta used to recompute cos/sin
 

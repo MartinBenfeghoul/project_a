@@ -365,6 +365,7 @@ def override_args_from_meta_weights(args):
         else:
             args.num_epochs = train_cfg.inner_steps
         args.loss_func  = train_cfg.loss_func
+        args.un_rope = train_cfg.un_rope
 
     layer0 = next(v for k, v in ckpt.items() if k.startswith("layer_"))
     weight_keys = sorted(k for k in layer0 if k.startswith("weights."))

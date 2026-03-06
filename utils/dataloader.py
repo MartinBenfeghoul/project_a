@@ -110,3 +110,27 @@ def collate(batch):
         "labels": torch.stack([b["labels"] for b in batch]),
         "attention_mask": torch.stack([b["attention_mask"] for b in batch]),
     }
+
+
+class PairedDataset(IterableDataset):
+    """Wraps a Dataset and yields consecutive pairs as (support, query) tasks."""
+
+    def __init__(self, base_dataset):
+        self.base = base_dataset
+
+    def __iter__(self):
+        it = iter(self.base)
+        for support in it:
+            query = next(it, None)
+            if query is None:
+                break
+            yield {"support": support, "query": query}
+
+
+def collate_pairs(batch):
+    return {
+        "support_input_ids":      torch.stack([b["support"]["input_ids"]      for b in batch]),
+        "support_attention_mask": torch.stack([b["support"]["attention_mask"] for b in batch]),
+        "query_input_ids":        torch.stack([b["query"]["input_ids"]        for b in batch]),
+        "query_attention_mask":   torch.stack([b["query"]["attention_mask"]   for b in batch]),
+    }

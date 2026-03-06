@@ -6,7 +6,9 @@ from .dataloader import (
     PackedTokens,
     load_data,
     collate,
+    collate_pairs,
     Dataset,
+    PairedDataset,
 )
 from .training import train_mlps, set_seed
 from .args import str2bool, list_of_strings, list_of_floats, args_type

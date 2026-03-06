@@ -25,8 +25,9 @@ from tqdm import tqdm
 from utils import (
     get_model_and_tokenizer,
     Dataset,
+    PairedDataset,
     load_data,
-    collate,
+    collate_pairs,
     get_loss_func,
     generate_run_name,
     save_checkpoint,
@@ -296,7 +297,6 @@ def meta_step(
     model,
     layer_mlps,
     batch,
-    support_ratio,
     inner_lr,
     inner_steps,
     loss_fn,
@@ -311,25 +311,21 @@ def meta_step(
 ):
     batch_start_time = time.time()
 
-    input_ids = batch["input_ids"].to(device)
-    _, seq_len = input_ids.shape
-    split_idx = int(seq_len * support_ratio)
-    support_slice = slice(0, split_idx)
-    query_slice = slice(split_idx, seq_len)
+    all_tokens = slice(None)  # use the full sequence for both support and query
 
     with torch.no_grad():
-        out = model(
-            input_ids=input_ids,
-            attention_mask=batch["attention_mask"].to(device),
+        support_out = model(
+            input_ids=batch["support_input_ids"].to(device),
+            attention_mask=batch["support_attention_mask"].to(device),
             use_cache=True,
         )
-        kv_cache = out.past_key_values
+        support_kv = support_out.past_key_values
 
     theta_list, phi, inner_metrics = (
         inner_loop_functional(  # phi = adapted_params
             layer_mlps,
-            kv_cache,
-            support_slice,
+            support_kv,
+            all_tokens,
             inner_lr_params if inner_lr_params is not None else inner_lr,
             inner_steps,
             loss_fn,
@@ -338,12 +334,21 @@ def meta_step(
             rope_theta=rope_theta,
         )
     )
+    del support_kv
+
+    with torch.no_grad():
+        query_out = model(
+            input_ids=batch["query_input_ids"].to(device),
+            attention_mask=batch["query_attention_mask"].to(device),
+            use_cache=True,
+        )
+        query_kv = query_out.past_key_values
 
     if target_perc_params is not None:
         query_loss, per_layer_losses = compute_compressed_loss(
             layer_mlps,
-            kv_cache,
-            query_slice,
+            query_kv,
+            all_tokens,
             phi,
             target_perc_params,
             tau=tau,
@@ -355,8 +360,8 @@ def meta_step(
     else:
         query_loss, per_layer_losses = compute_loss_functional(
             layer_mlps,
-            kv_cache,
-            query_slice,
+            query_kv,
+            all_tokens,
             phi,
             loss_fn,
             track_per_layer=should_log,
@@ -364,7 +369,7 @@ def meta_step(
             rope_theta=rope_theta,
         )
 
-    del kv_cache
+    del query_kv
     batch_time_ms = (time.time() - batch_start_time) * 1000
     return (
         query_loss,
@@ -381,11 +386,12 @@ def accumulate_gradients(
 ):
     phi_flat = [p for w, b in phi for p in w + b]
 
+    learnable_perc = [p for p in target_perc_params if p.requires_grad] if target_perc_params else []
+
     extra_params = []
     if inner_lr_params is not None:
         extra_params.extend(inner_lr_params)
-    if target_perc_params is not None:
-        extra_params.extend(target_perc_params)
+    extra_params.extend(learnable_perc)
 
     all_grads = torch.autograd.grad(
         query_loss,
@@ -413,9 +419,9 @@ def accumulate_gradients(
                 lr_param.grad.add_(g.detach() * scale)
         offset += len(inner_lr_params)
 
-    if target_perc_params is not None:
+    if learnable_perc:
         for perc_param, g in zip(
-            target_perc_params, g_extra[offset : offset + len(target_perc_params)]
+            learnable_perc, g_extra[offset : offset + len(learnable_perc)]
         ):
             if perc_param.grad is None:
                 perc_param.grad = g.detach() * scale
@@ -439,7 +445,6 @@ def run_epoch(
 ):
     inner_lr = config.inner_lr
     inner_steps = config.inner_steps
-    support_ratio = config.support_ratio
     log_interval = config.get("log_interval", 10)
     batches_per_epoch = config.get("batches_per_epoch", None)
     grad_accum_steps = config.get("grad_accum_steps", 1)
@@ -468,7 +473,6 @@ def run_epoch(
             model,
             layer_mlps,
             batch,
-            support_ratio,
             inner_lr,
             inner_steps,
             loss_fn,
@@ -492,7 +496,7 @@ def run_epoch(
         )
 
         accum_count += 1
-        if accum_count >= grad_accum_steps:
+        if accum_count >= grad_accum_steps: # gradient update every 32 batches
             meta_optimizer.step()
             meta_optimizer.zero_grad()
             global_step += 1
@@ -787,9 +791,9 @@ def main():
     ]
 
     learn_target_perc = training_config.get("learn_target_perc", False)
+    default_perc = training_config.get("target_perc", 75.0) / 100.0
+    init_logit = math.log(default_perc / (1.0 - default_perc))
     if learn_target_perc:
-        default_perc = training_config.get("target_perc", 75.0) / 100.0
-        init_logit = math.log(default_perc / (1.0 - default_perc))
         target_perc_params = [
             nn.Parameter(torch.tensor(init_logit, dtype=torch.float32, device=device))
             for _ in range(num_layers)
@@ -799,22 +803,28 @@ def main():
             f"(init={default_perc * 100:.1f}%)"
         )
     else:
-        target_perc_params = None
+        target_perc_params = [
+            torch.tensor(init_logit, dtype=torch.float32, device=device)
+            for _ in range(num_layers)
+        ]
+        print(f"Fixed target_perc: {default_perc * 100:.1f}% (not meta-learned)")
 
     print("Loading dataset...")
     hf_dataset = load_data()
 
-    meta_dataset = Dataset(
-        hf_dataset,
-        tokenizer,
-        seq_len=training_config.seq_len,  # TODO: check whether sampling sequence length from a list of possible seq_lens improves
-        eos_id=tokenizer.eos_token_id,
+    meta_dataset = PairedDataset(
+        Dataset(
+            hf_dataset,
+            tokenizer,
+            seq_len=training_config.seq_len,
+            eos_id=tokenizer.eos_token_id,
+        )
     )
 
     dataloader = DataLoader(
         meta_dataset,
         batch_size=training_config.batch_size,
-        collate_fn=collate,
+        collate_fn=collate_pairs,
     )
 
     batches_per_epoch = training_config.get("batches_per_epoch", None)
