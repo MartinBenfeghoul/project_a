@@ -69,11 +69,7 @@ def get_svd_execution_plan(
     except RuntimeError as exc:
         if "not implemented for" not in str(exc):
             raise
-        if device.type == "cpu":
-            plan["use_float32_fallback"] = True
-        else:
-            plan["available"] = False
-            plan["error"] = str(exc)
+        plan["use_float32_fallback"] = True
 
     SVD_EXECUTION_PLANS[key] = plan
     return plan
@@ -224,7 +220,7 @@ def main():
     print()
     if DTYPE == torch.bfloat16:
         print(
-            "Note: unsupported CPU dtypes are benchmarked via a float32 SVD fallback"
+            "Note: unsupported CPU/CUDA dtypes are benchmarked via a float32 SVD fallback"
         )
         print("with input/output casts included in the measured runtime.")
         print()
