@@ -1,6 +1,7 @@
 import math
 import statistics
 import time
+from tqdm import tqdm
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -160,7 +161,7 @@ def add_device_results(
 def build_results():
     records = []
 
-    for spec in SHAPE_SPECS:
+    for spec in  tqdm(SHAPE_SPECS):
         row = {
             "label": spec["label"],
             "shape": str(spec["shape"]),
