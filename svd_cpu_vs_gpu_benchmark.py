@@ -170,7 +170,7 @@ def build_results():
 
         add_device_results(row, "cpu", spec["shape"], DTYPE)
         add_device_results(row, "cuda", spec["shape"], DTYPE)
-        row["gpu_speedup_vs_cpu"] = row["cpu_mean_ms"] / row["gpu_mean_ms"]
+        row["cuda_speedup_vs_cpu"] = row["cpu_mean_ms"] / row["cuda_mean_ms"]
 
         records.append(row)
 
@@ -192,12 +192,12 @@ def plot_results(df: pd.DataFrame, output_path: str) -> None:
         label="CPU",
     )
 
-    if df["gpu_mean_ms"].notna().any():
+    if df["cuda_mean_ms"].notna().any():
         ax.bar(
             [i + width / 2 for i in x],
-            df["gpu_mean_ms"],
+            df["cuda_mean_ms"],
             width=width,
-            yerr=df["gpu_std_ms"],
+            yerr=df["cuda_std_ms"],
             capsize=4,
             label="GPU",
         )
@@ -231,7 +231,7 @@ def main():
 
     df = build_results()
     print(df.round(3).to_string(index=False))
-    plot_path = "svd_cpu_vs_gpu_benchmark.png"
+    plot_path = "svd_cpu_vs_cuda_benchmark.png"
     plot_results(df, plot_path)
     print()
     print(f"Saved plot to {plot_path}")
