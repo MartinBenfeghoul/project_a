@@ -13,6 +13,9 @@ tqdm
 
 html2text==2025.4.15
 bs4==0.0.2
+jieba
+fuzzywuzzy
+rouge
 
 # notebooks and analysis - version not important as long as it runs
 ipython
