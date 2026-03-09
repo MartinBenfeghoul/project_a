@@ -169,7 +169,7 @@ def build_results():
         }
 
         add_device_results(row, "cpu", spec["shape"], DTYPE)
-        add_device_results(row, "gpu", spec["shape"], DTYPE)
+        add_device_results(row, "cuda", spec["shape"], DTYPE)
         row["gpu_speedup_vs_cpu"] = row["cpu_mean_ms"] / row["gpu_mean_ms"]
 
         records.append(row)
