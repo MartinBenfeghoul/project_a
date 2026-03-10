@@ -66,6 +66,12 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
     """
     _start_evt = [None]
 
+    def has_complete_key_cache_timings(timing_stats):
+        return (
+            timing_stats.get("decompose_calls", 0) > 0
+            and timing_stats.get("reconstruct_calls", 0) > 0
+        )
+
     def pre_hook(module, args, kwargs):
         if measure_latency:
             evt = torch.cuda.Event(enable_timing=True)
@@ -102,6 +108,26 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                     print(f"Compression ratio: {cr:.2f}")
                     logger.add_log("crs", cr)
                     logger.recorded_cr = True
+            if hasattr(pkv, "timing_stats") and not logger.recorded_k_timing:
+                timing_stats = pkv.timing_stats
+                if has_complete_key_cache_timings(timing_stats):
+                    logger.add_log(
+                        "key_cache_decompose_time",
+                        timing_stats["decompose_time"],
+                    )
+                    logger.add_log(
+                        "key_cache_reconstruct_time",
+                        timing_stats["reconstruct_time"],
+                    )
+                    logger.add_log(
+                        "key_cache_decompose_relative",
+                        timing_stats["decompose_relative"],
+                    )
+                    logger.add_log(
+                        "key_cache_reconstruct_relative",
+                        timing_stats["reconstruct_relative"],
+                    )
+                    logger.recorded_k_timing = True
             if measure_latency:
                 logger.decode_events.append((_start_evt[0], end_evt))
 
@@ -147,6 +173,7 @@ class CompressedCacheHFLM(HFLM):
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         self._logger.recorded_cr = False
+        self._logger.recorded_k_timing = False
         generation_kwargs["past_key_values"] = self._make_cache()
         generation_kwargs["temperature"] = generation_kwargs.get(
             "temperature", 0.0
@@ -186,6 +213,7 @@ def main(args):
     logger = Logger()
     logger.prefill_events = []
     logger.decode_events = []
+    logger.recorded_k_timing = False
 
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
@@ -274,6 +302,31 @@ def main(args):
         task_manager=tm,
         limit=args.limit,
     )
+
+    decompose_time = logger.get_log_mean("key_cache_decompose_time", std=True)
+    reconstruct_time = logger.get_log_mean(
+        "key_cache_reconstruct_time", std=True
+    )
+    decompose_relative = logger.get_log_mean(
+        "key_cache_decompose_relative", std=True
+    )
+    reconstruct_relative = logger.get_log_mean(
+        "key_cache_reconstruct_relative", std=True
+    )
+    if decompose_time is not None and reconstruct_time is not None:
+        slowest_op = (
+            "decompose"
+            if decompose_time[0] >= reconstruct_time[0]
+            else "reconstruct"
+        )
+        print(
+            "Key cache timings:"
+            f" decompose={decompose_time[0]:.4f}+-{decompose_time[1]:.4f}s"
+            f" ({decompose_relative[0]:.2%}+-{decompose_relative[1]:.2%}),"
+            f" reconstruct={reconstruct_time[0]:.4f}+-{reconstruct_time[1]:.4f}s"
+            f" ({reconstruct_relative[0]:.2%}+-{reconstruct_relative[1]:.2%}),"
+            f" slowest={slowest_op}"
+        )
 
     if args.log_efficiency_metrics:
         torch.cuda.synchronize()
