@@ -24,5 +24,3 @@ from .logging import (
     extract_and_save_efficiency_stats,
     get_output_path,
 )
-from .rope import inverse_rope, apply_rope, compute_rope_cos_sin
-from .device import get_device, get_device_type
