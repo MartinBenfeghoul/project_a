@@ -3,6 +3,7 @@ import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from itertools import repeat
 from tqdm import tqdm
 
 import matplotlib.pyplot as plt
@@ -35,12 +36,6 @@ SHAPE_SPECS = [
     {"label": "batch_1_heads_8x128x128", "shape": (1, NUM_HEADS, 128, HEAD_DIM)},
     {"label": "batch_4_heads_8x128x128", "shape": (BATCH, NUM_HEADS, 128, HEAD_DIM)},
 ]
-
-
-def sync_if_needed(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
 
 @contextmanager
 def temporary_cpu_threads(num_threads: int | None):
@@ -114,7 +109,7 @@ def run_svd_with_fallback(
 def benchmark_svd(
     shape,
     device,
-    dtype=torch.float32,
+    dtype=torch.bfloat16,
     warmup=3,
     repeats=10,
     num_threads: int | None = None,
@@ -123,18 +118,23 @@ def benchmark_svd(
     with temporary_cpu_threads(num_threads if device.type == "cpu" else None):
         x = torch.randn(shape, device=device, dtype=dtype)
         plan = get_svd_execution_plan(device, dtype)
+        should_sync = device.type == "cuda"
 
-        sync_if_needed(device)
+        if should_sync:
+            torch.cuda.synchronize(device)
         for _ in range(warmup):
             run_svd_with_fallback(x, dtype)
-        sync_if_needed(device)
+        if should_sync:
+            torch.cuda.synchronize(device)
 
         times_ms = []
         for _ in range(repeats):
-            sync_if_needed(device)
+            if should_sync:
+                torch.cuda.synchronize(device)
             start = time.perf_counter()
             run_svd_with_fallback(x, dtype)
-            sync_if_needed(device)
+            if should_sync:
+                torch.cuda.synchronize(device)
             end = time.perf_counter()
             times_ms.append((end - start) * 1000.0)
 
@@ -155,12 +155,12 @@ def run_batched_svd_independently(
     matrices = x.reshape(-1, x.shape[-2], x.shape[-1]).unbind(0)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        list(executor.map(lambda m: run_svd_with_fallback(m, requested_dtype), matrices))
+        list(executor.map(run_svd_with_fallback, matrices, repeat(requested_dtype)))
 
 
 def benchmark_cpu_outer_parallel_svd(
     shape,
-    dtype=torch.float32,
+    dtype=torch.bfloat16,
     warmup=3,
     repeats=10,
     max_workers=1,
@@ -177,17 +177,13 @@ def benchmark_cpu_outer_parallel_svd(
         x = torch.randn(shape, device="cpu", dtype=dtype)
         plan = get_svd_execution_plan(torch.device("cpu"), dtype)
 
-        sync_if_needed(torch.device("cpu"))
         for _ in range(warmup):
             run_batched_svd_independently(x, dtype, effective_workers)
-        sync_if_needed(torch.device("cpu"))
 
         times_ms = []
         for _ in range(repeats):
-            sync_if_needed(torch.device("cpu"))
             start = time.perf_counter()
             run_batched_svd_independently(x, dtype, effective_workers)
-            sync_if_needed(torch.device("cpu"))
             end = time.perf_counter()
             times_ms.append((end - start) * 1000.0)
 
@@ -320,7 +316,7 @@ def build_cpu_outer_parallel_results():
 def build_results():
     records = []
 
-    for spec in  tqdm(SHAPE_SPECS):
+    for spec in tqdm(SHAPE_SPECS, desc="cpu vs cuda"):
         row = {
             "label": spec["label"],
             "shape": str(spec["shape"]),
