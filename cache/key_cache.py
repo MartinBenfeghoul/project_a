@@ -72,6 +72,7 @@ class LowRankKeysCache(SingleTensorCache):
         self,
         *args,
         decomposition_method: str = None,
+        log_timing_stats: bool = False,
         # decomposition method-agnostic args
         rank_selection: str = "comp_ratio",  # comp_ratio, energy
         comp_ratio: float = 2.0,
@@ -98,7 +99,10 @@ class LowRankKeysCache(SingleTensorCache):
 
         self.prefill = True
         self.lr_keys = {}
-        type(self).timing_stats = init_timing_stats()
+        self.log_timing_stats = log_timing_stats
+        type(self).timing_stats = (
+            init_timing_stats() if self.log_timing_stats else None
+        )
 
     def calc_compression_ratio(self):
         if self.rank_selection == "comp_ratio":
@@ -115,8 +119,9 @@ class LowRankKeysCache(SingleTensorCache):
         self.prefill = False
 
     def _decompose_keys(self, keys, layer_idx):
-        sync_cuda(keys)
-        start_time = time.perf_counter()
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            start_time = time.perf_counter()
         A, B = self.decompose(
             keys,
             self.rank_selection,
@@ -125,24 +130,27 @@ class LowRankKeysCache(SingleTensorCache):
             n_iter=self.n,
             lr=self.lr,
         )
-        sync_cuda(keys)
-        update_timing_stats(
-            type(self), "decompose", time.perf_counter() - start_time
-        )
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            update_timing_stats(
+                type(self), "decompose", time.perf_counter() - start_time
+            )
         self.lr_keys[layer_idx] = (A, B)
         self.comp_ratio = self.calc_compression_ratio()
 
     def _reconstruct_keys(self, keys, layer_idx):
-        sync_cuda(keys)
-        start_time = time.perf_counter()
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            start_time = time.perf_counter()
         A, B = self.lr_keys[layer_idx]
         recon_keys = A @ B
         if keys.size(-2) > 0:
             recon_keys = torch.cat([recon_keys, keys], dim=-2)
-        sync_cuda(recon_keys)
-        update_timing_stats(
-            type(self), "reconstruct", time.perf_counter() - start_time
-        )
+        if self.log_timing_stats:
+            sync_cuda(recon_keys)
+            update_timing_stats(
+                type(self), "reconstruct", time.perf_counter() - start_time
+            )
         return recon_keys
 
     def update(
@@ -179,6 +187,7 @@ class SurpriseLRKCache(SingleTensorCache):
         self,
         *args,
         decomposition_method: str,
+        log_timing_stats: bool = False,
         # decomposition method-agnostic args
         rank_selection: str = "comp_ratio",  # comp_ratio, energy
         comp_ratio: float = 2.0,
@@ -211,7 +220,10 @@ class SurpriseLRKCache(SingleTensorCache):
 
         self.prefill = True
         self.lr_keys = {}
-        type(self).timing_stats = init_timing_stats()
+        self.log_timing_stats = log_timing_stats
+        type(self).timing_stats = (
+            init_timing_stats() if self.log_timing_stats else None
+        )
 
     def calc_compression_ratio(self):
         if self.rank_selection == "comp_ratio":
@@ -252,8 +264,9 @@ class SurpriseLRKCache(SingleTensorCache):
         self.prefill = False
 
     def _decompose_keys(self, keys, layer_idx):
-        sync_cuda(keys)
-        start_time = time.perf_counter()
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            start_time = time.perf_counter()
         lr_keys = []
         for b in range(len(self.events)):
             batch_svd_keys = []
@@ -270,17 +283,19 @@ class SurpriseLRKCache(SingleTensorCache):
                 )
                 batch_svd_keys.append((A, B))
             lr_keys.append(batch_svd_keys)
-        sync_cuda(keys)
-        update_timing_stats(
-            type(self), "decompose", time.perf_counter() - start_time
-        )
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            update_timing_stats(
+                type(self), "decompose", time.perf_counter() - start_time
+            )
         self.lr_keys[layer_idx] = lr_keys
         self.comp_ratio = self.calc_compression_ratio()
         return keys[..., ed:, :]
 
     def _reconstruct_keys(self, keys, layer_idx):
-        sync_cuda(keys)
-        start_time = time.perf_counter()
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            start_time = time.perf_counter()
         lr_keys = self.lr_keys[layer_idx]
         recon_keys = []
         # TODO: Teresa suggests reconstructing events of the same size in batches
@@ -294,10 +309,11 @@ class SurpriseLRKCache(SingleTensorCache):
                 batch_recon_keys.append(keys[b])
             recon_keys.append(torch.cat(batch_recon_keys, dim=-2))
         recon_keys = torch.stack(recon_keys, dim=0)
-        sync_cuda(recon_keys)
-        update_timing_stats(
-            type(self), "reconstruct", time.perf_counter() - start_time
-        )
+        if self.log_timing_stats:
+            sync_cuda(recon_keys)
+            update_timing_stats(
+                type(self), "reconstruct", time.perf_counter() - start_time
+            )
         return recon_keys
 
     def update(

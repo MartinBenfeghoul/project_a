@@ -66,7 +66,8 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
 
     def has_complete_key_cache_timings(timing_stats):
         return (
-            timing_stats.get("decompose_calls", 0) > 0
+            timing_stats is not None
+            and timing_stats.get("decompose_calls", 0) > 0
             and timing_stats.get("reconstruct_calls", 0) > 0
         )
 
@@ -146,6 +147,7 @@ def main(args):
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
+        "log_timing_stats": args.log_key_cache_timing,
         "comp_ratio": args.comp_ratio,
         "energy_threshold": args.energy_threshold,
         "rank_selection": args.rank_selection,
@@ -355,6 +357,7 @@ def parse_args():
     )
     parser.add_argument("--k_lr", type=float, default=1e-2)
     parser.add_argument("--n_iter", type=int, default=3)
+    parser.add_argument("--log_key_cache_timing", action="store_true")
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
