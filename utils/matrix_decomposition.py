@@ -1,4 +1,7 @@
 import math
+from concurrent.futures import ThreadPoolExecutor
+from itertools import repeat
+
 import torch
 
 
@@ -21,6 +24,59 @@ def lowrank_svd(M, k, n_iter=3, dtype=torch.float32, **kwargs):
     US = U * S.unsqueeze(-2)
     US, V = (t.to(og_dtype) for t in (US, V))
     return US, V.transpose(-2, -1)  # Vh
+
+
+def _full_svd_cpu_single(M, dtype):
+    M = M.to(device="cpu", dtype=dtype).contiguous()
+    return torch.linalg.svd(M, full_matrices=False)
+
+
+def parallel_cpu_svd(
+    M,
+    rank_selection,
+    cr=2.0,
+    energy_threshold=0.95,
+    dtype=torch.float32,
+    **kwargs,
+):
+    og_device, og_dtype = M.device, M.dtype
+    m, n = M.shape[-2:]
+    flat_M = M.reshape(-1, m, n)
+    max_workers = min(flat_M.size(0), torch.get_num_threads())
+
+    prev_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            svds = list(executor.map(_full_svd_cpu_single, flat_M, repeat(dtype)))
+    finally:
+        torch.set_num_threads(prev_threads)
+
+    U = torch.stack([u for u, _, _ in svds], dim=0)
+    S = torch.stack([s for _, s, _ in svds], dim=0)
+    Vh = torch.stack([vh for _, _, vh in svds], dim=0)
+    r = S.shape[-1]
+
+    if rank_selection == "comp_ratio":
+        k = find_rank_wrt_cr(cr, m, n)
+    elif rank_selection == "energy":
+        k = find_rank_wrt_energy(S.reshape(*M.shape[:-2], r), energy_threshold)
+    else:
+        raise ValueError(
+            f"rank_selection set to {rank_selection}.",
+            "Try either 'comp_ratio' or 'energy_threshold'",
+        )
+
+    k = max(1, min(int(k), r))
+
+    U = U[..., :k]
+    S = S[..., :k]
+    Vh = Vh[..., :k, :]
+
+    US = U * S.unsqueeze(-2)
+    US = US.reshape(*M.shape[:-2], m, k).to(device=og_device, dtype=og_dtype)
+    Vh = Vh.reshape(*M.shape[:-2], k, n).to(device=og_device, dtype=og_dtype)
+    return US, Vh
 
 
 def find_rank_wrt_cr(r, m, n):
@@ -282,4 +338,8 @@ def lora_matrix(
     return A, B
 
 
-DECOMP_METHODS = {"svd": truncated_svd, "lora": lora_matrix}
+DECOMP_METHODS = {
+    "svd": truncated_svd,
+    "cpu_parallel_svd": parallel_cpu_svd,
+    "lora": lora_matrix,
+}

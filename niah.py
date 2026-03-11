@@ -123,7 +123,8 @@ def main(
         output = output[0]
         correct = answer in output
         n_correct += 1 if correct else 0
-        print(f"Output: {output}", f"{'\u2705' if correct else '\u274C'}")
+        status = "\u2705" if correct else "\u274C"
+        print(f"Output: {output}", status)
         if i >= n_samples - 1:
             print(f"Finished testing on {n_samples}. Stopping.")
             break
@@ -155,7 +156,7 @@ def get_parser():
         "--decomposition_method",
         type=str,
         default="svd",
-        choices=["svd", "lora"],
+        choices=["svd", "cpu_parallel_svd", "lora"],
     )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
