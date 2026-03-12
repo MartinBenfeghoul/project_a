@@ -238,14 +238,13 @@ def main(args):
         limit=args.limit,
     )
 
-    results = extract_and_save_timing_stats(logger, results)
+    print(make_table(results))
 
+    results = extract_and_save_timing_stats(logger, results)
     if args.log_efficiency_metrics:
         results = extract_and_save_efficiency_stats(
             logger, results, model_baseline_mem, start_time
         )
-
-    print(make_table(results))
 
     if args.debug:
         print("Debug mode — not saving results.")
