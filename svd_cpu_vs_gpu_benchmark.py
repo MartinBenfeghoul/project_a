@@ -38,6 +38,8 @@ SHAPE_SPECS = [
     {"label": "batch_4_heads_8x64x128", "shape": (BATCH, NUM_HEADS, 64, HEAD_DIM)},
     {"label": "batch_1_heads_8x128x128", "shape": (1, NUM_HEADS, 128, HEAD_DIM)},
     {"label": "batch_4_heads_8x128x128", "shape": (BATCH, NUM_HEADS, 128, HEAD_DIM)},
+    {"label": "batch_8_heads_32x128x128", "shape": (NUM_HEADS, 32, 128, HEAD_DIM)},
+    {"label": "batch_8_heads_64x128x128", "shape": (NUM_HEADS, 64, 128, HEAD_DIM)},
 ]
 
 

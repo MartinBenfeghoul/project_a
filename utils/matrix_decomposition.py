@@ -306,7 +306,8 @@ def calc_segment_store_compression_ratio(
     return crs / num_segments if num_segments > 0 else 0.0
 
 
-# Learned decomposition methods
+# ================ LoRA-like decomposition via gradient descent ================
+
 def mse(a, b):
     return ((a - b) ** 2).mean()
 
