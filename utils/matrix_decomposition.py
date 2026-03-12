@@ -1,6 +1,6 @@
 import math
 from concurrent.futures import ThreadPoolExecutor
-from itertools import repeat
+from typing import Callable
 
 import torch
 
@@ -26,57 +26,13 @@ def lowrank_svd(M, k, n_iter=3, dtype=torch.float32, **kwargs):
     return US, V.transpose(-2, -1)  # Vh
 
 
-def _full_svd_cpu_single(M, dtype):
-    M = M.to(device="cpu", dtype=dtype).contiguous()
+def _full_svd_cpu_single(M: torch.Tensor):
+    """Compute a full SVD for one CPU matrix.
+
+    Expects a single 2D matrix already on CPU and returns the
+    `(U, S, Vh)` triple from `torch.linalg.svd`.
+    """
     return torch.linalg.svd(M, full_matrices=False)
-
-
-def parallel_cpu_svd(
-    M,
-    rank_selection,
-    cr=2.0,
-    energy_threshold=0.95,
-    dtype=torch.float32,
-    **kwargs,
-):
-    og_device, og_dtype = M.device, M.dtype
-    m, n = M.shape[-2:]
-    flat_M = M.reshape(-1, m, n)
-    max_workers = min(flat_M.size(0), torch.get_num_threads())
-
-    prev_threads = torch.get_num_threads()
-    torch.set_num_threads(1)
-    try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            svds = list(executor.map(_full_svd_cpu_single, flat_M, repeat(dtype)))
-    finally:
-        torch.set_num_threads(prev_threads)
-
-    U = torch.stack([u for u, _, _ in svds], dim=0)
-    S = torch.stack([s for _, s, _ in svds], dim=0)
-    Vh = torch.stack([vh for _, _, vh in svds], dim=0)
-    r = S.shape[-1]
-
-    if rank_selection == "comp_ratio":
-        k = find_rank_wrt_cr(cr, m, n)
-    elif rank_selection == "energy":
-        k = find_rank_wrt_energy(S.reshape(*M.shape[:-2], r), energy_threshold)
-    else:
-        raise ValueError(
-            f"rank_selection set to {rank_selection}.",
-            "Try either 'comp_ratio' or 'energy_threshold'",
-        )
-
-    k = max(1, min(int(k), r))
-
-    U = U[..., :k]
-    S = S[..., :k]
-    Vh = Vh[..., :k, :]
-
-    US = U * S.unsqueeze(-2)
-    US = US.reshape(*M.shape[:-2], m, k).to(device=og_device, dtype=og_dtype)
-    Vh = Vh.reshape(*M.shape[:-2], k, n).to(device=og_device, dtype=og_dtype)
-    return US, Vh
 
 
 def find_rank_wrt_cr(r, m, n):
@@ -103,25 +59,278 @@ def find_rank_wrt_energy(S, energy_threshold):
            (i.e., k is a Python int; rank is in [1, r] unless r==0).
     """
     if S.numel() == 0:
-        return 0  # degenerate
+        return 0
 
     S2 = S**2
     denom = S2.sum(-1, keepdim=True).clamp_min(torch.finfo(S2.dtype).tiny)
-    energy = S2.cumsum(-1) / denom  # (..., r)
-
-    # For each prefix position, does it meet threshold?
-    meets = energy >= energy_threshold  # thr  # (..., r)
-
-    # Find first True along last dim. If none, take r.
-    first_idx = meets.float().argmax(dim=-1)  # (...,) but 0 if all False too
-    has_any = meets.any(dim=-1)  # (...,)
+    energy = S2.cumsum(-1) / denom
+    meets = energy >= energy_threshold
+    first_idx = meets.float().argmax(dim=-1)
+    has_any = meets.any(dim=-1)
 
     k_per = torch.where(
         has_any, first_idx + 1, torch.full_like(first_idx, S.shape[-1])
     )
-    k = int(k_per.max().item())  # smallest k that works for *all* batch dims
+    return int(k_per.max().item())
 
-    return k
+
+def _truncate_svd_factors(
+    U: torch.Tensor,
+    S: torch.Tensor,
+    Vh: torch.Tensor,
+    batch_shape: tuple[int, ...],
+    m: int,
+    n: int,
+    rank_selection: str,
+    cr: float = 2.0,
+    energy_threshold: float = 0.95,
+):
+    """Truncate full-SVD outputs and restore the original leading shape.
+
+    The inputs are stacked full-SVD results for one segment group. The
+    outputs are the low-rank factors `(A, B)` after rank selection.
+    """
+    r = S.shape[-1]
+
+    if rank_selection == "comp_ratio":
+        k = find_rank_wrt_cr(cr, m, n)
+    elif rank_selection == "energy":
+        k = find_rank_wrt_energy(
+            S.reshape(*batch_shape, r), energy_threshold
+        )
+    else:
+        raise ValueError(
+            f"rank_selection set to {rank_selection}.",
+            "Try either 'comp_ratio' or 'energy_threshold'",
+        )
+
+    k = max(1, min(int(k), r))
+
+    U = U.reshape(*batch_shape, m, r)[..., :k]
+    S = S.reshape(*batch_shape, r)[..., :k]
+    Vh = Vh.reshape(*batch_shape, r, n)[..., :k, :]
+
+    US = U * S.unsqueeze(-2)
+    return US, Vh
+
+
+def _parallel_svd_segments(
+    host_segments: list[torch.Tensor],
+    rank_selection: str,
+    target_device: torch.device,
+    target_dtype: torch.dtype,
+    cr: float = 2.0,
+    energy_threshold: float = 0.95,
+    **kwargs,
+):
+    """Run threaded CPU SVD for segments that already live on CPU.
+
+    `host_segments` holds the matrices to decompose. Each resulting
+    `(A, B)` pair is restored to `target_device` and `target_dtype`.
+    """
+    if not host_segments:
+        return []
+
+    specs = []
+    flat_matrices = []
+    for host_segment in host_segments:
+        batch_shape = host_segment.shape[:-2]
+        m, n = host_segment.shape[-2:]
+        flat_segment = host_segment.reshape(-1, m, n)
+        specs.append(
+            (
+                batch_shape,
+                m,
+                n,
+                flat_segment.size(0),
+            )
+        )
+        flat_matrices.extend(flat_segment.unbind(0))
+
+    max_workers = min(len(flat_matrices), torch.get_num_threads())
+    max_workers = max(1, max_workers)
+
+    prev_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            svds = list(executor.map(_full_svd_cpu_single, flat_matrices))
+    finally:
+        torch.set_num_threads(prev_threads)
+
+    factor_pairs = []
+    offset = 0
+    for batch_shape, m, n, count in specs:
+        segment_svds = svds[offset : offset + count]
+        offset += count
+
+        U = torch.stack([u for u, _, _ in segment_svds], dim=0)
+        S = torch.stack([s for _, s, _ in segment_svds], dim=0)
+        Vh = torch.stack([vh for _, _, vh in segment_svds], dim=0)
+
+        US, Vh = _truncate_svd_factors(
+            U,
+            S,
+            Vh,
+            batch_shape,
+            m,
+            n,
+            rank_selection,
+            cr=cr,
+            energy_threshold=energy_threshold,
+        )
+        factor_pairs.append(
+            (
+                US.to(device=target_device, dtype=target_dtype),
+                Vh.to(device=target_device, dtype=target_dtype),
+            )
+        )
+
+    return factor_pairs
+
+
+def parallel_cpu_svd(
+    M: torch.Tensor,
+    rank_selection: str,
+    cr: float = 2.0,
+    energy_threshold: float = 0.95,
+    dtype: torch.dtype = torch.float32,
+    **kwargs,
+):
+    """Apply the threaded CPU SVD path to one tensor.
+
+    The input tensor is copied to CPU once, decomposed there, and the
+    resulting factor pair `(A, B)` is returned on the original device.
+    """
+    M_host = M.to(device="cpu", dtype=dtype).contiguous()
+    US, Vh = _parallel_svd_segments(
+        [M_host],
+        rank_selection,
+        target_device=M.device,
+        target_dtype=M.dtype,
+        cr=cr,
+        energy_threshold=energy_threshold,
+        **kwargs,
+    )[0]
+    return US, Vh
+
+
+def decompose_to_segment_store(
+    tensor: torch.Tensor,
+    decompose_fn: Callable[..., tuple[torch.Tensor, torch.Tensor]],
+    decomposition_method: str,
+    segment_ranges: list[list[tuple[int, int]]] | None = None,
+    **decompose_kwargs,
+):
+    """Package decomposed factors into the cache segment-store format.
+
+    When `segment_ranges` is omitted, the full tensor is decomposed. When it
+    is provided, only those `[start, end)` ranges are decomposed. Returns the
+    per-batch segment records plus the shared compressed-prefix boundary.
+    """
+    if segment_ranges is None:
+        A, B = decompose_fn(tensor, **decompose_kwargs)
+        seq_len = tensor.size(-2)
+        layer_segments = [
+            [{"range": (0, seq_len), "factors": (A[b], B[b])}]
+            for b in range(tensor.size(0))
+        ]
+        return layer_segments, seq_len
+
+    suffix_starts = [
+        ranges[-1][1] if ranges else 0 for ranges in segment_ranges
+    ]
+    suffix_start = suffix_starts[0] if suffix_starts else 0
+    if any(start != suffix_start for start in suffix_starts[1:]):
+        raise ValueError(
+            "All batches must share the same compressed prefix length."
+        )
+
+    specs = []
+    for batch_idx, batch_ranges in enumerate(segment_ranges):
+        for start_idx, end_idx in batch_ranges:
+            specs.append((batch_idx, start_idx, end_idx))
+
+    if decomposition_method == "cpu_parallel_svd":
+        # Copy the compressed prefix once, then slice CPU views per segment.
+        prefix_host = tensor[..., :suffix_start, :].to(
+            device="cpu",
+            dtype=decompose_kwargs.get("dtype", torch.float32),
+        ).contiguous()
+        host_segments = [
+            prefix_host[batch_idx, ..., start_idx:end_idx, :]
+            for batch_idx, start_idx, end_idx in specs
+        ]
+        factor_pairs = _parallel_svd_segments(
+            host_segments,
+            target_device=tensor.device,
+            target_dtype=tensor.dtype,
+            **decompose_kwargs,
+        )
+    else:
+        segments = [
+            tensor[batch_idx, ..., start_idx:end_idx, :]
+            for batch_idx, start_idx, end_idx in specs
+        ]
+        factor_pairs = [
+            decompose_fn(segment, **decompose_kwargs) for segment in segments
+        ]
+
+    layer_segments = [[] for _ in range(tensor.size(0))]
+    for (batch_idx, start_idx, end_idx), (A, B) in zip(specs, factor_pairs):
+        layer_segments[batch_idx].append(
+            {"range": (start_idx, end_idx), "factors": (A, B)}
+        )
+    return layer_segments, suffix_start
+
+
+def reconstruct_segments(
+    layer_segments: list[list[dict[str, tuple]]],
+    suffix_tensor: torch.Tensor,
+):
+    """Reconstruct batched keys from stored factors and a live suffix.
+
+    `layer_segments` is the segment-store output from
+    `decompose_to_segment_store`, and `suffix_tensor` provides any
+    uncompressed tail that should be appended back on.
+    """
+    recon_batches = []
+    for batch_idx, batch_segments in enumerate(layer_segments):
+        # TODO: batch same-length segments together to avoid many small matmuls.
+        recon_pieces = [
+            A @ B for A, B in (segment["factors"] for segment in batch_segments)
+        ]
+        if suffix_tensor[batch_idx].size(-2) > 0:
+            recon_pieces.append(suffix_tensor[batch_idx])
+        if not recon_pieces:
+            recon_pieces.append(suffix_tensor[batch_idx])
+        recon_batches.append(torch.cat(recon_pieces, dim=-2))
+    return torch.stack(recon_batches, dim=0)
+
+
+def calc_segment_store_compression_ratio(
+    segment_store: dict[int, list[list[dict[str, tuple]]]],
+    default_ratio: float | None = None,
+):
+    """Compute the average compression ratio of a segment store.
+
+    Returns `default_ratio` directly when one is provided; otherwise averages
+    the realized compression ratio over all stored `(A, B)` segment factors.
+    """
+    if default_ratio is not None:
+        return default_ratio
+
+    crs = 0.0
+    num_segments = 0
+    for layer_segments in segment_store.values():
+        for batch_segments in layer_segments:
+            for segment in batch_segments:
+                A, B = segment["factors"]
+                m, k = A.shape[-2:]
+                n = B.size(-1)
+                crs += (m * n) / (k * (m + n))
+                num_segments += 1
+    return crs / num_segments if num_segments > 0 else 0.0
 
 
 def truncated_svd(

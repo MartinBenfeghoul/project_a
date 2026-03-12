@@ -5,9 +5,12 @@ import torch.nn.functional as F
 
 from transformers.cache_utils import Any
 
-# from transformers.models.llama.modeling_llama import LlamaAttention
-
-from utils.matrix_decomposition import DECOMP_METHODS
+from utils.matrix_decomposition import (
+    DECOMP_METHODS,
+    calc_segment_store_compression_ratio,
+    decompose_to_segment_store,
+    reconstruct_segments,
+)
 from utils.segmentation import find_thresholds
 from .cache import SingleTensorCache
 
@@ -22,10 +25,11 @@ def get_expected_seq_len(cache_kwargs):
 
 def check_recon_length(recon_keys, cache_kwargs):
     exp_seq_len = get_expected_seq_len(cache_kwargs)
-    if exp_seq_len is not None:
-        assert (
-            recon_keys.size(-2) == exp_seq_len
-        ), f"Reconstructed keys have seq_len {recon_keys.size(-2)} but cache_position expects {exp_seq_len}."
+    if exp_seq_len is not None and recon_keys.size(-2) != exp_seq_len:
+        raise ValueError(
+            f"Reconstructed keys have seq_len {recon_keys.size(-2)} "
+            f"but cache_position expects {exp_seq_len}."
+        )
 
 
 def init_timing_stats():
@@ -65,7 +69,7 @@ def update_timing_stats(cache_cls, operation, elapsed_time):
         )
 
 
-class LowRankKeysCache(SingleTensorCache):
+class DecomposedKeysCache(SingleTensorCache):
     timing_stats = None
 
     def __init__(
@@ -73,79 +77,88 @@ class LowRankKeysCache(SingleTensorCache):
         *args,
         decomposition_method: str = None,
         log_timing_stats: bool = False,
-        # decomposition method-agnostic args
-        rank_selection: str = "comp_ratio",  # comp_ratio, energy
+        rank_selection: str = "comp_ratio",
         comp_ratio: float = 2.0,
         energy_threshold: float = 0.95,
         n_iter: int = 3,
-        # LoRA-specific args
         lr: float = 1e-2,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
-        assert (
-            decomposition_method in DECOMP_METHODS.keys()
-        ), f"Decomposition method {decomposition_method} not found in available methods: {DECOMP_METHODS.keys()}"
+        if decomposition_method not in DECOMP_METHODS:
+            raise ValueError(
+                f"Decomposition method {decomposition_method} not found in "
+                f"available methods: {DECOMP_METHODS.keys()}"
+            )
+
         self.decomposition_method = decomposition_method
         self.decompose = DECOMP_METHODS[decomposition_method]
-
         self.rank_selection = rank_selection
         self.r = comp_ratio
         self.e = energy_threshold
         self.n = n_iter
-
         self.lr = lr
 
         self.prefill = True
         self.lr_keys = {}
+        self.comp_ratio = None
         self.log_timing_stats = log_timing_stats
         type(self).timing_stats = (
             init_timing_stats() if self.log_timing_stats else None
         )
 
     def calc_compression_ratio(self):
-        if self.rank_selection == "comp_ratio":
-            return self.r
-        else:
-            crs = 0
-            for A, B in self.lr_keys.values():
-                m, k = A.shape[-2:]
-                n = B.size(-1)
-                crs += (m * n) / (k * (m + n))
-            return crs / len(self.lr_keys)
+        default_ratio = self.r if self.rank_selection == "comp_ratio" else None
+        return calc_segment_store_compression_ratio(
+            self.lr_keys, default_ratio=default_ratio
+        )
 
     def update_events(self, *args, **kwargs):
         self.prefill = False
 
-    def _decompose_keys(self, keys, layer_idx):
+    def _decomposition_kwargs(self):
+        return {
+            "rank_selection": self.rank_selection,
+            "cr": self.r,
+            "energy_threshold": self.e,
+            "n_iter": self.n,
+            "lr": self.lr,
+        }
+
+    def _store_layer_segments(self, layer_idx, layer_segments):
+        self.lr_keys[layer_idx] = layer_segments
+        self.comp_ratio = self.calc_compression_ratio()
+
+    def _decompose_keys(self, keys, layer_idx, segment_ranges=None):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
-        A, B = self.decompose(
+
+        layer_segments, suffix_start = decompose_to_segment_store(
             keys,
-            self.rank_selection,
-            cr=self.r,
-            energy_threshold=self.e,
-            n_iter=self.n,
-            lr=self.lr,
+            self.decompose,
+            self.decomposition_method,
+            segment_ranges=segment_ranges,
+            **self._decomposition_kwargs(),
         )
+
         if self.log_timing_stats:
             sync_cuda(keys)
             update_timing_stats(
                 type(self), "decompose", time.perf_counter() - start_time
             )
-        self.lr_keys[layer_idx] = (A, B)
-        self.comp_ratio = self.calc_compression_ratio()
+
+        self._store_layer_segments(layer_idx, layer_segments)
+        return suffix_start
 
     def _reconstruct_keys(self, keys, layer_idx):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
-        A, B = self.lr_keys[layer_idx]
-        recon_keys = A @ B
-        if keys.size(-2) > 0:
-            recon_keys = torch.cat([recon_keys, keys], dim=-2)
+
+        recon_keys = reconstruct_segments(self.lr_keys[layer_idx], keys)
+
         if self.log_timing_stats:
             sync_cuda(recon_keys)
             update_timing_stats(
@@ -153,97 +166,62 @@ class LowRankKeysCache(SingleTensorCache):
             )
         return recon_keys
 
+
+class LowRankKeysCache(DecomposedKeysCache):
     def update(
         self,
         key_states: torch.Tensor,
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
-        keys = super().update(
-            key_states,
-            layer_idx,
-            cache_kwargs,
-        )
+        keys = super().update(key_states, layer_idx, cache_kwargs)
+
         if self.prefill:
             self._decompose_keys(keys, layer_idx)
             self._evict(layer_idx=layer_idx)
             return keys
-        elif self.lr_keys.get(layer_idx, False):
+
+        if self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)
-            check_recon_length(
-                recon_keys, cache_kwargs
-            )  # TODO: remove later - keep during development for safety
+            check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
-        else:
-            raise Exception(
-                "Prefill is set to False and no low_rank keys were found."
-            )
+
+        raise Exception("Prefill is set to False and no low_rank keys were found.")
 
 
-class SurpriseLRKCache(SingleTensorCache):
-    timing_stats = None
-
+class SurpriseLRKCache(DecomposedKeysCache):
     def __init__(
         self,
         *args,
         decomposition_method: str,
         log_timing_stats: bool = False,
-        # decomposition method-agnostic args
-        rank_selection: str = "comp_ratio",  # comp_ratio, energy
+        rank_selection: str = "comp_ratio",
         comp_ratio: float = 2.0,
         energy_threshold: float = 0.95,
         n_iter: int = 3,
-        # LoRA-specific args
         lr: float = 1e-2,
-        # segmentation args
         gamma: float = 3.0,
         min_size: int = 8,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
-
-        assert (
-            decomposition_method in DECOMP_METHODS.keys()
-        ), f"Decomposition method {decomposition_method} not found in available methods: {DECOMP_METHODS.keys()}"
-        self.decomposition_method = decomposition_method
-        self.decompose = DECOMP_METHODS[decomposition_method]
-
-        self.rank_selection = rank_selection
-        self.r = comp_ratio
-        self.e = energy_threshold
-        self.n = n_iter
-
-        self.lr = lr
-
+        super().__init__(
+            *args,
+            decomposition_method=decomposition_method,
+            log_timing_stats=log_timing_stats,
+            rank_selection=rank_selection,
+            comp_ratio=comp_ratio,
+            energy_threshold=energy_threshold,
+            n_iter=n_iter,
+            lr=lr,
+            **kwargs,
+        )
         self.gamma = gamma
         self.min_size = min_size
-
-        self.prefill = True
-        self.lr_keys = {}
-        self.log_timing_stats = log_timing_stats
-        type(self).timing_stats = (
-            init_timing_stats() if self.log_timing_stats else None
-        )
-
-    def calc_compression_ratio(self):
-        if self.rank_selection == "comp_ratio":
-            return self.r
-        else:
-            crs = 0
-            num_events = 0
-            for lr_keys in self.lr_keys.values():
-                for b in range(len(lr_keys)):
-                    for A, B in lr_keys[b]:
-                        m, k = A.shape[-2:]
-                        n = B.size(-1)
-                        crs += (m * n) / (k * (m + n))
-                        num_events += 1
-            return crs / num_events
 
     def update_events(self, logits, labels):
         B, T, V = logits.shape
         surprise = (
-            F.cross_entropy(  # to avoid materialising (B, T, V) probs tensor
+            F.cross_entropy(
                 logits.reshape(B * T, V),
                 labels.reshape(B * T),
                 reduction="none",
@@ -257,64 +235,21 @@ class SurpriseLRKCache(SingleTensorCache):
                 threshold_param=self.gamma,
                 min_size=self.min_size,
             )[0]
-            # overwrite the final position to include the last token in prefill
-            # as there is no suprise for this position it won't be included
+            # The final key has no surprise score, so extend the last segment
+            # boundary to include the last token from prefill.
             events[-1] += 1
             self.events.append(events)
+
         self.prefill = False
 
-    def _decompose_keys(self, keys, layer_idx):
-        if self.log_timing_stats:
-            sync_cuda(keys)
-            start_time = time.perf_counter()
-        lr_keys = []
-        for b in range(len(self.events)):
-            batch_svd_keys = []
-            for i, st in enumerate(self.events[b][:-1]):
-                ed = self.events[b][i + 1]
-                keys_subset = keys[b, ..., st:ed, :]
-                A, B = self.decompose(
-                    keys_subset,
-                    self.rank_selection,
-                    cr=self.r,
-                    energy_threshold=self.e,
-                    n_iter=self.n,
-                    lr=self.lr,
-                )
-                batch_svd_keys.append((A, B))
-            lr_keys.append(batch_svd_keys)
-        if self.log_timing_stats:
-            sync_cuda(keys)
-            update_timing_stats(
-                type(self), "decompose", time.perf_counter() - start_time
-            )
-        self.lr_keys[layer_idx] = lr_keys
-        self.comp_ratio = self.calc_compression_ratio()
-        return keys[..., ed:, :]
-
-    def _reconstruct_keys(self, keys, layer_idx):
-        if self.log_timing_stats:
-            sync_cuda(keys)
-            start_time = time.perf_counter()
-        lr_keys = self.lr_keys[layer_idx]
-        recon_keys = []
-        # TODO: Teresa suggests reconstructing events of the same size in batches
-        # for more efficiency - look into this w.r.t frequency of events with
-        # the same size + efficiency gains when considering re-indexing too
-        for b in range(len(lr_keys)):
-            batch_recon_keys = []
-            for A, B in lr_keys[b]:
-                batch_recon_keys.append(A @ B)
-            if keys.size(-2) > 0:
-                batch_recon_keys.append(keys[b])
-            recon_keys.append(torch.cat(batch_recon_keys, dim=-2))
-        recon_keys = torch.stack(recon_keys, dim=0)
-        if self.log_timing_stats:
-            sync_cuda(recon_keys)
-            update_timing_stats(
-                type(self), "reconstruct", time.perf_counter() - start_time
-            )
-        return recon_keys
+    def _build_segment_ranges(self):
+        segment_ranges = []
+        for events in self.events:
+            batch_ranges = []
+            for i, start_idx in enumerate(events[:-1]):
+                batch_ranges.append((start_idx, events[i + 1]))
+            segment_ranges.append(batch_ranges)
+        return segment_ranges
 
     def update(
         self,
@@ -322,20 +257,22 @@ class SurpriseLRKCache(SingleTensorCache):
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
-        keys = super().update(
-            key_states,
-            layer_idx,
-            cache_kwargs,
-        )
+        keys = super().update(key_states, layer_idx, cache_kwargs)
+
         if self.prefill:
             return keys
-        elif not self.lr_keys.get(layer_idx, False):
-            keys = self._decompose_keys(keys, layer_idx)
-            self._evict(layer_idx=layer_idx, end_idx=self.events[0][-1])
+
+        if not self.lr_keys.get(layer_idx, False):
+            suffix_start = self._decompose_keys(
+                keys,
+                layer_idx,
+                segment_ranges=self._build_segment_ranges(),
+            )
+            keys = keys[..., suffix_start:, :]
+            self._evict(layer_idx=layer_idx, end_idx=suffix_start)
+
         recon_keys = self._reconstruct_keys(keys, layer_idx)
-        check_recon_length(
-            recon_keys, cache_kwargs
-        )  # TODO: remove later - keep during development for safety
+        check_recon_length(recon_keys, cache_kwargs)
         return recon_keys
 
 
