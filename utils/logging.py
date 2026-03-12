@@ -248,6 +248,7 @@ def save_checkpoint(
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
 
+
 def extract_and_save_timing_stats(logger, results):
     decompose_time = logger.get_log_mean("key_cache_decompose_time", std=True)
     reconstruct_time = logger.get_log_mean(
@@ -277,34 +278,35 @@ def extract_and_save_timing_stats(logger, results):
         results["results"]["key_cache_timings"] = timing_str
     return results
 
-def extract_and_save_efficiency_stats(
-        logger, results, model_baseline_mem, start_time
-    ):
-        torch.cuda.synchronize()
-        wall_time_sec = time.perf_counter() - start_time
-        peak_mem = torch.cuda.max_memory_allocated()
-        prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
-        decode_ms = [s.elapsed_time(e) for s, e in logger.decode_events]
 
-        efficiency_metrics = {
-            "eval_wall_time_seconds": wall_time_sec,
-            "eval_wall_time_minutes": wall_time_sec / 60.0,
-            "gpu_peak_mem_gib": peak_mem
-            / (1024**3),  # (weights + kv cache + activations)
-            "gpu_kv_cache_overhead_gib": (peak_mem - model_baseline_mem)
-            / (1024**3),  # (kv cache + activations)
-            "prefill_latency_ms_mean": (
-                sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0
-            ),
-            "decode_latency_ms_mean": (
-                sum(decode_ms) / len(decode_ms) if decode_ms else 0.0
-            ),  # per-token
-            "decode_tokens_per_sec": (
-                1000.0 / (sum(decode_ms) / len(decode_ms)) if decode_ms else 0.0
-            ),
-            "n_prefill_passes": len(prefill_ms),
-            "n_decode_steps": len(decode_ms),
-        }
-        print("Efficiency metrics:", efficiency_metrics)
-        results["results"]["efficiency_metrics"] = efficiency_metrics
-        return results
+def extract_and_save_efficiency_stats(
+    logger, results, model_baseline_mem, start_time
+):
+    torch.cuda.synchronize()
+    wall_time_sec = time.perf_counter() - start_time
+    peak_mem = torch.cuda.max_memory_allocated()
+    prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
+    decode_ms = [s.elapsed_time(e) for s, e in logger.decode_events]
+
+    efficiency_metrics = {
+        "eval_wall_time_seconds": wall_time_sec,
+        "eval_wall_time_minutes": wall_time_sec / 60.0,
+        "gpu_peak_mem_gib": peak_mem
+        / (1024**3),  # (weights + kv cache + activations)
+        "gpu_kv_cache_overhead_gib": (peak_mem - model_baseline_mem)
+        / (1024**3),  # (kv cache + activations)
+        "prefill_latency_ms_mean": (
+            sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0
+        ),
+        "decode_latency_ms_mean": (
+            sum(decode_ms) / len(decode_ms) if decode_ms else 0.0
+        ),  # per-token
+        "decode_tokens_per_sec": (
+            1000.0 / (sum(decode_ms) / len(decode_ms)) if decode_ms else 0.0
+        ),
+        "n_prefill_passes": len(prefill_ms),
+        "n_decode_steps": len(decode_ms),
+    }
+    print("Efficiency metrics:", efficiency_metrics)
+    results["results"]["efficiency_metrics"] = efficiency_metrics
+    return results

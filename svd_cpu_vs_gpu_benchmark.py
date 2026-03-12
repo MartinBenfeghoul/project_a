@@ -10,7 +10,6 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-
 HEAD_DIM = 128
 NUM_HEADS = 8
 BATCH = 4
@@ -34,12 +33,30 @@ SHAPE_SPECS = [
     {"label": "heads_8x16x128", "shape": (NUM_HEADS, 16, HEAD_DIM)},
     {"label": "heads_8x32x128", "shape": (NUM_HEADS, 32, HEAD_DIM)},
     {"label": "heads_8x64x128", "shape": (NUM_HEADS, 64, HEAD_DIM)},
-    {"label": "batch_4_heads_8x32x128", "shape": (BATCH, NUM_HEADS, 32, HEAD_DIM)},
-    {"label": "batch_4_heads_8x64x128", "shape": (BATCH, NUM_HEADS, 64, HEAD_DIM)},
-    {"label": "batch_1_heads_8x128x128", "shape": (1, NUM_HEADS, 128, HEAD_DIM)},
-    {"label": "batch_4_heads_8x128x128", "shape": (BATCH, NUM_HEADS, 128, HEAD_DIM)},
-    {"label": "batch_8_heads_32x128x128", "shape": (NUM_HEADS, 32, 128, HEAD_DIM)},
-    {"label": "batch_8_heads_64x128x128", "shape": (NUM_HEADS, 64, 128, HEAD_DIM)},
+    {
+        "label": "batch_4_heads_8x32x128",
+        "shape": (BATCH, NUM_HEADS, 32, HEAD_DIM),
+    },
+    {
+        "label": "batch_4_heads_8x64x128",
+        "shape": (BATCH, NUM_HEADS, 64, HEAD_DIM),
+    },
+    {
+        "label": "batch_1_heads_8x128x128",
+        "shape": (1, NUM_HEADS, 128, HEAD_DIM),
+    },
+    {
+        "label": "batch_4_heads_8x128x128",
+        "shape": (BATCH, NUM_HEADS, 128, HEAD_DIM),
+    },
+    {
+        "label": "batch_8_heads_32x128x128",
+        "shape": (NUM_HEADS, 32, 128, HEAD_DIM),
+    },
+    {
+        "label": "batch_8_heads_64x128x128",
+        "shape": (NUM_HEADS, 64, 128, HEAD_DIM),
+    },
 ]
 
 
@@ -170,7 +187,9 @@ def run_parallel_matrix_svds(
     matrices = x.reshape(-1, x.shape[-2], x.shape[-1]).unbind(0)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         return list(
-            executor.map(run_svd_with_fallback, matrices, repeat(requested_dtype))
+            executor.map(
+                run_svd_with_fallback, matrices, repeat(requested_dtype)
+            )
         )
 
 
@@ -214,7 +233,9 @@ def benchmark_segmented_pipeline(
     )
     cpu_threads = 1 if effective_workers is not None else num_threads
 
-    with temporary_cpu_threads(cpu_threads if exec_device.type == "cpu" else None):
+    with temporary_cpu_threads(
+        cpu_threads if exec_device.type == "cpu" else None
+    ):
         x = torch.randn(shape, device=source_device, dtype=dtype)
         plan = get_svd_execution_plan(exec_device, dtype)
 
@@ -336,9 +357,7 @@ def build_cpu_thread_results():
                     "cpu_std_ms": stats["std_ms"],
                     "cpu_min_ms": stats["min_ms"],
                     "cpu_max_ms": stats["max_ms"],
-                    "cpu_used_float32_fallback": stats[
-                        "used_float32_fallback"
-                    ],
+                    "cpu_used_float32_fallback": stats["used_float32_fallback"],
                     "segment_calls": stats["segment_calls"],
                     "matrices_per_segment_call": stats[
                         "matrices_per_segment_call"
@@ -388,9 +407,7 @@ def build_cpu_outer_parallel_results():
                     "cpu_std_ms": stats["std_ms"],
                     "cpu_min_ms": stats["min_ms"],
                     "cpu_max_ms": stats["max_ms"],
-                    "cpu_used_float32_fallback": stats[
-                        "used_float32_fallback"
-                    ],
+                    "cpu_used_float32_fallback": stats["used_float32_fallback"],
                     "speedup_vs_1_worker": (
                         baseline_mean / stats["mean_ms"]
                         if baseline_mean is not None
@@ -470,9 +487,7 @@ def plot_cpu_thread_results(df: pd.DataFrame, output_path: str) -> None:
     plt.close(fig)
 
 
-def plot_cpu_outer_parallel_results(
-    df: pd.DataFrame, output_path: str
-) -> None:
+def plot_cpu_outer_parallel_results(df: pd.DataFrame, output_path: str) -> None:
     labels = df["label"].unique().tolist()
     x = list(range(len(labels)))
     width = 0.8 / len(OUTER_WORKER_COUNTS)

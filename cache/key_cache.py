@@ -185,7 +185,9 @@ class LowRankKeysCache(DecomposedKeysCache):
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
 
-        raise Exception("Prefill is set to False and no low_rank keys were found.")
+        raise Exception(
+            "Prefill is set to False and no low_rank keys were found."
+        )
 
 
 class SurpriseLRKCache(DecomposedKeysCache):
@@ -219,13 +221,11 @@ class SurpriseLRKCache(DecomposedKeysCache):
 
     def update_events(self, logits, labels):
         B, T, V = logits.shape
-        surprise = (
-            F.cross_entropy(
-                logits.reshape(B * T, V),
-                labels.reshape(B * T),
-                reduction="none",
-            ).reshape(B, T)
-        )
+        surprise = F.cross_entropy(
+            logits.reshape(B * T, V),
+            labels.reshape(B * T),
+            reduction="none",
+        ).reshape(B, T)
 
         self.events = []
         for b in range(B):

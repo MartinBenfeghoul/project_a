@@ -69,9 +69,7 @@ def _truncate_svd_factors(
     if rank_selection == "comp_ratio":
         k = find_rank_wrt_cr(cr, m, n)
     elif rank_selection == "energy":
-        k = find_rank_wrt_energy(
-            S.reshape(*batch_shape, r), energy_threshold
-        )
+        k = find_rank_wrt_energy(S.reshape(*batch_shape, r), energy_threshold)
     else:
         raise ValueError(
             f"rank_selection set to {rank_selection}.",
@@ -226,10 +224,14 @@ def decompose_to_segment_store(
 
     if decompose_fn is svd:
         # Copy the compressed prefix once, then slice CPU views per segment.
-        prefix_host = tensor[..., :suffix_start, :].to(
-            device="cpu",
-            dtype=decompose_kwargs.get("dtype", torch.float32),
-        ).contiguous()
+        prefix_host = (
+            tensor[..., :suffix_start, :]
+            .to(
+                device="cpu",
+                dtype=decompose_kwargs.get("dtype", torch.float32),
+            )
+            .contiguous()
+        )
         host_segments = [
             prefix_host[batch_idx, ..., start_idx:end_idx, :]
             for batch_idx, start_idx, end_idx in specs
@@ -307,6 +309,7 @@ def calc_segment_store_compression_ratio(
 
 
 # ================ LoRA-like decomposition via gradient descent ================
+
 
 def mse(a, b):
     return ((a - b) ** 2).mean()
