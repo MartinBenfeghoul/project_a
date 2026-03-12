@@ -5,28 +5,7 @@ from typing import Callable
 import torch
 
 
-# SVD-based decomposition
-def lowrank_svd(M, k, n_iter=3, dtype=torch.float32, **kwargs):
-    """Compute the truncated SVD of matrix M using PyTorch's built-in function.
-    Args:
-        M: (..., m, n) CUDA tensor
-        k: number of singular values and vectors to compute
-        n_iter: number of power iterations (default: 3)
-        dtype: data type to use for computation (default: torch.float32)
-        Returns:
-            U: (..., m, k) left singular vectors
-            S: (..., k) singular values
-            Vh: (..., k, n) right singular vectors (transposed)
-    """
-    og_dtype = M.dtype
-    M = M.to(dtype).contiguous()
-    U, S, V = torch.svd_lowrank(M, q=k, niter=n_iter)  # V: (n, k)
-    US = U * S.unsqueeze(-2)
-    US, V = (t.to(og_dtype) for t in (US, V))
-    return US, V.transpose(-2, -1)  # Vh
-
-
-def _full_svd_cpu_single(M: torch.Tensor):
+def _full_svd_single(M: torch.Tensor):
     """Compute a full SVD for one CPU matrix.
 
     Expects a single 2D matrix already on CPU and returns the
@@ -41,11 +20,6 @@ def find_rank_wrt_cr(r, m, n):
     """
     k = m * n / (r * (m + n))
     return int(round(k))
-
-
-def calc_energy(M):
-    S = torch.linalg.svdvals(M)  # (d,)
-    return (S**2).cumsum(-1) / (S**2).sum(-1, keepdim=True)
 
 
 def find_rank_wrt_energy(S, energy_threshold):
@@ -154,7 +128,7 @@ def _parallel_svd_segments(
     torch.set_num_threads(1)
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            svds = list(executor.map(_full_svd_cpu_single, flat_matrices))
+            svds = list(executor.map(_full_svd_single, flat_matrices))
     finally:
         torch.set_num_threads(prev_threads)
 
@@ -189,7 +163,7 @@ def _parallel_svd_segments(
     return factor_pairs
 
 
-def parallel_cpu_svd(
+def svd(
     M: torch.Tensor,
     rank_selection: str,
     cr: float = 2.0,
@@ -218,7 +192,6 @@ def parallel_cpu_svd(
 def decompose_to_segment_store(
     tensor: torch.Tensor,
     decompose_fn: Callable[..., tuple[torch.Tensor, torch.Tensor]],
-    decomposition_method: str,
     segment_ranges: list[list[tuple[int, int]]] | None = None,
     **decompose_kwargs,
 ):
@@ -251,7 +224,7 @@ def decompose_to_segment_store(
         for start_idx, end_idx in batch_ranges:
             specs.append((batch_idx, start_idx, end_idx))
 
-    if decomposition_method == "cpu_parallel_svd":
+    if decompose_fn is svd:
         # Copy the compressed prefix once, then slice CPU views per segment.
         prefix_host = tensor[..., :suffix_start, :].to(
             device="cpu",
@@ -331,74 +304,6 @@ def calc_segment_store_compression_ratio(
                 crs += (m * n) / (k * (m + n))
                 num_segments += 1
     return crs / num_segments if num_segments > 0 else 0.0
-
-
-def truncated_svd(
-    M,
-    rank_selection,
-    cr=2.0,
-    energy_threshold=0.95,
-    dtype=torch.float32,
-    **kwargs,
-):
-    """Compute a truncated SVD of M.
-
-    Args:
-        M: (..., m, n) tensor (CUDA or CPU)
-        k: int or None. If None, choose smallest k capturing `energy_threshold`.
-        energy_threshold: float in (0, 1], or tensor broadcastable to M.shape[:-2]
-        dtype: compute dtype (SVD is typically more stable in float32)
-
-    Returns:
-        U: (..., m, k) left singular vectors
-        S: (..., k) singular values
-        Vh: (..., k, n) right singular vectors (transposed)
-    """
-    if rank_selection == "comp_ratio":
-        # TODO: benchmark this path vs the full then truncated path in terms of compute time + accuracy
-        k = find_rank_wrt_cr(cr, M.size(-2), M.size(-1))
-        return lowrank_svd(M, k, dtype=dtype, **kwargs)
-    elif rank_selection == "energy":
-        og_dtype = M.dtype
-        M_ = M.to(dtype).contiguous()
-
-        U, S, Vh = torch.linalg.svd(M_, full_matrices=False)
-        r = S.shape[-1]
-
-        k = find_rank_wrt_energy(S, energy_threshold)
-
-        # safety
-        k = max(1, min(int(k), r))
-
-        U = U[..., :k]
-        S = S[..., :k]
-        Vh = Vh[..., :k, :]
-
-        US = U * S.unsqueeze(-2)
-        US, Vh = (t.to(og_dtype) for t in (US, Vh))
-        return US, Vh
-    else:
-        raise ValueError(
-            f"rank_selection set to {rank_selection}.",
-            "Try either 'comp_ratio' or 'energy_threshold'",
-        )
-
-
-def full_svd(M, dtype=torch.float32):
-    """Compute the full SVD of matrix M using PyTorch's built-in function.
-    Args:
-        M: (..., m, n) CUDA tensor
-        dtype: data type to use for computation (default: torch.float32)
-    Returns:
-        U: (..., m, min(m, n)) left singular vectors
-        S: (..., min(m, n)) singular values
-        Vh: (..., n, min(m, n)) right singular vectors (transposed)
-    """
-    og_dtype = M.dtype
-    M = M.to(dtype).contiguous()
-    U, S, V = torch.linalg.svd(M, full_matrices=False)
-    U, S, V = (t.to(og_dtype) for t in (U, S, V))
-    return U, S, V
 
 
 # Learned decomposition methods
@@ -548,7 +453,6 @@ def lora_matrix(
 
 
 DECOMP_METHODS = {
-    "svd": truncated_svd,
-    "cpu_parallel_svd": parallel_cpu_svd,
+    "svd": svd,
     "lora": lora_matrix,
 }

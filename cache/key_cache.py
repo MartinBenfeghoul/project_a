@@ -138,7 +138,6 @@ class DecomposedKeysCache(SingleTensorCache):
         layer_segments, suffix_start = decompose_to_segment_store(
             keys,
             self.decompose,
-            self.decomposition_method,
             segment_ranges=segment_ranges,
             **self._decomposition_kwargs(),
         )

@@ -156,7 +156,7 @@ def get_parser():
         "--decomposition_method",
         type=str,
         default="svd",
-        choices=["svd", "cpu_parallel_svd", "lora"],
+        choices=["svd", "lora"],
     )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
