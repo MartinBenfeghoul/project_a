@@ -1,16 +1,14 @@
 import math
 from concurrent.futures import ThreadPoolExecutor
+from itertools import repeat
 from typing import Callable
 
 import torch
 
 
-def _full_svd_single(M: torch.Tensor):
-    """Compute a full SVD for one CPU matrix.
-
-    Expects a single 2D matrix already on CPU and returns the
-    `(U, S, Vh)` triple from `torch.linalg.svd`.
-    """
+def _full_svd_single(M: torch.Tensor, dtype: torch.dtype):
+    """Compute a full SVD for one matrix after moving it to CPU."""
+    M = M.to(device="cpu", dtype=dtype).contiguous()
     return torch.linalg.svd(M, full_matrices=False)
 
 
@@ -87,28 +85,30 @@ def _truncate_svd_factors(
 
 
 def _parallel_svd_segments(
-    host_segments: list[torch.Tensor],
+    segments: list[torch.Tensor],
     rank_selection: str,
     target_device: torch.device,
     target_dtype: torch.dtype,
+    dtype: torch.dtype = torch.float32,
     cr: float = 2.0,
     energy_threshold: float = 0.95,
     **kwargs,
 ):
-    """Run threaded CPU SVD for segments that already live on CPU.
+    """Run threaded CPU SVD for a list of tensor segments.
 
-    `host_segments` holds the matrices to decompose. Each resulting
-    `(A, B)` pair is restored to `target_device` and `target_dtype`.
+    Each segment may still live on the original device. The worker that owns a
+    matrix moves it to CPU, computes its SVD, and the resulting factor pair is
+    moved back to `target_device` in `target_dtype`.
     """
-    if not host_segments:
+    if not segments:
         return []
 
     specs = []
     flat_matrices = []
-    for host_segment in host_segments:
-        batch_shape = host_segment.shape[:-2]
-        m, n = host_segment.shape[-2:]
-        flat_segment = host_segment.reshape(-1, m, n)
+    for segment in segments:
+        batch_shape = segment.shape[:-2]
+        m, n = segment.shape[-2:]
+        flat_segment = segment.reshape(-1, m, n)
         specs.append(
             (
                 batch_shape,
@@ -126,7 +126,9 @@ def _parallel_svd_segments(
     torch.set_num_threads(1)
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            svds = list(executor.map(_full_svd_single, flat_matrices))
+            svds = list(
+                executor.map(_full_svd_single, flat_matrices, repeat(dtype))
+            )
     finally:
         torch.set_num_threads(prev_threads)
 
@@ -171,15 +173,15 @@ def svd(
 ):
     """Apply the threaded CPU SVD path to one tensor.
 
-    The input tensor is copied to CPU once, decomposed there, and the
-    resulting factor pair `(A, B)` is returned on the original device.
+    Each flattened matrix is handled by a worker that moves it to CPU for the
+    SVD, then returns the truncated factors on the original device.
     """
-    M_host = M.to(device="cpu", dtype=dtype).contiguous()
     US, Vh = _parallel_svd_segments(
-        [M_host],
+        [M],
         rank_selection,
         target_device=M.device,
         target_dtype=M.dtype,
+        dtype=dtype,
         cr=cr,
         energy_threshold=energy_threshold,
         **kwargs,
@@ -222,31 +224,19 @@ def decompose_to_segment_store(
         for start_idx, end_idx in batch_ranges:
             specs.append((batch_idx, start_idx, end_idx))
 
+    segments = [
+        tensor[batch_idx, ..., start_idx:end_idx, :]
+        for batch_idx, start_idx, end_idx in specs
+    ]
+
     if decompose_fn is svd:
-        # Copy the compressed prefix once, then slice CPU views per segment.
-        prefix_host = (
-            tensor[..., :suffix_start, :]
-            .to(
-                device="cpu",
-                dtype=decompose_kwargs.get("dtype", torch.float32),
-            )
-            .contiguous()
-        )
-        host_segments = [
-            prefix_host[batch_idx, ..., start_idx:end_idx, :]
-            for batch_idx, start_idx, end_idx in specs
-        ]
         factor_pairs = _parallel_svd_segments(
-            host_segments,
+            segments,
             target_device=tensor.device,
             target_dtype=tensor.dtype,
             **decompose_kwargs,
         )
     else:
-        segments = [
-            tensor[batch_idx, ..., start_idx:end_idx, :]
-            for batch_idx, start_idx, end_idx in specs
-        ]
         factor_pairs = [
             decompose_fn(segment, **decompose_kwargs) for segment in segments
         ]
