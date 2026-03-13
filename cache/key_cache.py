@@ -179,15 +179,14 @@ class LowRankKeysCache(DecomposedKeysCache):
             self._decompose_keys(keys, layer_idx)
             self._evict(layer_idx=layer_idx)
             return keys
-
-        if self.lr_keys.get(layer_idx, False):
+        elif self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
-
-        raise Exception(
-            "Prefill is set to False and no low_rank keys were found."
-        )
+        else:
+            raise Exception(
+                "Prefill is set to False and no low_rank keys were found."
+            )
 
 
 class SurpriseLRKCache(DecomposedKeysCache):
