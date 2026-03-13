@@ -158,7 +158,7 @@ def main(args):
         "rank_selection": args.rank_selection,
         "lr": args.k_lr,
         "n_iter": args.n_iter,
-        "gamma": 3.0,
+        "gamma": args.gamma,
         "min_size": 8.0,
     }
 
@@ -314,6 +314,7 @@ def parse_args():
     )
     parser.add_argument("--k_lr", type=float, default=1e-2)
     parser.add_argument("--n_iter", type=int, default=3)
+    parser.add_argument("--gamma", type=float, default=3.0)
     parser.add_argument("--log_key_cache_timing", action="store_true")
 
     # value cache
