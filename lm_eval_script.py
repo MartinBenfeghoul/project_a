@@ -245,6 +245,7 @@ def main(args):
         results = extract_and_save_efficiency_stats(
             logger, results, model_baseline_mem, start_time
         )
+    results["results"]["config"] = vars(args)
 
     if args.debug:
         print("Debug mode — not saving results.")
