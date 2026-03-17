@@ -168,6 +168,7 @@ def get_parser():
     )
     parser.add_argument("--k_lr", type=float, default=1e-2)
     parser.add_argument("--n_iter", type=int, default=3)
+    parser.add_argument("--local_window", type=int, default=0)
 
     # value cache
     parser.add_argument("--v_cache_type", type=str, default="mlp")
@@ -199,6 +200,7 @@ if __name__ == "__main__":
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
+        "local_window": args.local_window,
         "comp_ratio": args.comp_ratio,
         "energy_threshold": args.energy_threshold,
         "rank_selection": args.rank_selection,

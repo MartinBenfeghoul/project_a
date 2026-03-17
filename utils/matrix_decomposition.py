@@ -199,7 +199,7 @@ def decompose_to_segment_store(
 
     When `segment_ranges` is omitted, the full tensor is decomposed. When it
     is provided, only those `[start, end)` ranges are decomposed. Returns the
-    per-batch segment records plus the shared compressed-prefix boundary.
+    per-batch segment records.
     """
     if segment_ranges is None:
         A, B = decompose_fn(tensor, **decompose_kwargs)
@@ -208,16 +208,7 @@ def decompose_to_segment_store(
             [{"range": (0, seq_len), "factors": (A[b], B[b])}]
             for b in range(tensor.size(0))
         ]
-        return layer_segments, seq_len
-
-    suffix_starts = [
-        ranges[-1][1] if ranges else 0 for ranges in segment_ranges
-    ]
-    suffix_start = suffix_starts[0] if suffix_starts else 0
-    if any(start != suffix_start for start in suffix_starts[1:]):
-        raise ValueError(
-            "All batches must share the same compressed prefix length."
-        )
+        return layer_segments
 
     specs = []
     for batch_idx, batch_ranges in enumerate(segment_ranges):
@@ -246,7 +237,7 @@ def decompose_to_segment_store(
         layer_segments[batch_idx].append(
             {"range": (start_idx, end_idx), "factors": (A, B)}
         )
-    return layer_segments, suffix_start
+    return layer_segments
 
 
 def reconstruct_segments(

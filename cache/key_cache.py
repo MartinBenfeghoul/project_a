@@ -76,6 +76,7 @@ class DecomposedKeysCache(SingleTensorCache):
         self,
         *args,
         decomposition_method: str = None,
+        local_window: int = 0,
         log_timing_stats: bool = False,
         rank_selection: str = "comp_ratio",
         comp_ratio: float = 2.0,
@@ -94,6 +95,7 @@ class DecomposedKeysCache(SingleTensorCache):
 
         self.decomposition_method = decomposition_method
         self.decompose = DECOMP_METHODS[decomposition_method]
+        self.local_window = local_window
         self.rank_selection = rank_selection
         self.r = comp_ratio
         self.e = energy_threshold
@@ -130,17 +132,58 @@ class DecomposedKeysCache(SingleTensorCache):
         self.lr_keys[layer_idx] = layer_segments
         self.comp_ratio = self.calc_compression_ratio()
 
+    def _get_suffix_start(self, keys, segment_ranges=None):
+        if self.local_window < 0:
+            raise ValueError("local_window must be non-negative.")
+
+        if segment_ranges is None:
+            prefix_end = keys.size(-2)
+        else:
+            prefix_ends = [
+                ranges[-1][1] if ranges else 0 for ranges in segment_ranges
+            ]
+            prefix_end = prefix_ends[0] if prefix_ends else 0
+            if any(end != prefix_end for end in prefix_ends[1:]):
+                raise ValueError(
+                    "All batches must share the same compressed prefix length."
+                )
+
+        return max(0, prefix_end - self.local_window)
+
+    def _trim_segment_ranges(self, segment_ranges, suffix_start):
+        if segment_ranges is None:
+            return None
+
+        trimmed_ranges = []
+        for batch_ranges in segment_ranges:
+            trimmed_batch_ranges = []
+            for start_idx, end_idx in batch_ranges:
+                end_idx = min(end_idx, suffix_start)
+                if start_idx < end_idx:
+                    trimmed_batch_ranges.append((start_idx, end_idx))
+            trimmed_ranges.append(trimmed_batch_ranges)
+        return trimmed_ranges
+
     def _decompose_keys(self, keys, layer_idx, segment_ranges=None):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
 
-        layer_segments, suffix_start = decompose_to_segment_store(
-            keys,
-            self.decompose,
-            segment_ranges=segment_ranges,
-            **self._decomposition_kwargs(),
+        suffix_start = self._get_suffix_start(keys, segment_ranges)
+        decomp_keys = keys[..., :suffix_start, :]
+        trimmed_segment_ranges = self._trim_segment_ranges(
+            segment_ranges, suffix_start
         )
+
+        if suffix_start == 0:
+            layer_segments = [[] for _ in range(keys.size(0))]
+        else:
+            layer_segments = decompose_to_segment_store(
+                decomp_keys if trimmed_segment_ranges is None else keys,
+                self.decompose,
+                segment_ranges=trimmed_segment_ranges,
+                **self._decomposition_kwargs(),
+            )
 
         if self.log_timing_stats:
             sync_cuda(keys)
@@ -176,8 +219,8 @@ class LowRankKeysCache(DecomposedKeysCache):
         keys = super().update(key_states, layer_idx, cache_kwargs)
 
         if self.prefill:
-            self._decompose_keys(keys, layer_idx)
-            self._evict(layer_idx=layer_idx)
+            suffix_start = self._decompose_keys(keys, layer_idx)
+            self._evict(layer_idx=layer_idx, end_idx=suffix_start)
             return keys
         elif self.lr_keys.get(layer_idx, False):
             recon_keys = self._reconstruct_keys(keys, layer_idx)

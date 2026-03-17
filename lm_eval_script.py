@@ -152,6 +152,7 @@ def main(args):
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
+        "local_window": args.local_window,
         "log_timing_stats": args.log_key_cache_timing,
         "comp_ratio": args.comp_ratio,
         "energy_threshold": args.energy_threshold,
@@ -316,6 +317,7 @@ def parse_args():
     parser.add_argument("--k_lr", type=float, default=1e-2)
     parser.add_argument("--n_iter", type=int, default=3)
     parser.add_argument("--gamma", type=float, default=3.0)
+    parser.add_argument("--local_window", type=int, default=0)
     parser.add_argument("--log_key_cache_timing", action="store_true")
 
     # value cache
