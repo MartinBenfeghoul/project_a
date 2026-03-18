@@ -20,6 +20,7 @@ from .logging import (
     init_wandb,
     save_checkpoint,
     log_batch,
+    extract_and_save_event_stats,
     extract_and_save_timing_stats,
     extract_and_save_efficiency_stats,
 )

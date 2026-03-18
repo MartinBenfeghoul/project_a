@@ -279,6 +279,29 @@ def extract_and_save_timing_stats(logger, results):
     return results
 
 
+def extract_and_save_event_stats(logger, results):
+    n_events, n_events_std = logger.get_log_mean("n_events", std=True)
+    avg_event_size, avg_event_size_std = logger.get_log_mean(
+        "avg_event_size", std=True
+    )
+    if n_events is None or avg_event_size is None:
+        return results
+
+    n_events = float(n_events)
+    avg_event_size = float(avg_event_size)
+    results["results"]["event_stats"] = {
+        "n_events": n_events,
+        "n_events_std": n_events_std,
+        "avg_event_size": avg_event_size,
+        "avg_event_size_std": avg_event_size_std,
+    }
+    print(
+        f"Logged an average of {n_events:.2f}+/-{n_events_std:.2f} events"
+        f" with average size of {avg_event_size:.2f}+/-{avg_event_size_std:.2f} tokens"
+    )
+    return results
+
+
 def extract_and_save_efficiency_stats(
     logger, results, model_baseline_mem, start_time
 ):

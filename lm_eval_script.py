@@ -13,6 +13,7 @@ from cache import CompressedCacheHFLM
 from utils import (
     Logger,
     get_model_and_tokenizer,
+    extract_and_save_event_stats,
     extract_and_save_timing_stats,
     extract_and_save_efficiency_stats,
 )
@@ -99,10 +100,14 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                 else:
                     label_ed = None
                 logits = output.logits
-                pkv.update_events(
+                n_events = pkv.update_events(
                     logits[..., : -1 - uncompressed_window, :],
                     input_ids[..., 1:label_ed],
                 )
+                if n_events is not None and n_events > 0:
+                    avg_event_size = seq_len / n_events
+                    logger.add_log("n_events", n_events)
+                    logger.add_log("avg_event_size", avg_event_size)
             if measure_latency:
                 logger.prefill_events.append((_start_evt[0], end_evt))
         else:
@@ -202,7 +207,8 @@ def main(args):
         model_baseline_mem = torch.cuda.memory_allocated()
 
     pre_hook, post_hook = make_hooks(
-        logger, measure_latency=args.log_efficiency_metrics
+        logger,
+        measure_latency=args.log_efficiency_metrics,
     )
     model.register_forward_pre_hook(pre_hook, with_kwargs=True)
     model.register_forward_hook(post_hook, with_kwargs=True)
@@ -242,6 +248,7 @@ def main(args):
     print(make_table(results))
 
     results = extract_and_save_timing_stats(logger, results)
+    results = extract_and_save_event_stats(logger, results)
     if args.log_efficiency_metrics:
         results = extract_and_save_efficiency_stats(
             logger, results, model_baseline_mem, start_time

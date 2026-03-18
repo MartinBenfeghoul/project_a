@@ -269,14 +269,16 @@ class CompressedCache:
         else:
             return None
 
-    def update_events(self, *args, **kwargs) -> None:
+    def update_events(self, *args, **kwargs):
         """
         Forward event updates to caches.
         """
+        n_events = None
         if hasattr(self.key_cache, "update_events"):
-            self.key_cache.update_events(*args, **kwargs)
+            n_events = self.key_cache.update_events(*args, **kwargs)
         if hasattr(self.value_cache, "update_events"):
             self.value_cache.update_events(*args, **kwargs)
+        return n_events
 
     def crop(self, max_length: int) -> None:
         raise NotImplementedError("crop not implemented")

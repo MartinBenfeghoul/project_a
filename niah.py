@@ -40,10 +40,13 @@ def make_hook(logger, uncompressed_window=0):
                     label_ed = -uncompressed_window
                 else:
                     label_ed = None
-                pkv.update_events(
+                n_events = pkv.update_events(
                     logits[..., : -1 - uncompressed_window, :],
                     input_ids[..., 1:label_ed],
                 )
+                if n_events is not None and n_events > 0:
+                    logger.add_log("n_events", n_events)
+                    logger.add_log("avg_event_size", seq_len / n_events)
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
@@ -55,9 +58,12 @@ def make_hook(logger, uncompressed_window=0):
     return hook
 
 
-def register_hooks(model):
+def register_hooks(model, uncompressed_window=0):
     logger = Logger()
-    model.register_forward_hook(make_hook(logger), with_kwargs=True)
+    model.register_forward_hook(
+        make_hook(logger, uncompressed_window=uncompressed_window),
+        with_kwargs=True,
+    )
     return model, logger
 
 
@@ -132,6 +138,13 @@ def main(
     print(f"Success rate: {success_rate * 100:.1f}%")
     cr_avg, cr_std = logger.get_log_mean("crs", std=True)
     print(f"Compression ratio: {cr_avg:.2f}+-{cr_std:.2f}")
+    n_events = logger.get_log_mean("n_events")
+    avg_event_size = logger.get_log_mean("avg_event_size")
+    if n_events is not None and avg_event_size is not None:
+        print(
+            f"Average events per sample: {float(n_events):.2f}, "
+            f"average event size: {float(avg_event_size):.2f} tokens"
+        )
     return success_rate, (cr_avg, cr_std)
 
 

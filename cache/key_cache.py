@@ -270,6 +270,7 @@ class SurpriseLRKCache(DecomposedKeysCache):
         ).reshape(B, T)
 
         self.events = []
+        n_events = 0
         for b in range(B):
             events = find_thresholds(
                 surprise[b],
@@ -280,8 +281,9 @@ class SurpriseLRKCache(DecomposedKeysCache):
             # boundary to include the last token from prefill.
             events[-1] += 1
             self.events.append(events)
-
+            n_events += len(events) - 1
         self.prefill = False
+        return n_events / B
 
     def _build_segment_ranges(self):
         segment_ranges = []
@@ -303,7 +305,7 @@ class SurpriseLRKCache(DecomposedKeysCache):
         if self.prefill:
             return keys
 
-        if not self.lr_keys.get(layer_idx, False):
+        if layer_idx not in self.lr_keys:
             suffix_start = self._decompose_keys(
                 keys,
                 layer_idx,
