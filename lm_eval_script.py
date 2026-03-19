@@ -154,6 +154,8 @@ def main(args):
     logger.decode_events = []
     logger.recorded_k_timing = False
 
+    rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
+
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
@@ -166,6 +168,8 @@ def main(args):
         "n_iter": args.n_iter,
         "gamma": args.gamma,
         "min_size": 8.0,
+        "unrope_keys": args.un_rope,
+        "rope_theta": rope_theta,
     }
 
     num_layers = model.config.num_hidden_layers
@@ -189,7 +193,7 @@ def main(args):
         "num_epochs": args.num_epochs,
         "meta_weights_path": args.meta_weights_path,
         "un_rope": args.un_rope,
-        "rope_theta": args.rope_theta,
+        "rope_theta": rope_theta,
         "global_compression": args.global_compression,
     }
 

@@ -280,15 +280,17 @@ def extract_and_save_timing_stats(logger, results):
 
 
 def extract_and_save_event_stats(logger, results):
-    n_events, n_events_std = logger.get_log_mean("n_events", std=True)
-    avg_event_size, avg_event_size_std = logger.get_log_mean(
-        "avg_event_size", std=True
-    )
-    if n_events is None or avg_event_size is None:
+    n_events_stats = logger.get_log_mean("n_events", std=True)
+    avg_event_size_stats = logger.get_log_mean("avg_event_size", std=True)
+    if n_events_stats is None or avg_event_size_stats is None:
         return results
 
-    n_events = float(n_events)
-    avg_event_size = float(avg_event_size)
+    n_events, n_events_std = (
+        float(n_events_stats[0]), float(n_events_stats[1])
+    )
+    avg_event_size, avg_event_size_std = (
+        float(avg_event_size_stats[0]), float(avg_event_size_stats[1])
+    )
     results["results"]["event_stats"] = {
         "n_events": n_events,
         "n_events_std": n_events_std,

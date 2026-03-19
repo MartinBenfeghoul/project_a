@@ -5,7 +5,6 @@ from torch.func import functional_call
 import torch
 from model.mlp import MLP
 from typing import Any
-from utils import inverse_rope, compute_rope_cos_sin
 
 LOSS_FUNC = {"mse": mse_loss}
 
@@ -28,10 +27,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         meta_weights: dict | None = None,
         meta_inner_lrs: list | None = None,
         un_rope: bool = False,
-        rope_theta: float = 500_000.0,
         global_compression: bool = False,
+        **kwargs,
     ):
-        super().__init__()
+        super().__init__(**kwargs)
 
         self.mlp_num_layers = mlp_num_layers
         self.mlp_hidden_factor = mlp_hidden_factor
@@ -49,7 +48,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.meta_inner_lrs = meta_inner_lrs
 
         self.un_rope = un_rope
-        self.rope_theta = rope_theta
 
         self.mlp = None
         self.indices = None
@@ -57,8 +55,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.is_compressed = False
         self.prefill = True
         self.compressed_len = 0
-        self.rope_cos: torch.Tensor | None = None
-        self.rope_sin: torch.Tensor | None = None
 
     def lazy_initialization(self, value_states: torch.Tensor) -> None:
 
@@ -206,58 +202,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             self.indices[2][:0],
         )
 
-    def _unrope(
-        self,
-        keys: torch.Tensor,
-        cache_kwargs: dict | None = None,
-    ) -> torch.Tensor:
-        if not self.un_rope:
-            return keys
-
-        T = keys.shape[2]
-
-        if self.prefill:
-            if (
-                cache_kwargs is not None
-                and "cos" in cache_kwargs
-                and "sin" in cache_kwargs
-            ):
-                cos, sin = cache_kwargs["cos"], cache_kwargs["sin"]
-                # TODO: check that this is compatible with other architectures
-                if cos.dim() == 3:
-                    cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-                cos = cos[:, :, :T].to(device=keys.device, dtype=keys.dtype)
-                sin = sin[:, :, :T].to(device=keys.device, dtype=keys.dtype)
-            else:
-                cos, sin = compute_rope_cos_sin(
-                    T, self.head_dim, self.rope_theta, keys.device, keys.dtype
-                )
-            self.rope_cos = cos
-            self.rope_sin = sin
-            return inverse_rope(keys, cos, sin)
-
-        # Decode: un-rope only the compressed prefix; suffix is never fed to MLP
-        prefix_len = min(self.compressed_len, T)
-        if self.rope_cos is not None:
-            cos = self.rope_cos[:, :, :prefix_len].to(
-                device=keys.device, dtype=keys.dtype
-            )
-            sin = self.rope_sin[:, :, :prefix_len].to(
-                device=keys.device, dtype=keys.dtype
-            )
-        else:
-            cos, sin = compute_rope_cos_sin(
-                prefix_len,
-                self.head_dim,
-                self.rope_theta,
-                keys.device,
-                keys.dtype,
-            )
-        prefix = inverse_rope(keys[:, :, :prefix_len], cos, sin)
-        if prefix_len < T:
-            return torch.cat([prefix, keys[:, :, prefix_len:]], dim=2)
-        return prefix
-
     def update(
         self,
         value_states: torch.Tensor,
@@ -268,7 +212,13 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             raise ValueError("MLPValueLayer requires keys in cache_kwargs")
 
         keys = cache_kwargs["keys"]
-        keys_for_mlp = self._unrope(keys, cache_kwargs)
+        if self.un_rope:
+            keys_for_mlp = self._undo_rope(
+                keys, cache_kwargs,
+                prefill=self.prefill, compressed_len=self.compressed_len,
+            )
+        else:
+            keys_for_mlp = keys
         values = super().update(value_states)
 
         if self.prefill:

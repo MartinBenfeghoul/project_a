@@ -24,4 +24,4 @@ from .logging import (
     extract_and_save_timing_stats,
     extract_and_save_efficiency_stats,
 )
-from .rope import inverse_rope, compute_rope_cos_sin
+from .rope import inverse_rope, apply_rope, compute_rope_cos_sin

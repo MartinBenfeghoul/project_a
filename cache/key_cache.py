@@ -83,6 +83,7 @@ class DecomposedKeysCache(SingleTensorCache):
         energy_threshold: float = 0.95,
         n_iter: int = 3,
         lr: float = 1e-2,
+        unrope_keys: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -101,10 +102,12 @@ class DecomposedKeysCache(SingleTensorCache):
         self.e = energy_threshold
         self.n = n_iter
         self.lr = lr
+        self.unrope_keys = unrope_keys
 
         self.prefill = True
         self.lr_keys = {}
         self.comp_ratio = None
+        self.compressed_len = 0
         self.log_timing_stats = log_timing_stats
         type(self).timing_stats = (
             init_timing_stats() if self.log_timing_stats else None
@@ -164,13 +167,21 @@ class DecomposedKeysCache(SingleTensorCache):
             trimmed_ranges.append(trimmed_batch_ranges)
         return trimmed_ranges
 
-    def _decompose_keys(self, keys, layer_idx, segment_ranges=None):
+    def _decompose_keys(
+        self, keys, layer_idx, segment_ranges=None, cache_kwargs=None
+    ):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
 
         suffix_start = self._get_suffix_start(keys, segment_ranges)
+        self.compressed_len = suffix_start
         decomp_keys = keys[..., :suffix_start, :]
+        if self.unrope_keys:
+            decomp_keys = self.layers[layer_idx]._undo_rope(
+                decomp_keys, cache_kwargs,
+                prefill=self.prefill, compressed_len=suffix_start,
+            )
         trimmed_segment_ranges = self._trim_segment_ranges(
             segment_ranges, suffix_start
         )
@@ -178,8 +189,13 @@ class DecomposedKeysCache(SingleTensorCache):
         if suffix_start == 0:
             layer_segments = [[] for _ in range(keys.size(0))]
         else:
+            if trimmed_segment_ranges is None or self.unrope_keys:
+                keys_to_decompose = decomp_keys
+            else:
+                keys_to_decompose = keys
+            
             layer_segments = decompose_to_segment_store(
-                decomp_keys if trimmed_segment_ranges is None else keys,
+                keys_to_decompose,
                 self.decompose,
                 segment_ranges=trimmed_segment_ranges,
                 **self._decomposition_kwargs(),
@@ -194,13 +210,16 @@ class DecomposedKeysCache(SingleTensorCache):
         self._store_layer_segments(layer_idx, layer_segments)
         return suffix_start
 
-    def _reconstruct_keys(self, keys, layer_idx):
+    def _reconstruct_keys(self, keys, layer_idx, cache_kwargs=None):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
 
         recon_keys = reconstruct_segments(self.lr_keys[layer_idx], keys)
-
+        if self.unrope_keys:
+            recon_keys = self.layers[layer_idx]._apply_rope(
+                recon_keys, compressed_len=self.compressed_len,
+            )
         if self.log_timing_stats:
             sync_cuda(recon_keys)
             update_timing_stats(
@@ -219,11 +238,15 @@ class LowRankKeysCache(DecomposedKeysCache):
         keys = super().update(key_states, layer_idx, cache_kwargs)
 
         if self.prefill:
-            suffix_start = self._decompose_keys(keys, layer_idx)
+            suffix_start = self._decompose_keys(
+                keys, layer_idx, cache_kwargs=cache_kwargs
+            )
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
             return keys
         elif self.lr_keys.get(layer_idx, False):
-            recon_keys = self._reconstruct_keys(keys, layer_idx)
+            recon_keys = self._reconstruct_keys(
+                keys, layer_idx, cache_kwargs=cache_kwargs
+            )
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
         else:
@@ -310,11 +333,14 @@ class SurpriseLRKCache(DecomposedKeysCache):
                 keys,
                 layer_idx,
                 segment_ranges=self._build_segment_ranges(),
+                cache_kwargs=cache_kwargs,
             )
             keys = keys[..., suffix_start:, :]
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
 
-        recon_keys = self._reconstruct_keys(keys, layer_idx)
+        recon_keys = self._reconstruct_keys(
+            keys, layer_idx, cache_kwargs=cache_kwargs
+        )
         check_recon_length(recon_keys, cache_kwargs)
         return recon_keys
 

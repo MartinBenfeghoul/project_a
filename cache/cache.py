@@ -7,6 +7,7 @@ from transformers.cache_utils import (
     PreTrainedConfig,
 )
 
+from utils import inverse_rope, apply_rope, compute_rope_cos_sin
 
 def get_cache(cache_type, CACHE_CLASSES, verbose=True):
     if cache_type not in CACHE_CLASSES:
@@ -24,11 +25,14 @@ class SingleTensorDynamicLayer:
     """
 
     # TODO: add all method from CacheLayerMixin as well (DynamicLayerr's Base)
-    def __init__(self):
+    def __init__(self, rope_theta=None):
         self.tensor: torch.Tensor | None = None
         self.is_initialized = False
         self.device = None
         self.dtype = None
+        self.rope_theta = rope_theta
+        self.rope_cos: torch.Tensor | None = None
+        self.rope_sin: torch.Tensor | None = None
 
     def lazy_initialization(self, tensor_states: torch.Tensor) -> None:
         self.dtype, self.device = tensor_states.dtype, tensor_states.device
@@ -79,6 +83,88 @@ class SingleTensorDynamicLayer:
                 if reset_seq_len:
                     self.seq_len = self.tensor.shape[-2]
 
+    def _undo_rope(
+        self,
+        keys: torch.Tensor,
+        cache_kwargs: dict | None = None,
+        prefill: bool = True,
+        compressed_len: int = 0,
+    ) -> torch.Tensor:
+        T = keys.shape[2]
+        prefix_len = T if prefill else min(compressed_len, T)
+
+        # Acquire cos/sin: from cache_kwargs on prefill, from saved state on decode
+        if (
+            prefill
+            and cache_kwargs is not None
+            and "cos" in cache_kwargs
+            and "sin" in cache_kwargs
+        ):
+            cos, sin = cache_kwargs["cos"], cache_kwargs["sin"]
+            if cos.dim() == 3:
+                cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
+            cos = cos[:, :, :prefix_len].to(device=keys.device, dtype=keys.dtype)
+            sin = sin[:, :, :prefix_len].to(device=keys.device, dtype=keys.dtype)
+        elif self.rope_cos is not None and self.rope_sin is not None:
+            cos = self.rope_cos[:, :, :prefix_len].to(
+                device=keys.device, dtype=keys.dtype
+            )
+            sin = self.rope_sin[:, :, :prefix_len].to(
+                device=keys.device, dtype=keys.dtype
+            )
+        else:
+            warnings.warn(
+                "_undo_rope: cos/sin not found in cache_kwargs or saved state, "
+                "recomputing from rope_theta (this is unexpected for HF models)"
+            )
+            cos, sin = compute_rope_cos_sin(
+                prefix_len, keys.shape[-1], self.rope_theta,
+                keys.device, keys.dtype,
+            )
+
+        if prefill or (self.rope_cos is None or self.rope_sin is None):
+            self.rope_cos = cos
+            self.rope_sin = sin
+
+        prefix = inverse_rope(keys[:, :, :prefix_len], cos, sin)
+        if prefix_len < T:
+            return torch.cat([prefix, keys[:, :, prefix_len:]], dim=2)
+        return prefix
+
+    def _apply_rope(
+        self,
+        keys: torch.Tensor,
+        compressed_len: int = 0,
+    ) -> torch.Tensor:
+        T = keys.shape[2]
+        prefix_len = min(compressed_len, T)
+        if prefix_len == 0:
+            return keys
+
+        if self.rope_cos is not None and self.rope_sin is not None:
+            cos = self.rope_cos[:, :, :prefix_len].to(
+                device=keys.device, dtype=keys.dtype
+            )
+            sin = self.rope_sin[:, :, :prefix_len].to(
+                device=keys.device, dtype=keys.dtype
+            )
+        else:
+            warnings.warn(
+                "_apply_rope: saved cos/sin not found, recomputing from "
+                "rope_theta (this is unexpected — _undo_rope should have "
+                "been called during prefill)"
+            )
+            cos, sin = compute_rope_cos_sin(
+                prefix_len, keys.shape[-1], self.rope_theta,
+                keys.device, keys.dtype,
+            )
+
+        prefix = keys[:, :, :prefix_len]
+        prefix_roped = apply_rope(prefix, cos, sin)
+        if prefix_len < T:
+            return torch.cat([prefix_roped, keys[:, :, prefix_len:]], dim=2)
+        return prefix_roped
+
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         if self.get_seq_length() > 0:
             self.tensor = self.tensor.index_select(
@@ -114,13 +200,15 @@ class SingleTensorCache:
     def __init__(
         self,
         ddp_cache_data: Iterable[torch.Tensor] | None = None,
+        rope_theta: float | None = None,
         **kwargs,
     ):
         self.layers: list[SingleTensorDynamicLayer] = []
+        self.rope_theta = rope_theta
 
         if ddp_cache_data is not None:
             for tensor_states in ddp_cache_data:
-                layer = SingleTensorDynamicLayer()
+                layer = SingleTensorDynamicLayer(rope_theta=rope_theta)
                 layer.update(tensor_states)
                 self.layers.append(layer)
 
@@ -131,7 +219,9 @@ class SingleTensorCache:
         cache_kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
         while len(self.layers) <= layer_idx:
-            self.layers.append(SingleTensorDynamicLayer())
+            self.layers.append(
+                SingleTensorDynamicLayer(rope_theta=self.rope_theta)
+            )
         return self.layers[layer_idx].update(tensor_states)
 
     def get_seq_length(self, layer_idx: int = 0) -> int:

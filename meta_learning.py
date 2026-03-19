@@ -603,6 +603,8 @@ def evaluate_ruler(
         "n_iter": 3,
         "gamma": 3.0,
         "min_size": 8.0,
+        "unrope_keys": training_config.get("un_rope", False),
+        "rope_theta": training_config.get("rope_theta", 500_000.0),
     }
 
     value_cache_kwargs = {
