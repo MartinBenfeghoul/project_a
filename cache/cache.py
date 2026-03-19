@@ -83,6 +83,55 @@ class SingleTensorDynamicLayer:
                 if reset_seq_len:
                     self.seq_len = self.tensor.shape[-2]
 
+    def _resolve_rope_cos_sin(
+        self,
+        prefix_len: int,
+        head_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        cache_kwargs: dict | None = None,
+        save: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Resolve cos/sin from cache_kwargs, saved state, or recomputation."""
+        if (
+            cache_kwargs is not None
+            and "cos" in cache_kwargs
+            and "sin" in cache_kwargs
+        ):
+            cos, sin = cache_kwargs["cos"], cache_kwargs["sin"]
+            if cos.dim() == 3:
+                cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
+            cos = cos[:, :, :prefix_len].to(device=device, dtype=dtype)
+            sin = sin[:, :, :prefix_len].to(device=device, dtype=dtype)
+        elif self.rope_cos is not None and self.rope_sin is not None:
+            cos = self.rope_cos[:, :, :prefix_len].to(device=device, dtype=dtype)
+            sin = self.rope_sin[:, :, :prefix_len].to(device=device, dtype=dtype)
+        else:
+            warnings.warn(
+                "_resolve_rope_cos_sin: cos/sin not found in cache_kwargs or "
+                "saved state, recomputing from rope_theta"
+            )
+            cos, sin = compute_rope_cos_sin(
+                prefix_len, head_dim, self.rope_theta, device, dtype,
+            )
+
+        if save or self.rope_cos is None or self.rope_sin is None:
+            self.rope_cos = cos
+            self.rope_sin = sin
+
+        return cos, sin
+
+    def _cache_rope_state(
+        self,
+        keys: torch.Tensor,
+        cache_kwargs: dict | None = None,
+    ) -> None:
+        """Pre-save rope cos/sin from cache_kwargs for later _undo_rope/_apply_rope."""
+        self._resolve_rope_cos_sin(
+            keys.shape[2], keys.shape[-1], keys.device, keys.dtype,
+            cache_kwargs=cache_kwargs, save=True,
+        )
+
     def _undo_rope(
         self,
         keys: torch.Tensor,
@@ -93,38 +142,12 @@ class SingleTensorDynamicLayer:
         T = keys.shape[2]
         prefix_len = T if prefill else min(compressed_len, T)
 
-        # Acquire cos/sin: from cache_kwargs on prefill, from saved state on decode
-        if (
-            prefill
-            and cache_kwargs is not None
-            and "cos" in cache_kwargs
-            and "sin" in cache_kwargs
-        ):
-            cos, sin = cache_kwargs["cos"], cache_kwargs["sin"]
-            if cos.dim() == 3:
-                cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-            cos = cos[:, :, :prefix_len].to(device=keys.device, dtype=keys.dtype)
-            sin = sin[:, :, :prefix_len].to(device=keys.device, dtype=keys.dtype)
-        elif self.rope_cos is not None and self.rope_sin is not None:
-            cos = self.rope_cos[:, :, :prefix_len].to(
-                device=keys.device, dtype=keys.dtype
-            )
-            sin = self.rope_sin[:, :, :prefix_len].to(
-                device=keys.device, dtype=keys.dtype
-            )
-        else:
-            warnings.warn(
-                "_undo_rope: cos/sin not found in cache_kwargs or saved state, "
-                "recomputing from rope_theta (this is unexpected for HF models)"
-            )
-            cos, sin = compute_rope_cos_sin(
-                prefix_len, keys.shape[-1], self.rope_theta,
-                keys.device, keys.dtype,
-            )
-
-        if prefill or (self.rope_cos is None or self.rope_sin is None):
-            self.rope_cos = cos
-            self.rope_sin = sin
+        # Only use cache_kwargs cos/sin during prefill (decode cos/sin only covers new tokens)
+        cos, sin = self._resolve_rope_cos_sin(
+            prefix_len, keys.shape[-1], keys.device, keys.dtype,
+            cache_kwargs=cache_kwargs if prefill else None,
+            save=prefill,
+        )
 
         prefix = inverse_rope(keys[:, :, :prefix_len], cos, sin)
         if prefix_len < T:
@@ -141,23 +164,9 @@ class SingleTensorDynamicLayer:
         if prefix_len == 0:
             return keys
 
-        if self.rope_cos is not None and self.rope_sin is not None:
-            cos = self.rope_cos[:, :, :prefix_len].to(
-                device=keys.device, dtype=keys.dtype
-            )
-            sin = self.rope_sin[:, :, :prefix_len].to(
-                device=keys.device, dtype=keys.dtype
-            )
-        else:
-            warnings.warn(
-                "_apply_rope: saved cos/sin not found, recomputing from "
-                "rope_theta (this is unexpected — _undo_rope should have "
-                "been called during prefill)"
-            )
-            cos, sin = compute_rope_cos_sin(
-                prefix_len, keys.shape[-1], self.rope_theta,
-                keys.device, keys.dtype,
-            )
+        cos, sin = self._resolve_rope_cos_sin(
+            prefix_len, keys.shape[-1], keys.device, keys.dtype,
+        )
 
         prefix = keys[:, :, :prefix_len]
         prefix_roped = apply_rope(prefix, cos, sin)

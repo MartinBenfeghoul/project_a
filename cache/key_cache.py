@@ -326,6 +326,8 @@ class SurpriseLRKCache(DecomposedKeysCache):
         keys = super().update(key_states, layer_idx, cache_kwargs)
 
         if self.prefill:
+            if self.unrope_keys:
+                self.layers[layer_idx]._cache_rope_state(keys, cache_kwargs)
             return keys
 
         if layer_idx not in self.lr_keys:
