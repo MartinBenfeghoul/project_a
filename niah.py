@@ -182,6 +182,24 @@ def get_parser():
     parser.add_argument("--k_lr", type=float, default=1e-2)
     parser.add_argument("--n_iter", type=int, default=3)
     parser.add_argument("--local_window", type=int, default=0)
+    parser.add_argument(
+        "--kmeans_cluster_size",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--kmeans_init",
+        type=str,
+        default="infllm",
+        choices=["infllm", "random", "kmeans++"],
+    )
+    parser.add_argument(
+        "--kmeans_dtype",
+        type=str,
+        default="float32",
+        choices=["float16", "float32", "bfloat16"],
+    )
+    parser.add_argument("--kmeans_avg_heads", action="store_true")
 
     # value cache
     parser.add_argument("--v_cache_type", type=str, default="mlp")
@@ -221,6 +239,10 @@ if __name__ == "__main__":
         "n_iter": args.n_iter,
         "gamma": 3.0,
         "min_size": 8.0,
+        "kmeans_cluster_size": args.kmeans_cluster_size,
+        "kmeans_init": args.kmeans_init,
+        "kmeans_dtype": args.kmeans_dtype,
+        "kmeans_avg_heads": args.kmeans_avg_heads,
     }
 
     value_cache_kwargs = {

@@ -358,6 +358,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         self,
         *args,
         n_clusters: int = 8,
+        kmeans_cluster_size: float | None = None,
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
         kmeans_avg_heads: bool = False,
@@ -366,6 +367,8 @@ class KMeansLRKCache(DecomposedKeysCache):
         super().__init__(*args, **kwargs)
         if n_clusters <= 0:
             raise ValueError("n_clusters must be positive.")
+        if kmeans_cluster_size is not None and kmeans_cluster_size <= 0:
+            raise ValueError("kmeans_cluster_size must be positive.")
         if isinstance(kmeans_dtype, str):
             try:
                 kmeans_dtype = getattr(torch, kmeans_dtype)
@@ -376,10 +379,18 @@ class KMeansLRKCache(DecomposedKeysCache):
         if not isinstance(kmeans_dtype, torch.dtype):
             raise TypeError("kmeans_dtype must be a torch.dtype or dtype name.")
         self.n_clusters = n_clusters
+        self.kmeans_cluster_size = kmeans_cluster_size
         self.kmeans_init = kmeans_init
         self.kmeans_dtype = kmeans_dtype
         self.kmeans_avg_heads = kmeans_avg_heads
         self.cluster_metadata = {}
+
+    def _get_cluster_count(self, seq_len: int) -> int:
+        if self.kmeans_cluster_size is not None:
+            cluster_count = int(round(seq_len / self.kmeans_cluster_size))
+        else:
+            cluster_count = self.n_clusters
+        return max(1, min(cluster_count, seq_len))
 
     def _cluster_prefix(self, prefix_keys):
         batch_size, _, seq_len, _ = prefix_keys.shape
@@ -400,9 +411,10 @@ class KMeansLRKCache(DecomposedKeysCache):
             token_features = prefix_keys.transpose(1, 2).reshape(
                 batch_size, seq_len, -1
             )
+        cluster_count = self._get_cluster_count(seq_len)
         assignments = kmeans_cluster_sequences(
             token_features,
-            n_clusters=min(self.n_clusters, seq_len),
+            n_clusters=cluster_count,
             n_iter=max(1, self.n),
             kmeans_init=self.kmeans_init,
             dtype=self.kmeans_dtype,
@@ -412,7 +424,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         )
         segment_ranges = build_cluster_segment_ranges(
             assignments,
-            n_clusters=min(self.n_clusters, seq_len),
+            n_clusters=cluster_count,
         )
         return grouped_prefix, assignments, inverse_permutation, segment_ranges
 

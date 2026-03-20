@@ -168,6 +168,7 @@ def main(args):
         "n_iter": args.n_iter,
         "gamma": args.gamma,
         "min_size": 8.0,
+        "kmeans_cluster_size": args.kmeans_cluster_size,
         "kmeans_init": args.kmeans_init,
         "kmeans_dtype": args.kmeans_dtype,
         "kmeans_avg_heads": args.kmeans_avg_heads,
@@ -332,6 +333,11 @@ def parse_args():
     parser.add_argument("--n_iter", type=int, default=3)
     parser.add_argument("--gamma", type=float, default=3.0)
     parser.add_argument("--local_window", type=int, default=0)
+    parser.add_argument(
+        "--kmeans_cluster_size",
+        type=float,
+        default=None,
+    )
     parser.add_argument(
         "--kmeans_init",
         type=str,
