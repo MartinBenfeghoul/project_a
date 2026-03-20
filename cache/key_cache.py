@@ -360,6 +360,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         n_clusters: int = 8,
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
+        kmeans_avg_heads: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -377,6 +378,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         self.n_clusters = n_clusters
         self.kmeans_init = kmeans_init
         self.kmeans_dtype = kmeans_dtype
+        self.kmeans_avg_heads = kmeans_avg_heads
         self.cluster_metadata = {}
 
     def _cluster_prefix(self, prefix_keys):
@@ -392,9 +394,12 @@ class KMeansLRKCache(DecomposedKeysCache):
                 [[] for _ in range(batch_size)],
             )
 
-        token_features = prefix_keys.transpose(1, 2).reshape(
-            batch_size, seq_len, -1
-        )
+        if self.kmeans_avg_heads:
+            token_features = prefix_keys.mean(dim=1)
+        else:
+            token_features = prefix_keys.transpose(1, 2).reshape(
+                batch_size, seq_len, -1
+            )
         assignments = kmeans_cluster_sequences(
             token_features,
             n_clusters=min(self.n_clusters, seq_len),
