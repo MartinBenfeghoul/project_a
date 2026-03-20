@@ -359,13 +359,24 @@ class KMeansLRKCache(DecomposedKeysCache):
         *args,
         n_clusters: int = 8,
         kmeans_init: str = "infllm",
+        kmeans_dtype: torch.dtype | str = torch.float32,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         if n_clusters <= 0:
             raise ValueError("n_clusters must be positive.")
+        if isinstance(kmeans_dtype, str):
+            try:
+                kmeans_dtype = getattr(torch, kmeans_dtype)
+            except AttributeError as exc:
+                raise ValueError(
+                    f"Unknown kmeans dtype: {kmeans_dtype}"
+                ) from exc
+        if not isinstance(kmeans_dtype, torch.dtype):
+            raise TypeError("kmeans_dtype must be a torch.dtype or dtype name.")
         self.n_clusters = n_clusters
         self.kmeans_init = kmeans_init
+        self.kmeans_dtype = kmeans_dtype
         self.cluster_metadata = {}
 
     def _cluster_prefix(self, prefix_keys):
@@ -389,6 +400,7 @@ class KMeansLRKCache(DecomposedKeysCache):
             n_clusters=min(self.n_clusters, seq_len),
             n_iter=max(1, self.n),
             kmeans_init=self.kmeans_init,
+            dtype=self.kmeans_dtype,
         )
         grouped_prefix, _, inverse_permutation = group_keys_by_cluster(
             prefix_keys, assignments

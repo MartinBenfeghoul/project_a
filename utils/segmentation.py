@@ -63,6 +63,7 @@ def kmeans_cluster_sequences(
     n_clusters: int,
     n_iter: int = 8,
     kmeans_init: str = "infllm",
+    dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Cluster per-sequence token features with a small batched KMeans loop."""
     if features.dim() != 3:
@@ -83,7 +84,7 @@ def kmeans_cluster_sequences(
             batch_size, seq_len, dtype=torch.long, device=features.device
         )
 
-    work_features = features.to(dtype=torch.float32)
+    work_features = features.to(dtype=dtype)
     try:
         init_fn = KMEANS_INIT_METHODS[kmeans_init]
     except KeyError as exc:

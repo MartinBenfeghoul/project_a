@@ -169,6 +169,7 @@ def main(args):
         "gamma": args.gamma,
         "min_size": 8.0,
         "kmeans_init": args.kmeans_init,
+        "kmeans_dtype": args.kmeans_dtype,
         "unrope_keys": args.un_rope,
         "rope_theta": rope_theta,
     }
@@ -335,6 +336,12 @@ def parse_args():
         type=str,
         default="infllm",
         choices=["infllm", "random", "kmeans++"],
+    )
+    parser.add_argument(
+        "--kmeans_dtype",
+        type=str,
+        default="float32",
+        choices=["float16", "float32", "bfloat16"],
     )
     parser.add_argument("--log_key_cache_timing", action="store_true")
 
