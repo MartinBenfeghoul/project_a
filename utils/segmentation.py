@@ -1,6 +1,157 @@
 import torch
 
 
+def kmeans_cluster_sequences(
+    features: torch.Tensor,
+    n_clusters: int,
+    n_iter: int = 8,
+) -> torch.Tensor:
+    """Cluster per-sequence token features with a small batched KMeans loop."""
+    if features.dim() != 3:
+        raise ValueError(
+            "kmeans_cluster_sequences expects features with shape "
+            "[batch, seq_len, feature_dim]."
+        )
+
+    batch_size, seq_len, _ = features.shape
+    if seq_len == 0:
+        return torch.empty(
+            batch_size, 0, dtype=torch.long, device=features.device
+        )
+
+    effective_clusters = max(1, min(int(n_clusters), seq_len))
+    if effective_clusters == 1:
+        return torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=features.device
+        )
+
+    work_features = features.to(dtype=torch.float32)
+    init_idx = torch.arange(
+        effective_clusters, device=features.device, dtype=torch.long
+    )
+    init_idx = torch.div(
+        init_idx * seq_len, effective_clusters, rounding_mode="floor"
+    )
+    centroids = work_features[:, init_idx, :].clone()
+
+    prev_labels = None
+    ones = torch.ones(
+        batch_size, seq_len, dtype=work_features.dtype, device=features.device
+    )
+    for _ in range(n_iter):
+        distances = torch.cdist(work_features, centroids)
+        labels = distances.argmin(dim=-1)
+        if prev_labels is not None and torch.equal(labels, prev_labels):
+            break
+
+        new_centroids = torch.zeros_like(centroids)
+        counts = torch.zeros(
+            batch_size,
+            effective_clusters,
+            dtype=work_features.dtype,
+            device=features.device,
+        )
+        scatter_idx = labels.unsqueeze(-1).expand(
+            -1, -1, work_features.size(-1)
+        )
+        new_centroids.scatter_add_(1, scatter_idx, work_features)
+        counts.scatter_add_(1, labels, ones)
+
+        empty_mask = counts == 0
+        new_centroids = new_centroids / counts.clamp_min(1).unsqueeze(-1)
+        new_centroids[empty_mask] = centroids[empty_mask]
+
+        centroids = new_centroids
+        prev_labels = labels
+
+    return labels
+
+
+def build_cluster_segment_ranges(
+    cluster_assignments: torch.Tensor,
+    n_clusters: int | None = None,
+) -> list[list[tuple[int, int]]]:
+    """Build contiguous segment ranges for cluster-grouped sequences."""
+    if cluster_assignments.dim() != 2:
+        raise ValueError(
+            "build_cluster_segment_ranges expects assignments with shape "
+            "[batch, seq_len]."
+        )
+
+    if cluster_assignments.size(-1) == 0:
+        return [[] for _ in range(cluster_assignments.size(0))]
+
+    if n_clusters is None:
+        n_clusters = int(cluster_assignments.max().item()) + 1
+
+    segment_ranges = []
+    for batch_assignments in cluster_assignments:
+        batch_ranges = []
+        counts = torch.bincount(batch_assignments, minlength=n_clusters)
+        start_idx = 0
+        for count in counts.tolist():
+            end_idx = start_idx + count
+            if count > 0:
+                batch_ranges.append((start_idx, end_idx))
+            start_idx = end_idx
+        segment_ranges.append(batch_ranges)
+    return segment_ranges
+
+
+def group_keys_by_cluster(
+    keys: torch.Tensor,
+    cluster_assignments: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Reorder keys so tokens assigned to the same cluster are contiguous."""
+    if keys.dim() != 4:
+        raise ValueError(
+            "group_keys_by_cluster expects keys with shape [batch, heads, seq, dim]."
+        )
+    if cluster_assignments.shape != keys.shape[:1] + keys.shape[2:3]:
+        raise ValueError(
+            "cluster_assignments must have shape [batch, seq_len] matching keys."
+        )
+
+    permutation = torch.argsort(cluster_assignments, dim=-1)
+    inverse_permutation = torch.empty_like(permutation)
+    original_positions = (
+        torch.arange(
+            permutation.size(-1),
+            device=permutation.device,
+            dtype=permutation.dtype,
+        )
+        .unsqueeze(0)
+        .expand_as(permutation)
+    )
+    inverse_permutation.scatter_(1, permutation, original_positions)
+
+    gather_idx = permutation[:, None, :, None].expand_as(keys)
+    grouped_keys = torch.gather(keys, dim=2, index=gather_idx)
+    return grouped_keys, permutation, inverse_permutation
+
+
+def restore_grouped_keys_order(
+    grouped_keys: torch.Tensor,
+    inverse_permutation: torch.Tensor,
+) -> torch.Tensor:
+    """Undo `group_keys_by_cluster` with a stored inverse permutation."""
+    if grouped_keys.dim() != 4:
+        raise ValueError(
+            "restore_grouped_keys_order expects keys with shape "
+            "[batch, heads, seq, dim]."
+        )
+    if (
+        inverse_permutation.shape
+        != grouped_keys.shape[:1] + grouped_keys.shape[2:3]
+    ):
+        raise ValueError(
+            "inverse_permutation must have shape [batch, seq_len] matching keys."
+        )
+
+    gather_idx = inverse_permutation[:, None, :, None].expand_as(grouped_keys)
+    return torch.gather(grouped_keys, dim=2, index=gather_idx)
+
+
 # Surprise-based
 def find_thresholds(
     surprise, window=100, threshold_param=3.0, min_size=0, fixed_prob=None

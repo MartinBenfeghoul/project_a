@@ -11,7 +11,13 @@ from utils.matrix_decomposition import (
     decompose_to_segment_store,
     reconstruct_segments,
 )
-from utils.segmentation import find_thresholds
+from utils.segmentation import (
+    build_cluster_segment_ranges,
+    find_thresholds,
+    group_keys_by_cluster,
+    kmeans_cluster_sequences,
+    restore_grouped_keys_order,
+)
 from .cache import SingleTensorCache
 
 
@@ -347,8 +353,171 @@ class SurpriseLRKCache(DecomposedKeysCache):
         return recon_keys
 
 
+class KMeansLRKCache(DecomposedKeysCache):
+    def __init__(
+        self,
+        *args,
+        n_clusters: int = 8,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        if n_clusters <= 0:
+            raise ValueError("n_clusters must be positive.")
+        self.n_clusters = n_clusters
+        self.cluster_metadata = {}
+
+    def _get_cluster_prefix_end(self, keys, key_states):
+        prefix_end = keys.size(-2) - key_states.size(-2)
+        if prefix_end < 0:
+            raise ValueError(
+                "Incoming key_states cannot exceed cache sequence length."
+            )
+        return prefix_end
+
+    def _cluster_prefix(self, prefix_keys):
+        batch_size, _, seq_len, _ = prefix_keys.shape
+        if seq_len == 0:
+            empty_long = torch.empty(
+                batch_size, 0, dtype=torch.long, device=prefix_keys.device
+            )
+            return (
+                prefix_keys,
+                empty_long,
+                empty_long,
+                [[] for _ in range(batch_size)],
+            )
+
+        token_features = prefix_keys.transpose(1, 2).reshape(
+            batch_size, seq_len, -1
+        )
+        assignments = kmeans_cluster_sequences(
+            token_features,
+            n_clusters=min(self.n_clusters, seq_len),
+            n_iter=max(1, self.n),
+        )
+        grouped_prefix, _, inverse_permutation = group_keys_by_cluster(
+            prefix_keys, assignments
+        )
+        segment_ranges = build_cluster_segment_ranges(
+            assignments,
+            n_clusters=min(self.n_clusters, seq_len),
+        )
+        return grouped_prefix, assignments, inverse_permutation, segment_ranges
+
+    def _decompose_clustered_keys(
+        self,
+        keys,
+        key_states,
+        layer_idx,
+        cache_kwargs=None,
+    ):
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            start_time = time.perf_counter()
+
+        prefix_end = self._get_cluster_prefix_end(keys, key_states)
+        suffix_start = max(0, prefix_end - self.local_window)
+        self.compressed_len = suffix_start
+
+        if suffix_start == 0:
+            layer_segments = [[] for _ in range(keys.size(0))]
+            assignments = torch.empty(
+                keys.size(0), 0, dtype=torch.long, device=keys.device
+            )
+            inverse_permutation = assignments
+        else:
+            prefix_keys = keys[..., :suffix_start, :]
+            if self.unrope_keys:
+                prefix_keys = self.layers[layer_idx]._undo_rope(
+                    prefix_keys,
+                    cache_kwargs,
+                    prefill=self.prefill,
+                    compressed_len=suffix_start,
+                )
+            (
+                grouped_prefix,
+                assignments,
+                inverse_permutation,
+                segment_ranges,
+            ) = self._cluster_prefix(prefix_keys)
+            layer_segments = decompose_to_segment_store(
+                grouped_prefix,
+                self.decompose,
+                segment_ranges=segment_ranges,
+                **self._decomposition_kwargs(),
+            )
+
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            update_timing_stats(
+                type(self), "decompose", time.perf_counter() - start_time
+            )
+
+        self.cluster_metadata[layer_idx] = {
+            "assignments": assignments,
+            "inverse_permutation": inverse_permutation,
+        }
+        self._store_layer_segments(layer_idx, layer_segments)
+        return suffix_start
+
+    def _reconstruct_clustered_keys(self, keys, layer_idx):
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            start_time = time.perf_counter()
+
+        metadata = self.cluster_metadata.get(layer_idx)
+        if metadata is None:
+            raise ValueError(
+                f"No cluster metadata found for layer {layer_idx}."
+            )
+
+        empty_suffix = keys[..., :0, :]
+        grouped_prefix = reconstruct_segments(
+            self.lr_keys[layer_idx], empty_suffix
+        )
+        prefix_keys = restore_grouped_keys_order(
+            grouped_prefix, metadata["inverse_permutation"]
+        )
+        if self.unrope_keys:
+            prefix_keys = self.layers[layer_idx]._apply_rope(
+                prefix_keys, compressed_len=self.compressed_len
+            )
+        recon_keys = torch.cat([prefix_keys, keys], dim=-2)
+
+        if self.log_timing_stats:
+            sync_cuda(recon_keys)
+            update_timing_stats(
+                type(self), "reconstruct", time.perf_counter() - start_time
+            )
+        return recon_keys
+
+    def update(
+        self, key_states: torch.Tensor, layer_idx: int, cache_kwargs=None
+    ) -> torch.Tensor:
+        keys = super().update(key_states, layer_idx, cache_kwargs)
+        if self.prefill:
+            if self.unrope_keys:
+                self.layers[layer_idx]._cache_rope_state(keys, cache_kwargs)
+            return keys
+
+        if layer_idx not in self.lr_keys:
+            suffix_start = self._decompose_clustered_keys(
+                keys,
+                key_states,
+                layer_idx,
+                cache_kwargs=cache_kwargs,
+            )
+            keys = keys[..., suffix_start:, :]
+            self._evict(layer_idx=layer_idx, end_idx=suffix_start)
+
+        recon_keys = self._reconstruct_clustered_keys(keys, layer_idx)
+        check_recon_length(recon_keys, cache_kwargs)
+        return recon_keys
+
+
 KEY_CACHE_CLASSES = {
     "baseline": SingleTensorCache,
     "low_rank": LowRankKeysCache,
     "surprise_lr": SurpriseLRKCache,
+    "kmeans_lr": KMeansLRKCache,
 }
