@@ -520,6 +520,21 @@ class KMeansLRKCache(DecomposedKeysCache):
             )
         return recon_keys
 
+    def update_events(self, *args, **kwargs):
+        self.prefill = False
+        if not self.cluster_metadata:
+            return None
+
+        layer_idx = min(self.cluster_metadata)
+        assignments = self.cluster_metadata[layer_idx]["assignments"]
+        if assignments.numel() == 0:
+            return 0.0
+
+        counts = []
+        for batch_assignments in assignments:
+            counts.append(torch.unique(batch_assignments).numel())
+        return sum(counts) / len(counts)
+
     def update(
         self, key_states: torch.Tensor, layer_idx: int, cache_kwargs=None
     ) -> torch.Tensor:
