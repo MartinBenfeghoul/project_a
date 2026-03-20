@@ -366,14 +366,6 @@ class KMeansLRKCache(DecomposedKeysCache):
         self.n_clusters = n_clusters
         self.cluster_metadata = {}
 
-    def _get_cluster_prefix_end(self, keys, key_states):
-        prefix_end = keys.size(-2) - key_states.size(-2)
-        if prefix_end < 0:
-            raise ValueError(
-                "Incoming key_states cannot exceed cache sequence length."
-            )
-        return prefix_end
-
     def _cluster_prefix(self, prefix_keys):
         batch_size, _, seq_len, _ = prefix_keys.shape
         if seq_len == 0:
@@ -407,7 +399,7 @@ class KMeansLRKCache(DecomposedKeysCache):
     def _decompose_clustered_keys(
         self,
         keys,
-        key_states,
+        prefix_end,
         layer_idx,
         cache_kwargs=None,
     ):
@@ -415,7 +407,12 @@ class KMeansLRKCache(DecomposedKeysCache):
             sync_cuda(keys)
             start_time = time.perf_counter()
 
-        prefix_end = self._get_cluster_prefix_end(keys, key_states)
+        if prefix_end < 0:
+            raise ValueError("prefix_end must be non-negative.")
+        if prefix_end > keys.size(-2):
+            raise ValueError(
+                "prefix_end cannot exceed the cache sequence length."
+            )
         suffix_start = max(0, prefix_end - self.local_window)
         self.compressed_len = suffix_start
 
@@ -496,23 +493,24 @@ class KMeansLRKCache(DecomposedKeysCache):
     ) -> torch.Tensor:
         keys = super().update(key_states, layer_idx, cache_kwargs)
         if self.prefill:
-            if self.unrope_keys:
-                self.layers[layer_idx]._cache_rope_state(keys, cache_kwargs)
-            return keys
-
-        if layer_idx not in self.lr_keys:
             suffix_start = self._decompose_clustered_keys(
                 keys,
-                key_states,
+                keys.size(-2),
                 layer_idx,
                 cache_kwargs=cache_kwargs,
             )
-            keys = keys[..., suffix_start:, :]
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
+            return keys
 
-        recon_keys = self._reconstruct_clustered_keys(keys, layer_idx)
-        check_recon_length(recon_keys, cache_kwargs)
-        return recon_keys
+        if self.lr_keys.get(layer_idx, False):
+            recon_keys = self._reconstruct_clustered_keys(keys, layer_idx)
+            check_recon_length(recon_keys, cache_kwargs)
+            return recon_keys
+        else:
+            raise Exception(
+                "Prefill is set to False and no clustered low-rank keys were "
+                "found."
+            )
 
 
 KEY_CACHE_CLASSES = {
