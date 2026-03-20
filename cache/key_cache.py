@@ -358,12 +358,14 @@ class KMeansLRKCache(DecomposedKeysCache):
         self,
         *args,
         n_clusters: int = 8,
+        kmeans_init: str = "infllm",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         if n_clusters <= 0:
             raise ValueError("n_clusters must be positive.")
         self.n_clusters = n_clusters
+        self.kmeans_init = kmeans_init
         self.cluster_metadata = {}
 
     def _cluster_prefix(self, prefix_keys):
@@ -386,6 +388,7 @@ class KMeansLRKCache(DecomposedKeysCache):
             token_features,
             n_clusters=min(self.n_clusters, seq_len),
             n_iter=max(1, self.n),
+            kmeans_init=self.kmeans_init,
         )
         grouped_prefix, _, inverse_permutation = group_keys_by_cluster(
             prefix_keys, assignments

@@ -1,10 +1,68 @@
 import torch
 
 
+def _infllm_init(features: torch.Tensor, n_clusters: int) -> torch.Tensor:
+    init_idx = torch.arange(
+        n_clusters, device=features.device, dtype=torch.long
+    )
+    init_idx = torch.div(
+        init_idx * features.size(1), n_clusters, rounding_mode="floor"
+    )
+    return features[:, init_idx, :].clone()
+
+
+def _random_init(features: torch.Tensor, n_clusters: int) -> torch.Tensor:
+    batch_size, _, dim = features.shape
+    indices = torch.stack(
+        [
+            torch.randperm(features.size(1), device=features.device)[
+                :n_clusters
+            ]
+            for _ in range(batch_size)
+        ]
+    )
+    gather_idx = indices.unsqueeze(-1).expand(-1, -1, dim)
+    return torch.gather(features, 1, gather_idx).clone()
+
+
+def _kmeans_pp_init(features: torch.Tensor, n_clusters: int) -> torch.Tensor:
+    batch_size, seq_len, _ = features.shape
+    first_idx = torch.randint(
+        seq_len, (batch_size,), device=features.device
+    )
+    centroids = [
+        features[torch.arange(batch_size, device=features.device), first_idx]
+    ]
+
+    for _ in range(1, n_clusters):
+        current_centroids = torch.stack(centroids, dim=1)
+        min_distances = torch.cdist(
+            features, current_centroids
+        ).min(dim=-1).values
+        probs = min_distances.square()
+        probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+        next_idx = torch.multinomial(probs, 1).squeeze(-1)
+        centroids.append(
+            features[
+                torch.arange(batch_size, device=features.device), next_idx
+            ]
+        )
+
+    return torch.stack(centroids, dim=1)
+
+
+KMEANS_INIT_METHODS = {
+    "infllm": _infllm_init,
+    "random": _random_init,
+    "kmeans++": _kmeans_pp_init,
+}
+
+
 def kmeans_cluster_sequences(
     features: torch.Tensor,
     n_clusters: int,
     n_iter: int = 8,
+    kmeans_init: str = "infllm",
 ) -> torch.Tensor:
     """Cluster per-sequence token features with a small batched KMeans loop."""
     if features.dim() != 3:
@@ -26,13 +84,14 @@ def kmeans_cluster_sequences(
         )
 
     work_features = features.to(dtype=torch.float32)
-    init_idx = torch.arange(
-        effective_clusters, device=features.device, dtype=torch.long
-    )
-    init_idx = torch.div(
-        init_idx * seq_len, effective_clusters, rounding_mode="floor"
-    )
-    centroids = work_features[:, init_idx, :].clone()
+    try:
+        init_fn = KMEANS_INIT_METHODS[kmeans_init]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown kmeans init method: {kmeans_init}. "
+            f"Available methods: {sorted(KMEANS_INIT_METHODS)}"
+        ) from exc
+    centroids = init_fn(work_features, effective_clusters)
 
     prev_labels = None
     ones = torch.ones(
