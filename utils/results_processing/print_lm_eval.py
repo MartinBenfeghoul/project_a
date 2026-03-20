@@ -57,6 +57,10 @@ KEY_CONFIGS = [
     'rank_selection',
     'gamma',
     'local_window',
+    'kmeans_cluster_size',
+    'kmeans_init',
+    'kmeans_dtype',
+    'kmeans_avg_heads',
     'un_rope',
 ]
 
