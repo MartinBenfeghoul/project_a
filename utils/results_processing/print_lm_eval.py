@@ -57,11 +57,7 @@ KEY_CONFIGS = [
     'rank_selection',
     'gamma',
     'local_window',
-<<<<<<< Updated upstream
     'un_rope',
-=======
-    'un_rope', 
->>>>>>> Stashed changes
 ]
 
 def get_task_dict(benchmark_name):
