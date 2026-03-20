@@ -176,7 +176,7 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
 
     events_stats = results.get("event_stats", {})
     if events_stats:
-        print("\nEvents stats:\n")
+        print("\nEvents stats:")
         print(f"{events_stats.get('n_events', 'N/A'):.0f}")
         print(f"{events_stats.get('n_events_std', 'N/A'):.0f}")
         print(f"{events_stats.get('avg_event_size', 'N/A'):.0f}")
