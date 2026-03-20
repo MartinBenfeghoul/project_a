@@ -57,6 +57,7 @@ KEY_CONFIGS = [
     'rank_selection',
     'gamma',
     'local_window',
+    'un_rope',
 ]
 
 def get_task_dict(benchmark_name):
@@ -172,6 +173,16 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
         print(
             round(eff.get("gpu_kv_cache_overhead_gib", "N/A"), decimal_points)
         )
+
+    events_stats = results.get("event_stats", {})
+    if events_stats:
+        print("\nEvents stats:\n")
+        n_events = events_stats.get("n_events", "N/A")
+        n_events_std = events_stats.get("n_events_std", "N/A")
+        print(f"n_events: {n_events} ± {n_events_std}") 
+        avg_event_size = events_stats.get("avg_event_size", "N/A")
+        avg_event_size_std = events_stats.get("avg_event_size_std", "N/A")
+        print(f"avg_event_size: {avg_event_size} ± {avg_event_size_std}")
 
 
 if __name__ == "__main__":
