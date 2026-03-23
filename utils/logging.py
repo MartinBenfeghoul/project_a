@@ -240,3 +240,10 @@ def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_
         ]
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
+
+def get_output_path(output_path):
+    i=0
+    while True:
+        if not os.path.exists(output_path.format(i)):
+            return output_path.format(i)
+        i+=1

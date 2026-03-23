@@ -12,7 +12,14 @@ from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils_hf import stop_sequences_criteria
 
 from cache import CompressedCache
-from utils import Logger, get_model_and_tokenizer
+from utils import (
+    Logger,
+    get_model_and_tokenizer,
+    get_device,
+    get_device_type,
+    list_of_strings,
+    get_output_path
+    )
 
 
 GEN_KWARGS = {
@@ -31,33 +38,6 @@ def get_tasks(tasks, print_tasks=True):
     return tasks
 
 
-def get_device(model):
-    try:
-        device = model.device
-    except AttributeError:
-        try:
-            device = model.model.device
-        except AttributeError:
-            device = "cuda:0"
-    return device
-
-
-def get_output_path(output_path):
-    for i in range(100):
-        if not os.path.exists(output_path.format(i)):
-            return output_path.format(i)
-
-
-def get_device_type():
-    if torch.cuda.is_available():
-        print(f"Using {torch.cuda.device_count()} CUDA chips")
-        return "cuda"
-    print("WARNING: CUDA not available. Continuing with CPU.")
-    return "cpu"
-
-
-def list_of_strings(arg):
-    return arg.split(",")
 
 def make_hooks(logger, uncompressed_window=0, measure_latency=False):
     """
