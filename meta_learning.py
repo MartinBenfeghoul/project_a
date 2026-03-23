@@ -50,6 +50,51 @@ def unrope(keys: torch.Tensor, rope_theta: float) -> torch.Tensor:
     return inverse_rope(keys, cos, sin)
 
 
+def _support_loss(layer_mlps, kv_cache, phi, loss_fn, un_rope, rope_theta):
+    total = 0.0
+    for layer_idx, layer in enumerate(kv_cache.layers):
+        k = layer.keys.float()
+        if un_rope:
+            k = unrope(k, rope_theta)
+        weights, biases = phi[layer_idx]
+        v_hat = functional_mlp_forward(layer_mlps[layer_idx], k, weights, biases)
+        total = total + loss_fn(v_hat, layer.values.float())
+    return total
+
+
+def _phi_from_flat(flat, layer_param_counts):
+    phi, idx = [], 0
+    for n_w, n_b in layer_param_counts:
+        phi.append((flat[idx:idx + n_w], flat[idx + n_w:idx + n_w + n_b]))
+        idx += n_w + n_b
+    return phi
+
+
+def _sgd_update(phi, grads, inner_lr):
+    g_iter = iter(grads)
+    lr_iter = iter(inner_lr) if isinstance(inner_lr, list) else None
+    return [
+        (
+            [p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter) for p in w],
+            [p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter) for p in b],
+        )
+        for w, b in phi
+    ]
+
+
+def _adam_update(phi_flat, grads, inner_lr, step, m1, m2, beta1, beta2, eps):
+    t = step + 1
+    updated = []
+    for i, (p, g) in enumerate(zip(phi_flat, grads)):
+        m1[i] = beta1 * m1[i] + (1 - beta1) * g.detach()
+        m2[i] = beta2 * m2[i] + (1 - beta2) * g.detach().pow(2)
+        m_hat = m1[i] / (1 - beta1 ** t)
+        v_hat = m2[i] / (1 - beta2 ** t)
+        lr = inner_lr[i] if isinstance(inner_lr, list) else inner_lr
+        updated.append(p - lr * m_hat / (v_hat.sqrt() + eps))
+    return updated
+
+
 def inner_loop_functional(
     layer_mlps,
     kv_cache,
@@ -59,10 +104,12 @@ def inner_loop_functional(
     track_losses=False,
     un_rope=False,
     rope_theta=500_000.0,
+    inner_optimizer="sgd",
+    inner_adam_beta1=0.9,
+    inner_adam_beta2=0.999,
+    inner_adam_eps=1e-8,
 ):
-    theta = [
-        p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)
-    ]
+    theta = [p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)]
     phi = [
         (
             [p.detach().clone().requires_grad_(True) for p in mlp.weights],
@@ -70,67 +117,43 @@ def inner_loop_functional(
         )
         for mlp in layer_mlps
     ]
+    layer_param_counts = [(len(mlp.weights), len(mlp.biases)) for mlp in layer_mlps]
+
+    adam_state = None
+    if inner_optimizer == "adam":
+        phi_flat0 = [p for w, b in phi for p in w + b]
+        adam_state = (
+            [torch.zeros_like(p.detach()) for p in phi_flat0],
+            [torch.zeros_like(p.detach()) for p in phi_flat0],
+        )
 
     inner_losses = [] if track_losses else None
 
-    for _ in range(inner_steps):
-        total_loss = 0.0
-    
-        for layer_idx, layer in enumerate(kv_cache.layers):
-            k = layer.keys.float()
-            if un_rope:
-                k = unrope(k, rope_theta)
-            v = layer.values.float()
-
-            mlp = layer_mlps[layer_idx]
-            weights, biases = phi[layer_idx]
-            v_hat = functional_mlp_forward(mlp, k.float(), weights, biases)
-            total_loss += loss_fn(v_hat, v)
+    for step in range(inner_steps):
+        total_loss = _support_loss(layer_mlps, kv_cache, phi, loss_fn, un_rope, rope_theta)
 
         if track_losses:
             inner_losses.append(float(total_loss.detach().cpu()))
 
         phi_flat = [p for w, b in phi for p in w + b]
-        grads = torch.autograd.grad(
-            total_loss, phi_flat, create_graph=False, retain_graph=False
-        )
+        grads = torch.autograd.grad(total_loss, phi_flat, create_graph=False, retain_graph=False)
 
-        g_iter = iter(grads)
-        if isinstance(inner_lr, list):
-            lr_iter = iter(inner_lr)
-            phi = [
-                (
-                    [p - next(lr_iter) * next(g_iter) for p in w],
-                    [p - next(lr_iter) * next(g_iter) for p in b],
-                )
-                for w, b in phi
-            ]
+        if inner_optimizer == "adam":
+            m1, m2 = adam_state
+            updated_flat = _adam_update(phi_flat, grads, inner_lr, step, m1, m2, inner_adam_beta1, inner_adam_beta2, inner_adam_eps)
+            phi = _phi_from_flat(updated_flat, layer_param_counts)
         else:
-            phi = [
-                (
-                    [p - inner_lr * next(g_iter) for p in w],
-                    [p - inner_lr * next(g_iter) for p in b],
-                )
-                for w, b in phi
-            ]
+            phi = _sgd_update(phi, grads, inner_lr)
 
     final_support_loss = None
     if track_losses:
         with torch.no_grad():
             final_support_loss, _ = compute_loss_functional(
-                layer_mlps, kv_cache, phi, loss_fn,
-                un_rope=un_rope, rope_theta=rope_theta,
+                layer_mlps, kv_cache, phi, loss_fn, un_rope=un_rope, rope_theta=rope_theta,
             )
             final_support_loss = final_support_loss.item()
 
-    return (
-        theta,
-        phi,
-        {
-            "inner_losses": inner_losses,
-            "final_support_loss": final_support_loss,
-        },
-    )
+    return theta, phi, {"inner_losses": inner_losses, "final_support_loss": final_support_loss}
 
 
 def functional_mlp_forward(mlp, x, weights, biases):
@@ -297,6 +320,10 @@ def meta_step(
     device,
     un_rope=False,
     rope_theta=500_000.0,
+    inner_optimizer="sgd",
+    inner_adam_beta1=0.9,
+    inner_adam_beta2=0.999,
+    inner_adam_eps=1e-8,
 ):
     batch_start_time = time.time()
 
@@ -318,6 +345,10 @@ def meta_step(
             track_losses=should_log,
             un_rope=un_rope,
             rope_theta=rope_theta,
+            inner_optimizer=inner_optimizer,
+            inner_adam_beta1=inner_adam_beta1,
+            inner_adam_beta2=inner_adam_beta2,
+            inner_adam_eps=inner_adam_eps,
         )
     )
     del support_kv
@@ -426,6 +457,10 @@ def run_epoch(
     lambda_compression = config.get("lambda_compression", 0.0)
     un_rope = config.get("un_rope", False)
     rope_theta = config.get("rope_theta", 500_000.0)
+    inner_optimizer = config.get("inner_optimizer", "sgd")
+    inner_adam_beta1 = config.get("inner_adam_beta1", 0.9)
+    inner_adam_beta2 = config.get("inner_adam_beta2", 0.999)
+    inner_adam_eps = config.get("inner_adam_eps", 1e-8)
 
     epoch_loss = 0
     num_batches = 0
@@ -458,6 +493,10 @@ def run_epoch(
             device,
             un_rope=un_rope,
             rope_theta=rope_theta,
+            inner_optimizer=inner_optimizer,
+            inner_adam_beta1=inner_adam_beta1,
+            inner_adam_beta2=inner_adam_beta2,
+            inner_adam_eps=inner_adam_eps,
         )
 
         accumulate_gradients(
