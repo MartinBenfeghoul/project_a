@@ -1,0 +1,5 @@
+lm_eval: ['piqa','arc_easy','arc_challenge','hellaswag','winogrande','mmlu']
+
+longbench: ['longbench_narrativeqa','longbench_qasper','longbench_multifieldqa_en','longbench_hotpotqa','longbench_2wikimqa','longbench_musique','longbench_gov_report','longbench_qmsum','longbench_multi_news','longbench_trec','longbench_triviaqa','longbench_samsum','longbench_passage_retrieval_en','longbench_lcc','longbench_repobench-p']
+
+ruler: ['niah_single_1','niah_single_2','niah_single_3','niah_multikey_1','niah_multikey_2','niah_multikey_3','niah_multiquery','niah_multivalue','ruler_vt','ruler_cwe','ruler_fwe','ruler_qa_hotpot','ruler_qa_squad']

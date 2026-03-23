@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 
 from transformers.cache_utils import Any
 
@@ -171,13 +172,15 @@ class SurpriseLRKCache(SingleTensorCache):
             return crs / num_events
 
     def update_events(self, logits, labels):
-        prob = torch.softmax(logits, dim=-1)
-        surprise = -torch.log(
-            torch.gather(prob, dim=-1, index=labels.unsqueeze(-1))
-        ).squeeze(-1)
+        B, T, V = logits.shape
+        surprise = F.cross_entropy( # to avoid materialising (B, T, V) probs tensor
+            logits.reshape(B * T, V),
+            labels.reshape(B * T),
+            reduction='none',
+        ).reshape(B, T)
 
         self.events = []
-        for b in range(surprise.size(0)):
+        for b in range(B):
             events = find_thresholds(
                 surprise[b],
                 threshold_param=self.gamma,

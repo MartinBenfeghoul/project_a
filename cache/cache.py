@@ -8,10 +8,11 @@ from transformers.cache_utils import (
 )
 
 
-def get_cache(cache_type, CACHE_CLASSES):
+def get_cache(cache_type, CACHE_CLASSES, verbose=True):
     if cache_type not in CACHE_CLASSES:
         raise ValueError(f"Invalid cache type: {cache_type}")
-    print(f"Loading cache type {cache_type}")
+    if verbose:
+        print(f"Loading cache type {cache_type}")
     return CACHE_CLASSES[cache_type]
 
 
@@ -214,7 +215,7 @@ class CompressedCache:
         from .key_cache import KEY_CACHE_CLASSES
 
         key_cache_type = key_cache_kwargs.pop("cache_type")
-        self.key_cache = get_cache(key_cache_type, KEY_CACHE_CLASSES)(
+        self.key_cache = get_cache(key_cache_type, KEY_CACHE_CLASSES, kwargs.get("verbose", True))(
             ddp_cache_data=ddp_cache_data,
             **key_cache_kwargs,
         )
@@ -222,7 +223,7 @@ class CompressedCache:
         from .value_cache import VALUE_CACHE_CLASSES
 
         value_cache_type = value_cache_kwargs.pop("cache_type")
-        self.value_cache = get_cache(value_cache_type, VALUE_CACHE_CLASSES)(
+        self.value_cache = get_cache(value_cache_type, VALUE_CACHE_CLASSES, kwargs.get("verbose", True))(
             ddp_cache_data=ddp_cache_data,
             **value_cache_kwargs,
         )
