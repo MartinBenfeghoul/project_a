@@ -451,7 +451,7 @@ def run_epoch(
     inner_lr = config.inner_lr
     inner_steps = config.inner_steps
     log_interval = config.get("log_interval", 10)
-    batches_per_epoch = config.get("batches_per_epoch", None)
+    batches_per_epoch = config.batches_per_epoch
     grad_accum_steps = config.get("grad_accum_steps", 1)
     tau = config.get("tau", 0.01)
     lambda_compression = config.get("lambda_compression", 0.0)
@@ -847,11 +847,10 @@ def main():
         collate_fn=collate_pairs,
     )
 
-    batches_per_epoch = training_config.get("batches_per_epoch", None)
     checkpoint_path = os.path.join(checkpoint_dir, "meta_learned_mlps.pt")
     loss_fn = get_loss_func(training_config.get("loss_func", "mse"))
     print(
-        f"Starting meta-training... (batches_per_epoch: {batches_per_epoch or 'unlimited'})"
+        f"Starting meta-training... (batches_per_epoch: {training_config.batches_per_epoch})"
     )
     layer_mlps, inner_lr_params, target_perc_params = meta_train(
         model=model,

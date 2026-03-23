@@ -45,14 +45,16 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
     """
     _start_evt = [None]
 
+    _cuda = measure_latency and torch.cuda.is_available()
+
     def pre_hook(module, args, kwargs):
-        if measure_latency:
+        if _cuda:
             evt = torch.cuda.Event(enable_timing=True)
             evt.record()
             _start_evt[0] = evt
 
     def post_hook(module, args, kwargs, output):
-        if measure_latency:
+        if _cuda:
             end_evt = torch.cuda.Event(enable_timing=True)
             end_evt.record()
 
@@ -72,7 +74,7 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                     logits[..., :-1 - uncompressed_window, :],
                     input_ids[..., 1:label_ed]
                     )
-            if measure_latency:
+            if _cuda:
                 logger.prefill_events.append((_start_evt[0], end_evt))
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
@@ -81,7 +83,7 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                     print(f"Compression ratio: {cr:.2f}")
                     logger.add_log("crs", cr)
                     logger.recorded_cr = True
-            if measure_latency:
+            if _cuda:
                 logger.decode_events.append((_start_evt[0], end_evt))
 
     return pre_hook, post_hook
@@ -201,7 +203,8 @@ def main(args):
 
     model.eval()
 
-    if args.log_efficiency_metrics:
+    model_baseline_mem = 0
+    if args.log_efficiency_metrics and torch.cuda.is_available():
         # warm up cuda kernels before benchmarking to avoid inflated first-pass times
         print("Warming up GPU...")
         _warmup_ids = torch.ones((1, 32), dtype=torch.long, device=device)
@@ -232,8 +235,9 @@ def main(args):
     tm = TaskManager(metadata=metadata)
 
     if args.log_efficiency_metrics:
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
         start_time = time.perf_counter()
 
     results = evaluator.simple_evaluate(
@@ -249,11 +253,17 @@ def main(args):
     )
 
     if args.log_efficiency_metrics:
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         wall_time_sec = time.perf_counter() - start_time
-        peak_mem = torch.cuda.max_memory_allocated()
-        prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
-        decode_ms  = [s.elapsed_time(e) for s, e in logger.decode_events]
+        if torch.cuda.is_available():
+            peak_mem = torch.cuda.max_memory_allocated()
+            prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
+            decode_ms  = [s.elapsed_time(e) for s, e in logger.decode_events]
+        else:
+            peak_mem = 0
+            prefill_ms = []
+            decode_ms  = []
 
         efficiency_metrics = {
             "eval_wall_time_seconds": wall_time_sec,

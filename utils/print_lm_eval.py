@@ -106,11 +106,16 @@ def main(benchmark, file_path, decimal_points=4):
     eff = results.get("efficiency_metrics", {})
     if eff:
         print("\nEfficiency metrics:\n")
-        print(round(eff.get("eval_wall_time_minutes", "N/A"), decimal_points))
-        print(round(eff.get("prefill_latency_ms_mean", "N/A"), decimal_points))
-        print(round(eff.get("decode_latency_ms_mean", "N/A"), decimal_points))
-        print(round(eff.get("gpu_peak_mem_gib", "N/A"), decimal_points))
-        print(round(eff.get("gpu_kv_cache_overhead_gib", "N/A"), decimal_points))
+        eval_wall_time = eff.get("eval_wall_time_minutes", "N/A")
+        print(round(eval_wall_time, decimal_points) if isinstance(eval_wall_time, (int, float)) else eval_wall_time)
+        prefill_latency = eff.get("prefill_latency_ms_mean", "N/A")
+        print(round(prefill_latency, decimal_points) if isinstance(prefill_latency, (int, float)) else prefill_latency)
+        decode_latency = eff.get("decode_latency_ms_mean", "N/A")
+        print(round(decode_latency, decimal_points) if isinstance(decode_latency, (int, float)) else decode_latency)
+        gpu_peak_mem = eff.get("gpu_peak_mem_gib", "N/A")
+        print(round(gpu_peak_mem, decimal_points) if isinstance(gpu_peak_mem, (int, float)) else gpu_peak_mem)
+        gpu_kv_cache_overhead = eff.get("gpu_kv_cache_overhead_gib", "N/A")
+        print(round(gpu_kv_cache_overhead, decimal_points) if isinstance(gpu_kv_cache_overhead, (int, float)) else gpu_kv_cache_overhead)
 
 if __name__ == "__main__":
     args = parse_args()
