@@ -370,7 +370,7 @@ def override_args_from_meta_weights(args):
     args.optimizer = "sgd"
 
     if "target_perc_params" in ckpt:
-        meta_percs = [torch.sigmoid(t).item() * 100 for t in ckpt["target_perc_params"]]
+        meta_percs = [t.item() * 100 for t in ckpt["target_perc_params"]]
         if args.override_target_perc:
             print(
                 f"[meta_weights] Ignoring per-layer target_perc from checkpoint "
