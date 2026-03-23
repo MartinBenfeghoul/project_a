@@ -87,7 +87,7 @@ class DecomposedKeysCache(SingleTensorCache):
         rank_selection: str = "comp_ratio",
         comp_ratio: float = 2.0,
         energy_threshold: float = 0.95,
-        n_iter: int = 3,
+        decomp_n_iter: int = 3,
         lr: float = 1e-2,
         unrope_keys: bool = False,
         **kwargs,
@@ -106,7 +106,7 @@ class DecomposedKeysCache(SingleTensorCache):
         self.rank_selection = rank_selection
         self.r = comp_ratio
         self.e = energy_threshold
-        self.n = n_iter
+        self.decomp_n = decomp_n_iter
         self.lr = lr
         self.unrope_keys = unrope_keys
 
@@ -133,7 +133,7 @@ class DecomposedKeysCache(SingleTensorCache):
             "rank_selection": self.rank_selection,
             "cr": self.r,
             "energy_threshold": self.e,
-            "n_iter": self.n,
+            "n_iter": self.decomp_n,
             "lr": self.lr,
         }
 
@@ -270,7 +270,7 @@ class SurpriseLRKCache(DecomposedKeysCache):
         rank_selection: str = "comp_ratio",
         comp_ratio: float = 2.0,
         energy_threshold: float = 0.95,
-        n_iter: int = 3,
+        decomp_n_iter: int = 3,
         lr: float = 1e-2,
         gamma: float = 3.0,
         min_size: int = 8,
@@ -283,7 +283,7 @@ class SurpriseLRKCache(DecomposedKeysCache):
             rank_selection=rank_selection,
             comp_ratio=comp_ratio,
             energy_threshold=energy_threshold,
-            n_iter=n_iter,
+            decomp_n_iter=decomp_n_iter,
             lr=lr,
             **kwargs,
         )
@@ -359,6 +359,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         *args,
         n_clusters: int = 8,
         kmeans_cluster_size: float | None = None,
+        kmeans_n_iter: int = 3,
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
         kmeans_avg_heads: bool = False,
@@ -380,6 +381,7 @@ class KMeansLRKCache(DecomposedKeysCache):
             raise TypeError("kmeans_dtype must be a torch.dtype or dtype name.")
         self.n_clusters = n_clusters
         self.kmeans_cluster_size = kmeans_cluster_size
+        self.kmeans_n = kmeans_n_iter
         self.kmeans_init = kmeans_init
         self.kmeans_dtype = kmeans_dtype
         self.kmeans_avg_heads = kmeans_avg_heads
@@ -415,7 +417,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         assignments = kmeans_cluster_sequences(
             token_features,
             n_clusters=cluster_count,
-            n_iter=max(1, self.n),
+            n_iter=max(1, self.kmeans_n),
             kmeans_init=self.kmeans_init,
             dtype=self.kmeans_dtype,
         )

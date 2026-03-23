@@ -165,10 +165,11 @@ def main(args):
         "energy_threshold": args.energy_threshold,
         "rank_selection": args.rank_selection,
         "lr": args.k_lr,
-        "n_iter": args.n_iter,
+        "decomp_n_iter": args.decomp_n_iter,
         "gamma": args.gamma,
         "min_size": 8.0,
         "kmeans_cluster_size": args.kmeans_cluster_size,
+        "kmeans_n_iter": args.kmeans_n_iter,
         "kmeans_init": args.kmeans_init,
         "kmeans_dtype": args.kmeans_dtype,
         "kmeans_avg_heads": args.kmeans_avg_heads,
@@ -330,7 +331,7 @@ def parse_args():
         choices=["comp_ratio", "energy"],
     )
     parser.add_argument("--k_lr", type=float, default=1e-2)
-    parser.add_argument("--n_iter", type=int, default=3)
+    parser.add_argument("--decomp_n_iter", type=int, default=3)
     parser.add_argument("--gamma", type=float, default=3.0)
     parser.add_argument("--local_window", type=int, default=0)
     parser.add_argument(
@@ -338,6 +339,7 @@ def parse_args():
         type=float,
         default=None,
     )
+    parser.add_argument("--kmeans_n_iter", type=int, default=3)
     parser.add_argument(
         "--kmeans_init",
         type=str,
