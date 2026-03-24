@@ -70,8 +70,8 @@ def _truncate_svd_factors(
         k = find_rank_wrt_energy(S.reshape(*batch_shape, r), energy_threshold)
     else:
         raise ValueError(
-            f"rank_selection set to {rank_selection}.",
-            "Try either 'comp_ratio' or 'energy_threshold'",
+            f"Invalid rank_selection {rank_selection!r}. "
+            "Expected 'comp_ratio' or 'energy'."
         )
 
     k = max(1, min(int(k), r))
