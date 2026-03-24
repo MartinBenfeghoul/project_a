@@ -143,6 +143,38 @@ class DecomposedKeysCache(SingleTensorCache):
         self.lr_keys[layer_idx] = layer_segments
         self.comp_ratio = self.calc_compression_ratio()
 
+    def _apply_lr_keys_batch_op(self, op):
+        for layer_idx, layer_segments in self.lr_keys.items():
+            self.lr_keys[layer_idx] = op(layer_segments)
+
+    def reorder_cache(self, beam_idx: torch.LongTensor):
+        super().reorder_cache(beam_idx)
+        beam_idx_list = beam_idx.tolist()
+        self._apply_lr_keys_batch_op(
+            lambda layer_segments: [
+                layer_segments[idx] for idx in beam_idx_list
+            ]
+        )
+
+    def batch_repeat_interleave(self, repeats: int):
+        super().batch_repeat_interleave(repeats)
+        self._apply_lr_keys_batch_op(
+            lambda layer_segments: [
+                batch_segments
+                for batch_segments in layer_segments
+                for _ in range(repeats)
+            ]
+        )
+
+    def batch_select_indices(self, indices: torch.Tensor):
+        super().batch_select_indices(indices)
+        indices_list = indices.tolist()
+        self._apply_lr_keys_batch_op(
+            lambda layer_segments: [
+                layer_segments[idx] for idx in indices_list
+            ]
+        )
+
     def _get_suffix_start(self, keys, segment_ranges=None):
         if self.local_window < 0:
             raise ValueError("local_window must be non-negative.")
@@ -607,6 +639,81 @@ class KMeansLRKCache(DecomposedKeysCache):
         for sequence_assignments in flat_assignments:
             counts.append(torch.unique(sequence_assignments).numel())
         return sum(counts) / len(counts)
+
+    def _apply_cluster_metadata_batch_op(self, op):
+        for metadata in self.cluster_metadata.values():
+            metadata["assignments"] = op(metadata["assignments"])
+            metadata["inverse_permutation"] = op(
+                metadata["inverse_permutation"]
+            )
+
+    def _apply_per_head_lr_keys_batch_op(self, op):
+        for layer_idx, layer_segments in self.lr_keys.items():
+            metadata = self.cluster_metadata.get(layer_idx)
+            if metadata is None or metadata["mode"] != "per_head":
+                continue
+
+            _, num_heads, _ = metadata["inverse_permutation"].shape
+            batched_segments = [
+                layer_segments[i : i + num_heads]
+                for i in range(0, len(layer_segments), num_heads)
+            ]
+            updated_batches = op(batched_segments)
+            self.lr_keys[layer_idx] = [
+                head_segments
+                for batch_segments in updated_batches
+                for head_segments in batch_segments
+            ]
+
+    def reorder_cache(self, beam_idx: torch.LongTensor):
+        if self.kmeans_mode == "per_head":
+            SingleTensorCache.reorder_cache(self, beam_idx)
+            beam_idx_list = beam_idx.tolist()
+            self._apply_per_head_lr_keys_batch_op(
+                lambda batched_segments: [
+                    batched_segments[idx] for idx in beam_idx_list
+                ]
+            )
+        else:
+            super().reorder_cache(beam_idx)
+
+        def op(tensor):
+            return tensor.index_select(0, beam_idx.to(tensor.device))
+
+        self._apply_cluster_metadata_batch_op(op)
+
+    def batch_repeat_interleave(self, repeats: int):
+        if self.kmeans_mode == "per_head":
+            SingleTensorCache.batch_repeat_interleave(self, repeats)
+            self._apply_per_head_lr_keys_batch_op(
+                lambda batched_segments: [
+                    batch_segments
+                    for batch_segments in batched_segments
+                    for _ in range(repeats)
+                ]
+            )
+        else:
+            super().batch_repeat_interleave(repeats)
+        self._apply_cluster_metadata_batch_op(
+            lambda tensor: tensor.repeat_interleave(repeats, dim=0)
+        )
+
+    def batch_select_indices(self, indices: torch.Tensor):
+        if self.kmeans_mode == "per_head":
+            SingleTensorCache.batch_select_indices(self, indices)
+            indices_list = indices.tolist()
+            self._apply_per_head_lr_keys_batch_op(
+                lambda batched_segments: [
+                    batched_segments[idx] for idx in indices_list
+                ]
+            )
+        else:
+            super().batch_select_indices(indices)
+
+        def op(tensor):
+            return tensor[indices.to(tensor.device)]
+
+        self._apply_cluster_metadata_batch_op(op)
 
     def update(
         self, key_states: torch.Tensor, layer_idx: int, cache_kwargs=None

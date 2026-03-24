@@ -46,3 +46,38 @@ def test_kmeans_per_head_roundtrip():
 
     run_roundtrip(cache, prefill_keys, decode_keys)
 
+
+def test_kmeans_per_head_metadata_tracks_batch_ops():
+    torch.manual_seed(2)
+    prefill_keys = torch.randn(2, 3, 5, 4)
+    cache = build_cache(kmeans_per_head=True)
+
+    cache.update(prefill_keys, layer_idx=0, cache_kwargs={})
+    cache.update_events()
+
+    reorder = torch.tensor([1, 0])
+    cache.reorder_cache(reorder)
+    expected_prefix = prefill_keys.index_select(0, reorder)
+
+    cache.batch_repeat_interleave(2)
+    expected_prefix = expected_prefix.repeat_interleave(2, dim=0)
+
+    select = torch.tensor([3, 1])
+    cache.batch_select_indices(select)
+    expected_prefix = expected_prefix[select]
+
+    decode_keys = torch.randn(
+        expected_prefix.size(0),
+        expected_prefix.size(1),
+        1,
+        expected_prefix.size(-1),
+    )
+    recon_keys = cache.update(decode_keys, layer_idx=0, cache_kwargs={})
+    expected_keys = torch.cat([expected_prefix, decode_keys], dim=-2)
+
+    torch.testing.assert_close(
+        recon_keys,
+        expected_keys,
+        atol=1e-4,
+        rtol=1e-4,
+    )
