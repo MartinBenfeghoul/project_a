@@ -161,27 +161,11 @@ class SurpriseLRKCache(DecomposedKeysCache):
     def __init__(
         self,
         *args,
-        decomposition_method: str,
-        log_timing_stats: bool = False,
-        rank_selection: str = "comp_ratio",
-        comp_ratio: float = 2.0,
-        energy_threshold: float = 0.95,
-        n_iter: int = 3,
-        lr: float = 1e-2,
         gamma: float = 3.0,
         min_size: int = 8,
         **kwargs,
     ):
-        super().__init__(
-            *args,
-            decomposition_method=decomposition_method,
-            log_timing_stats=log_timing_stats,
-            rank_selection=rank_selection,
-            comp_ratio=comp_ratio,
-            energy_threshold=energy_threshold,
-            n_iter=n_iter,
-            lr=lr,
-            **kwargs,
+        super().__init__(*args,**kwargs,
         )
         self.gamma = gamma
         self.min_size = min_size
