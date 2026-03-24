@@ -12,6 +12,11 @@ from utils.matrix_decomposition import (
     reconstruct_segments,
 )
 from utils.segmentation import find_thresholds
+from utils.logging import (
+    init_timing_stats,
+    update_timing_stats,
+    sync_cuda,
+)
 from .cache import SingleTensorCache
 
 
@@ -29,43 +34,6 @@ def check_recon_length(recon_keys, cache_kwargs):
         raise ValueError(
             f"Reconstructed keys have seq_len {recon_keys.size(-2)} "
             f"but cache_position expects {exp_seq_len}."
-        )
-
-
-def init_timing_stats():
-    return {
-        "decompose_time": 0.0,
-        "reconstruct_time": 0.0,
-        "decompose_relative": 0.0,
-        "reconstruct_relative": 0.0,
-        "decompose_calls": 0,
-        "reconstruct_calls": 0,
-        "most_time_consuming": None,
-    }
-
-
-def sync_cuda(tensor):
-    if tensor.is_cuda:
-        torch.cuda.synchronize(device=tensor.device)
-
-
-def update_timing_stats(cache_cls, operation, elapsed_time):
-    cache_cls.timing_stats[f"{operation}_time"] += elapsed_time
-    cache_cls.timing_stats[f"{operation}_calls"] += 1
-    total_time = (
-        cache_cls.timing_stats["decompose_time"]
-        + cache_cls.timing_stats["reconstruct_time"]
-    )
-    if total_time > 0:
-        cache_cls.timing_stats["decompose_relative"] = (
-            cache_cls.timing_stats["decompose_time"] / total_time
-        )
-        cache_cls.timing_stats["reconstruct_relative"] = (
-            cache_cls.timing_stats["reconstruct_time"] / total_time
-        )
-        cache_cls.timing_stats["most_time_consuming"] = max(
-            ("decompose", "reconstruct"),
-            key=lambda op: cache_cls.timing_stats[f"{op}_time"],
         )
 
 
