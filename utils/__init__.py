@@ -22,5 +22,7 @@ from .logging import (
     log_batch,
     extract_and_save_timing_stats,
     extract_and_save_efficiency_stats,
+    get_output_path,
 )
 from .rope import inverse_rope, compute_rope_cos_sin
+from .device import get_device, get_device_type
