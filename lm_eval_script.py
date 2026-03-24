@@ -136,7 +136,7 @@ def main(args):
         "lr": args.k_lr,
         "n_iter": args.n_iter,
         "gamma": args.gamma,
-        "min_size": 8.0,
+        "min_size": 8,
     }
 
     num_layers = model.config.num_hidden_layers
