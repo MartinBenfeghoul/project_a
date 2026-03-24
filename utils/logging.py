@@ -238,6 +238,7 @@ def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_
         epoch_params["target_perc_params"] = [
             p.detach().cpu() for p in target_perc_params
         ]
+        epoch_params["target_perc_format"] = "direct"  # values in percentage-space instead of logit-space
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
 
