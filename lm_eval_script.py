@@ -38,8 +38,6 @@ def get_tasks(tasks, print_tasks=True):
     return tasks
 
 
-
-
 def make_hooks(logger, uncompressed_window=0, measure_latency=False):
     """
     When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
@@ -403,7 +401,9 @@ def override_args_from_meta_weights(args):
                 "[meta_weights] WARNING: checkpoint has no target_perc_format key — "
                 "assuming old logit-space format. Applying sigmoid to convert to percentages."
             )
-            raw_percs = [torch.sigmoid(t).item() for t in ckpt["target_perc_params"]]
+            raw_percs = [
+                torch.sigmoid(t).item() for t in ckpt["target_perc_params"]
+            ]
         meta_percs = [v * 100 for v in raw_percs]
         if args.override_target_perc:
             print(

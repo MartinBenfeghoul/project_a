@@ -177,9 +177,8 @@ def log_batch(
 
     perc_str = ""
     if target_perc_params is not None:
-        mean_perc = (
-            sum(p.item() * 100 for p in target_perc_params)
-            / len(target_perc_params)
+        mean_perc = sum(p.item() * 100 for p in target_perc_params) / len(
+            target_perc_params
         )
         perc_str = f", Target Perc: {mean_perc:.1f}%"
 
@@ -217,7 +216,9 @@ def log_batch(
 
         if target_perc_params is not None:
             perc_values = [p.item() * 100 for p in target_perc_params]
-            log_dict["meta/target_perc_mean"] = sum(perc_values) / len(perc_values)
+            log_dict["meta/target_perc_mean"] = sum(perc_values) / len(
+                perc_values
+            )
             log_dict["meta/target_perc_min"] = min(perc_values)
             log_dict["meta/target_perc_max"] = max(perc_values)
             for layer_idx, pv in enumerate(perc_values):
@@ -242,7 +243,9 @@ def save_checkpoint(
         epoch_params["target_perc_params"] = [
             p.detach().cpu() for p in target_perc_params
         ]
-        epoch_params["target_perc_format"] = "direct"  # values in percentage-space instead of logit-space
+        epoch_params["target_perc_format"] = (
+            "direct"  # values in percentage-space instead of logit-space
+        )
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
 
@@ -311,8 +314,8 @@ def extract_and_save_efficiency_stats(
 
 
 def get_output_path(output_path):
-    i=0
+    i = 0
     while True:
         if not os.path.exists(output_path.format(i)):
             return output_path.format(i)
-        i+=1
+        i += 1
