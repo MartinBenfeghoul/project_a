@@ -15,8 +15,10 @@ from utils.segmentation import (
     build_cluster_segment_ranges,
     find_thresholds,
     group_keys_by_cluster,
+    group_sequences_by_cluster,
     kmeans_cluster_sequences,
     restore_grouped_keys_order,
+    restore_grouped_sequences_order,
 )
 from .cache import SingleTensorCache
 
@@ -363,6 +365,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
         kmeans_avg_heads: bool = False,
+        kmeans_per_head: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -385,6 +388,17 @@ class KMeansLRKCache(DecomposedKeysCache):
         self.kmeans_init = kmeans_init
         self.kmeans_dtype = kmeans_dtype
         self.kmeans_avg_heads = kmeans_avg_heads
+        self.kmeans_per_head = kmeans_per_head
+        if self.kmeans_avg_heads and self.kmeans_per_head:
+            raise ValueError(
+                "kmeans_avg_heads and kmeans_per_head are mutually exclusive."
+            )
+        if self.kmeans_per_head:
+            self.kmeans_mode = "per_head"
+        elif self.kmeans_avg_heads:
+            self.kmeans_mode = "avg_heads"
+        else:
+            self.kmeans_mode = "concat_heads"
         self.cluster_metadata = {}
 
     def _get_cluster_count(self, seq_len: int) -> int:
@@ -407,7 +421,34 @@ class KMeansLRKCache(DecomposedKeysCache):
                 [[] for _ in range(batch_size)],
             )
 
-        if self.kmeans_avg_heads:
+        if self.kmeans_mode == "per_head":
+            _, num_heads, _, head_dim = prefix_keys.shape
+            flat_prefix = prefix_keys.reshape(
+                batch_size * num_heads, seq_len, head_dim
+            )
+            cluster_count = self._get_cluster_count(seq_len)
+            assignments = kmeans_cluster_sequences(
+                flat_prefix,
+                n_clusters=cluster_count,
+                n_iter=max(1, self.kmeans_n),
+                kmeans_init=self.kmeans_init,
+                dtype=self.kmeans_dtype,
+            )
+            grouped_prefix, _, inverse_permutation = (
+                group_sequences_by_cluster(flat_prefix, assignments)
+            )
+            segment_ranges = build_cluster_segment_ranges(
+                assignments,
+                n_clusters=cluster_count,
+            )
+            return (
+                grouped_prefix,
+                assignments.reshape(batch_size, num_heads, seq_len),
+                inverse_permutation.reshape(batch_size, num_heads, seq_len),
+                segment_ranges,
+            )
+
+        if self.kmeans_mode == "avg_heads":
             token_features = prefix_keys.mean(dim=1)
         else:
             token_features = prefix_keys.transpose(1, 2).reshape(
@@ -451,10 +492,21 @@ class KMeansLRKCache(DecomposedKeysCache):
         self.compressed_len = suffix_start
 
         if suffix_start == 0:
-            layer_segments = [[] for _ in range(keys.size(0))]
-            assignments = torch.empty(
-                keys.size(0), 0, dtype=torch.long, device=keys.device
-            )
+            batch_size, num_heads = keys.shape[:2]
+            if self.kmeans_mode == "per_head":
+                layer_segments = [[] for _ in range(batch_size * num_heads)]
+                assignments = torch.empty(
+                    batch_size,
+                    num_heads,
+                    0,
+                    dtype=torch.long,
+                    device=keys.device,
+                )
+            else:
+                layer_segments = [[] for _ in range(batch_size)]
+                assignments = torch.empty(
+                    batch_size, 0, dtype=torch.long, device=keys.device
+                )
             inverse_permutation = assignments
         else:
             prefix_keys = keys[..., :suffix_start, :]
@@ -485,6 +537,7 @@ class KMeansLRKCache(DecomposedKeysCache):
             )
 
         self.cluster_metadata[layer_idx] = {
+            "mode": self.kmeans_mode,
             "assignments": assignments,
             "inverse_permutation": inverse_permutation,
         }
@@ -503,12 +556,29 @@ class KMeansLRKCache(DecomposedKeysCache):
             )
 
         empty_suffix = keys[..., :0, :]
-        grouped_prefix = reconstruct_segments(
-            self.lr_keys[layer_idx], empty_suffix
-        )
-        prefix_keys = restore_grouped_keys_order(
-            grouped_prefix, metadata["inverse_permutation"]
-        )
+        if metadata["mode"] == "per_head":
+            batch_size, num_heads, seq_len = metadata[
+                "inverse_permutation"
+            ].shape
+            empty_suffix = empty_suffix.reshape(
+                batch_size * num_heads, 0, empty_suffix.size(-1)
+            )
+            grouped_prefix = reconstruct_segments(
+                self.lr_keys[layer_idx], empty_suffix
+            )
+            prefix_keys = restore_grouped_sequences_order(
+                grouped_prefix,
+                metadata["inverse_permutation"].reshape(
+                    batch_size * num_heads, seq_len
+                ),
+            ).reshape(batch_size, num_heads, seq_len, -1)
+        else:
+            grouped_prefix = reconstruct_segments(
+                self.lr_keys[layer_idx], empty_suffix
+            )
+            prefix_keys = restore_grouped_keys_order(
+                grouped_prefix, metadata["inverse_permutation"]
+            )
         if self.unrope_keys:
             prefix_keys = self.layers[layer_idx]._apply_rope(
                 prefix_keys, compressed_len=self.compressed_len
@@ -533,8 +603,9 @@ class KMeansLRKCache(DecomposedKeysCache):
             return 0.0
 
         counts = []
-        for batch_assignments in assignments:
-            counts.append(torch.unique(batch_assignments).numel())
+        flat_assignments = assignments.reshape(-1, assignments.size(-1))
+        for sequence_assignments in flat_assignments:
+            counts.append(torch.unique(sequence_assignments).numel())
         return sum(counts) / len(counts)
 
     def update(

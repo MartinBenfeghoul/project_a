@@ -190,6 +190,40 @@ def group_keys_by_cluster(
     return grouped_keys, permutation, inverse_permutation
 
 
+def group_sequences_by_cluster(
+    sequences: torch.Tensor,
+    cluster_assignments: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Reorder sequence tensors so tokens in the same cluster are contiguous."""
+    if sequences.dim() != 3:
+        raise ValueError(
+            "group_sequences_by_cluster expects tensors with shape "
+            "[batch, seq_len, dim]."
+        )
+    if cluster_assignments.shape != sequences.shape[:2]:
+        raise ValueError(
+            "cluster_assignments must have shape [batch, seq_len] matching "
+            "sequences."
+        )
+
+    permutation = torch.argsort(cluster_assignments, dim=-1)
+    inverse_permutation = torch.empty_like(permutation)
+    original_positions = (
+        torch.arange(
+            permutation.size(-1),
+            device=permutation.device,
+            dtype=permutation.dtype,
+        )
+        .unsqueeze(0)
+        .expand_as(permutation)
+    )
+    inverse_permutation.scatter_(1, permutation, original_positions)
+
+    gather_idx = permutation[:, :, None].expand_as(sequences)
+    grouped_sequences = torch.gather(sequences, dim=1, index=gather_idx)
+    return grouped_sequences, permutation, inverse_permutation
+
+
 def restore_grouped_keys_order(
     grouped_keys: torch.Tensor,
     inverse_permutation: torch.Tensor,
@@ -210,6 +244,26 @@ def restore_grouped_keys_order(
 
     gather_idx = inverse_permutation[:, None, :, None].expand_as(grouped_keys)
     return torch.gather(grouped_keys, dim=2, index=gather_idx)
+
+
+def restore_grouped_sequences_order(
+    grouped_sequences: torch.Tensor,
+    inverse_permutation: torch.Tensor,
+) -> torch.Tensor:
+    """Undo `group_sequences_by_cluster` with a stored inverse permutation."""
+    if grouped_sequences.dim() != 3:
+        raise ValueError(
+            "restore_grouped_sequences_order expects tensors with shape "
+            "[batch, seq_len, dim]."
+        )
+    if inverse_permutation.shape != grouped_sequences.shape[:2]:
+        raise ValueError(
+            "inverse_permutation must have shape [batch, seq_len] matching "
+            "sequences."
+        )
+
+    gather_idx = inverse_permutation[:, :, None].expand_as(grouped_sequences)
+    return torch.gather(grouped_sequences, dim=1, index=gather_idx)
 
 
 # Surprise-based

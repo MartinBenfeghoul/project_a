@@ -63,6 +63,7 @@ KEY_CONFIGS = [
     'kmeans_init',
     'kmeans_dtype',
     'kmeans_avg_heads',
+    'kmeans_per_head',
     'un_rope',
 ]
 

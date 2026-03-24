@@ -201,6 +201,7 @@ def get_parser():
         choices=["float16", "float32", "bfloat16"],
     )
     parser.add_argument("--kmeans_avg_heads", action="store_true")
+    parser.add_argument("--kmeans_per_head", action="store_true")
 
     # value cache
     parser.add_argument("--v_cache_type", type=str, default="mlp")
@@ -245,6 +246,7 @@ if __name__ == "__main__":
         "kmeans_init": args.kmeans_init,
         "kmeans_dtype": args.kmeans_dtype,
         "kmeans_avg_heads": args.kmeans_avg_heads,
+        "kmeans_per_head": args.kmeans_per_head,
     }
 
     value_cache_kwargs = {
