@@ -369,6 +369,7 @@ def override_args_from_meta_weights(args):
             args.num_epochs = train_cfg.inner_steps
         args.loss_func = train_cfg.loss_func
         args.un_rope = train_cfg.un_rope
+        args.optimizer = getattr(train_cfg, "inner_optimizer", "sgd")
 
     layer0 = next(v for k, v in ckpt.items() if k.startswith("layer_"))
     weight_keys = sorted(k for k in layer0 if k.startswith("weights."))
@@ -393,11 +394,17 @@ def override_args_from_meta_weights(args):
             )
         setattr(args, attr, ckpt_val)
 
-    # TODO: unless we update meta learning to have option to use adam in inner loop update
-    args.optimizer = "sgd"
-
     if "target_perc_params" in ckpt:
-        meta_percs = [t.item() * 100 for t in ckpt["target_perc_params"]]
+        raw_percs = [t.item() for t in ckpt["target_perc_params"]]
+        # Old checkpoints stored target_perc_params in logit-space and have no
+        # target_perc_format key. TODO: Remove once stopped using old ckpts
+        if ckpt.get("target_perc_format") != "direct":
+            print(
+                "[meta_weights] WARNING: checkpoint has no target_perc_format key — "
+                "assuming old logit-space format. Applying sigmoid to convert to percentages."
+            )
+            raw_percs = [torch.sigmoid(t).item() for t in ckpt["target_perc_params"]]
+        meta_percs = [v * 100 for v in raw_percs]
         if args.override_target_perc:
             print(
                 f"[meta_weights] Ignoring per-layer target_perc from checkpoint "
