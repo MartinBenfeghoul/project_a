@@ -46,8 +46,6 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
 
     _cuda = measure_latency and torch.cuda.is_available()
 
-    _cuda = measure_latency and torch.cuda.is_available()
-
     def has_complete_key_cache_timings(timing_stats):
         return (
             timing_stats is not None
