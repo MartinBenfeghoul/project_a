@@ -604,7 +604,7 @@ def evaluate_ruler(
         "target_model_num_heads": num_kv_heads,
         "lr": training_config.inner_lr,
         "device": device,
-        "optimizer": "sgd",
+        "optimizer": training_config.get("inner_optimizer", "sgd"),
         "loss_func": training_config.get("loss_func", "mse"),
         "num_epochs": training_config.inner_steps,
         "meta_weights_path": epoch_checkpoint_path,
