@@ -14,14 +14,14 @@ training:
   lambda_compression: 0.1 # penalises low target_perc
   mlp_num_layers: 2
   mlp_hidden_factor: 4
-  num_meta_epochs: 20
+  num_meta_epochs: 100
   loss_func: "mse"
   grad_accum_steps: 32  # accumulate gradients over N tasks before each optimizer step
   log_interval: 10  # log metrics every N batches
-  batches_per_epoch: 3200  # limit batches per epoch
+  batches_per_epoch: 200
   eval_ruler: true # evaluate RULER benchmark at end of each epoch
   eval_ruler_samples: 15
-  un_rope: false # undo RoPE on keys before MLP training/inference
+  un_rope: true # undo RoPE on keys before MLP training/inference
   rope_theta: 500000.0 # RoPE theta used to recompute cos/sin
   inner_optimizer: "sgd" # inner loop optimizer: "sgd" or "adam"
   inner_adam_beta1: 0.9
