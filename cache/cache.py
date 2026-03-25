@@ -215,7 +215,9 @@ class CompressedCache:
         from .key_cache import KEY_CACHE_CLASSES
 
         key_cache_type = key_cache_kwargs.pop("cache_type")
-        self.key_cache = get_cache(key_cache_type, KEY_CACHE_CLASSES, kwargs.get("verbose", True))(
+        self.key_cache = get_cache(
+            key_cache_type, KEY_CACHE_CLASSES, kwargs.get("verbose", True)
+        )(
             ddp_cache_data=ddp_cache_data,
             **key_cache_kwargs,
         )
@@ -223,7 +225,9 @@ class CompressedCache:
         from .value_cache import VALUE_CACHE_CLASSES
 
         value_cache_type = value_cache_kwargs.pop("cache_type")
-        self.value_cache = get_cache(value_cache_type, VALUE_CACHE_CLASSES, kwargs.get("verbose", True))(
+        self.value_cache = get_cache(
+            value_cache_type, VALUE_CACHE_CLASSES, kwargs.get("verbose", True)
+        )(
             ddp_cache_data=ddp_cache_data,
             **value_cache_kwargs,
         )
@@ -276,7 +280,9 @@ class CompressedCache:
 
     def crop(self, max_length: int) -> None:
         raise NotImplementedError("crop not implemented")
-        for k_layer, v_layer in zip(self.key_cache.layers, self.value_cache.layers):
+        for k_layer, v_layer in zip(
+            self.key_cache.layers, self.value_cache.layers
+        ):
             k_layer.crop(max_length)
             v_layer.crop(max_length)
 
@@ -284,5 +290,7 @@ class CompressedCache:
         return getattr(self.key_cache, name)
 
     def __iter__(self):
-        for k_layer, v_layer in zip(self.key_cache.layers, self.value_cache.layers):
+        for k_layer, v_layer in zip(
+            self.key_cache.layers, self.value_cache.layers
+        ):
             yield k_layer.tensor, v_layer.tensor

@@ -5,6 +5,7 @@ Generates passkey retrieval sequences, runs them through a model to get KV cache
 then uses per-layer MLPs to approximate value vectors. Evaluates how much accuracy
 is preserved when replacing a target percentage of KV entries with MLP predictions.
 """
+
 import os
 import time
 

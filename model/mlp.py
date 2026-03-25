@@ -45,7 +45,9 @@ class MLP(nn.Module):
 
             if per_sequence:
                 assert batch_size is not None
-                w = nn.Parameter(torch.empty(batch_size, num_heads, curr_dim, out_dim))
+                w = nn.Parameter(
+                    torch.empty(batch_size, num_heads, curr_dim, out_dim)
+                )
                 b = nn.Parameter(torch.empty(batch_size, num_heads, 1, out_dim))
             else:
                 w = nn.Parameter(torch.empty(1, num_heads, curr_dim, out_dim))
