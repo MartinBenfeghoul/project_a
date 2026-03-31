@@ -51,17 +51,23 @@ def unrope(keys: torch.Tensor, rope_theta: float) -> torch.Tensor:
     return inverse_rope(keys, cos, sin)
 
 
-def _support_loss(layer_mlps, kv_cache, phi, loss_fn, un_rope, rope_theta):
-    total = 0.0
-    for layer_idx, layer in enumerate(kv_cache.layers):
+def _cache_support_kvs(kv_cache, un_rope, rope_theta):
+    """Pre-compute (keys, values) for each layer once before the inner loop."""
+    kvs = []
+    for layer in kv_cache.layers:
         k = layer.keys.float()
         if un_rope:
             k = unrope(k, rope_theta)
+        kvs.append((k, layer.values.float()))
+    return kvs
+
+
+def _support_loss(layer_mlps, cached_kvs, phi, loss_fn):
+    total = 0.0
+    for layer_idx, (k, v) in enumerate(cached_kvs):
         weights, biases = phi[layer_idx]
-        v_hat = functional_mlp_forward(
-            layer_mlps[layer_idx], k, weights, biases
-        )
-        total = total + loss_fn(v_hat, layer.values.float())
+        v_hat = functional_mlp_forward(layer_mlps[layer_idx], k, weights, biases)
+        total = total + loss_fn(v_hat, v)
     return total
 
 
@@ -140,12 +146,11 @@ def inner_loop_functional(
             [torch.zeros_like(p.detach()) for p in phi_flat0],
         )
 
+    cached_kvs = _cache_support_kvs(kv_cache, un_rope, rope_theta)
     inner_losses = [] if track_losses else None
 
     for step in range(inner_steps):
-        total_loss = _support_loss(
-            layer_mlps, kv_cache, phi, loss_fn, un_rope, rope_theta
-        )
+        total_loss = _support_loss(layer_mlps, cached_kvs, phi, loss_fn)
 
         if track_losses:
             inner_losses.append(float(total_loss.detach().cpu()))
@@ -175,15 +180,7 @@ def inner_loop_functional(
     final_support_loss = None
     if track_losses:
         with torch.no_grad():
-            final_support_loss, _ = compute_loss_functional(
-                layer_mlps,
-                kv_cache,
-                phi,
-                loss_fn,
-                un_rope=un_rope,
-                rope_theta=rope_theta,
-            )
-            final_support_loss = final_support_loss.item()
+            final_support_loss = _support_loss(layer_mlps, cached_kvs, phi, loss_fn).item()
 
     return (
         theta,
@@ -677,7 +674,7 @@ def evaluate_ruler(
         "target_model_num_heads": num_kv_heads,
         "lr": training_config.inner_lr,
         "device": device,
-        "optimizer": "sgd",
+        "optimizer": training_config.get("inner_optimizer", "sgd"),
         "loss_func": training_config.get("loss_func", "mse"),
         "num_epochs": training_config.inner_steps,
         "meta_weights_path": epoch_checkpoint_path,
