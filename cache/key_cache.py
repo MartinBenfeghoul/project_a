@@ -20,6 +20,11 @@ from utils.segmentation import (
     restore_grouped_keys_order,
     restore_grouped_sequences_order,
 )
+from utils.logging import (
+    init_timing_stats,
+    update_timing_stats,
+    sync_cuda,
+)
 from .cache import SingleTensorCache
 
 
@@ -37,43 +42,6 @@ def check_recon_length(recon_keys, cache_kwargs):
         raise ValueError(
             f"Reconstructed keys have seq_len {recon_keys.size(-2)} "
             f"but cache_position expects {exp_seq_len}."
-        )
-
-
-def init_timing_stats():
-    return {
-        "decompose_time": 0.0,
-        "reconstruct_time": 0.0,
-        "decompose_relative": 0.0,
-        "reconstruct_relative": 0.0,
-        "decompose_calls": 0,
-        "reconstruct_calls": 0,
-        "most_time_consuming": None,
-    }
-
-
-def sync_cuda(tensor):
-    if tensor.is_cuda:
-        torch.cuda.synchronize(device=tensor.device)
-
-
-def update_timing_stats(cache_cls, operation, elapsed_time):
-    cache_cls.timing_stats[f"{operation}_time"] += elapsed_time
-    cache_cls.timing_stats[f"{operation}_calls"] += 1
-    total_time = (
-        cache_cls.timing_stats["decompose_time"]
-        + cache_cls.timing_stats["reconstruct_time"]
-    )
-    if total_time > 0:
-        cache_cls.timing_stats["decompose_relative"] = (
-            cache_cls.timing_stats["decompose_time"] / total_time
-        )
-        cache_cls.timing_stats["reconstruct_relative"] = (
-            cache_cls.timing_stats["reconstruct_time"] / total_time
-        )
-        cache_cls.timing_stats["most_time_consuming"] = max(
-            ("decompose", "reconstruct"),
-            key=lambda op: cache_cls.timing_stats[f"{op}_time"],
         )
 
 
@@ -299,27 +267,11 @@ class SurpriseLRKCache(DecomposedKeysCache):
     def __init__(
         self,
         *args,
-        decomposition_method: str,
-        log_timing_stats: bool = False,
-        rank_selection: str = "comp_ratio",
-        comp_ratio: float = 2.0,
-        energy_threshold: float = 0.95,
-        decomp_n_iter: int = 3,
-        lr: float = 1e-2,
         gamma: float = 3.0,
         min_size: int = 8,
         **kwargs,
     ):
-        super().__init__(
-            *args,
-            decomposition_method=decomposition_method,
-            log_timing_stats=log_timing_stats,
-            rank_selection=rank_selection,
-            comp_ratio=comp_ratio,
-            energy_threshold=energy_threshold,
-            decomp_n_iter=decomp_n_iter,
-            lr=lr,
-            **kwargs,
+        super().__init__(*args,**kwargs,
         )
         self.gamma = gamma
         self.min_size = min_size

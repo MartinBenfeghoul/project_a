@@ -13,6 +13,10 @@ from cache import CompressedCacheHFLM
 from utils import (
     Logger,
     get_model_and_tokenizer,
+    get_device,
+    get_device_type,
+    list_of_strings,
+    get_output_path,
     extract_and_save_event_stats,
     extract_and_save_timing_stats,
     extract_and_save_efficiency_stats,
@@ -35,40 +39,13 @@ def get_tasks(tasks, print_tasks=True):
     return tasks
 
 
-def get_device(model):
-    try:
-        device = model.device
-    except AttributeError:
-        try:
-            device = model.model.device
-        except AttributeError:
-            device = "cuda:0"
-    return device
-
-
-def get_output_path(output_path):
-    for i in range(100):
-        if not os.path.exists(output_path.format(i)):
-            return output_path.format(i)
-
-
-def get_device_type():
-    if torch.cuda.is_available():
-        print(f"Using {torch.cuda.device_count()} CUDA chips")
-        return "cuda"
-    print("WARNING: CUDA not available. Continuing with CPU.")
-    return "cpu"
-
-
-def list_of_strings(arg):
-    return arg.split(",")
-
-
 def make_hooks(logger, uncompressed_window=0, measure_latency=False):
     """
     When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
     """
     _start_evt = [None]
+
+    _cuda = measure_latency and torch.cuda.is_available()
 
     def has_complete_key_cache_timings(timing_stats):
         return (
@@ -78,13 +55,13 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
         )
 
     def pre_hook(module, args, kwargs):
-        if measure_latency:
+        if _cuda:
             evt = torch.cuda.Event(enable_timing=True)
             evt.record()
             _start_evt[0] = evt
 
     def post_hook(module, args, kwargs, output):
-        if measure_latency:
+        if _cuda:
             end_evt = torch.cuda.Event(enable_timing=True)
             end_evt.record()
 
@@ -108,7 +85,7 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                     avg_event_size = seq_len / n_events
                     logger.add_log("n_events", n_events)
                     logger.add_log("avg_event_size", avg_event_size)
-            if measure_latency:
+            if _cuda:
                 logger.prefill_events.append((_start_evt[0], end_evt))
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
@@ -137,7 +114,7 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                         timing_stats["reconstruct_relative"],
                     )
                     logger.recorded_k_timing = True
-            if measure_latency:
+            if _cuda:
                 logger.decode_events.append((_start_evt[0], end_evt))
 
     return pre_hook, post_hook
@@ -167,7 +144,7 @@ def main(args):
         "lr": args.k_lr,
         "decomp_n_iter": args.decomp_n_iter,
         "gamma": args.gamma,
-        "min_size": 8.0,
+        "min_size": 8,
         "kmeans_cluster_size": args.kmeans_cluster_size,
         "kmeans_n_iter": args.kmeans_n_iter,
         "kmeans_init": args.kmeans_init,
@@ -205,7 +182,8 @@ def main(args):
 
     model.eval()
 
-    if args.log_efficiency_metrics:
+    model_baseline_mem = 0
+    if args.log_efficiency_metrics and torch.cuda.is_available():
         # warm up cuda kernels before benchmarking to avoid inflated first-pass times
         print("Warming up GPU...")
         _warmup_ids = torch.ones((1, 32), dtype=torch.long, device=device)
@@ -239,8 +217,9 @@ def main(args):
     tm = TaskManager(metadata=metadata)
 
     if args.log_efficiency_metrics:
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
         start_time = time.perf_counter()
 
     results = evaluator.simple_evaluate(
@@ -426,6 +405,7 @@ def override_args_from_meta_weights(args):
             args.num_epochs = train_cfg.inner_steps
         args.loss_func = train_cfg.loss_func
         args.un_rope = train_cfg.un_rope
+        args.optimizer = getattr(train_cfg, "inner_optimizer", "sgd")
 
     layer0 = next(v for k, v in ckpt.items() if k.startswith("layer_"))
     weight_keys = sorted(k for k in layer0 if k.startswith("weights."))
@@ -450,13 +430,19 @@ def override_args_from_meta_weights(args):
             )
         setattr(args, attr, ckpt_val)
 
-    # TODO: unless we update meta learning to have option to use adam in inner loop update
-    args.optimizer = "sgd"
-
     if "target_perc_params" in ckpt:
-        meta_percs = [
-            torch.sigmoid(t).item() * 100 for t in ckpt["target_perc_params"]
-        ]
+        raw_percs = [t.item() for t in ckpt["target_perc_params"]]
+        # Old checkpoints stored target_perc_params in logit-space and have no
+        # target_perc_format key. TODO: Remove once stopped using old ckpts
+        if ckpt.get("target_perc_format") != "direct":
+            print(
+                "[meta_weights] WARNING: checkpoint has no target_perc_format key — "
+                "assuming old logit-space format. Applying sigmoid to convert to percentages."
+            )
+            raw_percs = [
+                torch.sigmoid(t).item() for t in ckpt["target_perc_params"]
+            ]
+        meta_percs = [v * 100 for v in raw_percs]
         if args.override_target_perc:
             print(
                 f"[meta_weights] Ignoring per-layer target_perc from checkpoint "

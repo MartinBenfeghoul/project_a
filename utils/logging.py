@@ -177,9 +177,9 @@ def log_batch(
 
     perc_str = ""
     if target_perc_params is not None:
-        mean_perc = sum(
-            torch.sigmoid(p).item() * 100 for p in target_perc_params
-        ) / len(target_perc_params)
+        mean_perc = sum(p.item() * 100 for p in target_perc_params) / len(
+            target_perc_params
+        )
         perc_str = f", Target Perc: {mean_perc:.1f}%"
 
     print(
@@ -215,9 +215,7 @@ def log_batch(
             log_dict["inner/learned_lr_max"] = max(lr_values)
 
         if target_perc_params is not None:
-            perc_values = [
-                torch.sigmoid(p).item() * 100 for p in target_perc_params
-            ]
+            perc_values = [p.item() * 100 for p in target_perc_params]
             log_dict["meta/target_perc_mean"] = sum(perc_values) / len(
                 perc_values
             )
@@ -245,6 +243,9 @@ def save_checkpoint(
         epoch_params["target_perc_params"] = [
             p.detach().cpu() for p in target_perc_params
         ]
+        epoch_params["target_perc_format"] = (
+            "direct"  # values in percentage-space instead of logit-space
+        )
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
 
@@ -335,3 +336,48 @@ def extract_and_save_efficiency_stats(
     print("Efficiency metrics:", efficiency_metrics)
     results["results"]["efficiency_metrics"] = efficiency_metrics
     return results
+
+
+def get_output_path(output_path):
+    i = 0
+    while True:
+        if not os.path.exists(output_path.format(i)):
+            return output_path.format(i)
+        i += 1
+
+
+def init_timing_stats():
+    return {
+        "decompose_time": 0.0,
+        "reconstruct_time": 0.0,
+        "decompose_relative": 0.0,
+        "reconstruct_relative": 0.0,
+        "decompose_calls": 0,
+        "reconstruct_calls": 0,
+        "most_time_consuming": None,
+    }
+
+
+def sync_cuda(tensor):
+    if tensor.is_cuda:
+        torch.cuda.synchronize(device=tensor.device)
+
+
+def update_timing_stats(cache_cls, operation, elapsed_time):
+    cache_cls.timing_stats[f"{operation}_time"] += elapsed_time
+    cache_cls.timing_stats[f"{operation}_calls"] += 1
+    total_time = (
+        cache_cls.timing_stats["decompose_time"]
+        + cache_cls.timing_stats["reconstruct_time"]
+    )
+    if total_time > 0:
+        cache_cls.timing_stats["decompose_relative"] = (
+            cache_cls.timing_stats["decompose_time"] / total_time
+        )
+        cache_cls.timing_stats["reconstruct_relative"] = (
+            cache_cls.timing_stats["reconstruct_time"] / total_time
+        )
+        cache_cls.timing_stats["most_time_consuming"] = max(
+            ("decompose", "reconstruct"),
+            key=lambda op: cache_cls.timing_stats[f"{op}_time"],
+        )

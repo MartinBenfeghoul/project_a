@@ -315,7 +315,7 @@ class CompressedCache:
 
         key_cache_type = key_cache_kwargs.pop("cache_type")
         self.key_cache = get_cache(
-            key_cache_type, KEY_CACHE_CLASSES, kwargs["verbose"]
+            key_cache_type, KEY_CACHE_CLASSES, kwargs.get("verbose", True)
         )(
             ddp_cache_data=ddp_cache_data,
             **key_cache_kwargs,
@@ -325,7 +325,7 @@ class CompressedCache:
 
         value_cache_type = value_cache_kwargs.pop("cache_type")
         self.value_cache = get_cache(
-            value_cache_type, VALUE_CACHE_CLASSES, kwargs["verbose"]
+            value_cache_type, VALUE_CACHE_CLASSES, kwargs.get("verbose", True)
         )(
             ddp_cache_data=ddp_cache_data,
             **value_cache_kwargs,

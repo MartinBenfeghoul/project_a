@@ -7,7 +7,6 @@ initial weights so that adapted MLPs generalise to the query set.
 """
 
 import itertools
-import math
 import os
 import time
 
@@ -43,28 +42,81 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-def unrope(
-    keys: torch.Tensor, token_slice: slice, rope_theta: float
-) -> torch.Tensor:
-    """Un-rope keys extracted from the KV cache at positions given by token_slice."""
-    start_pos = token_slice.start or 0
+def unrope(keys: torch.Tensor, rope_theta: float) -> torch.Tensor:
+    """Un-rope keys extracted from the KV cache."""
     T = keys.shape[2]
     cos, sin = compute_rope_cos_sin(
-        start_pos + T, keys.shape[-1], rope_theta, keys.device, keys.dtype
+        T, keys.shape[-1], rope_theta, keys.device, keys.dtype
     )
-    return inverse_rope(keys, cos[:, :, start_pos:], sin[:, :, start_pos:])
+    return inverse_rope(keys, cos, sin)
+
+
+def _support_loss(layer_mlps, kv_cache, phi, loss_fn, un_rope, rope_theta):
+    total = 0.0
+    for layer_idx, layer in enumerate(kv_cache.layers):
+        k = layer.keys.float()
+        if un_rope:
+            k = unrope(k, rope_theta)
+        weights, biases = phi[layer_idx]
+        v_hat = functional_mlp_forward(
+            layer_mlps[layer_idx], k, weights, biases
+        )
+        total = total + loss_fn(v_hat, layer.values.float())
+    return total
+
+
+def _phi_from_flat(flat, layer_param_counts):
+    phi, idx = [], 0
+    for n_w, n_b in layer_param_counts:
+        phi.append((flat[idx : idx + n_w], flat[idx + n_w : idx + n_w + n_b]))
+        idx += n_w + n_b
+    return phi
+
+
+def _sgd_update(phi, grads, inner_lr):
+    g_iter = iter(grads)
+    lr_iter = iter(inner_lr) if isinstance(inner_lr, list) else None
+    return [
+        (
+            [
+                p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter)
+                for p in w
+            ],
+            [
+                p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter)
+                for p in b
+            ],
+        )
+        for w, b in phi
+    ]
+
+
+def _adam_update(phi_flat, grads, inner_lr, step, m1, m2, beta1, beta2, eps):
+    t = step + 1
+    updated = []
+    for i, (p, g) in enumerate(zip(phi_flat, grads)):
+        m1[i] = beta1 * m1[i] + (1 - beta1) * g.detach()
+        m2[i] = beta2 * m2[i] + (1 - beta2) * g.detach().pow(2)
+        m_hat = m1[i] / (1 - beta1**t)
+        v_hat = m2[i] / (1 - beta2**t)
+        lr = inner_lr[i] if isinstance(inner_lr, list) else inner_lr
+        updated.append(p - lr * m_hat / (v_hat.sqrt() + eps))
+    return updated
 
 
 def inner_loop_functional(
     layer_mlps,
     kv_cache,
-    support_slice,
     inner_lr,
     inner_steps,
     loss_fn=F.mse_loss,
     track_losses=False,
     un_rope=False,
     rope_theta=500_000.0,
+    inner_optimizer="sgd",
+    inner_adam_beta1=0.9,
+    inner_adam_beta2=0.999,
+    inner_adam_eps=1e-8,
 ):
     theta = [
         p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)
@@ -76,22 +128,24 @@ def inner_loop_functional(
         )
         for mlp in layer_mlps
     ]
+    layer_param_counts = [
+        (len(mlp.weights), len(mlp.biases)) for mlp in layer_mlps
+    ]
+
+    adam_state = None
+    if inner_optimizer == "adam":
+        phi_flat0 = [p for w, b in phi for p in w + b]
+        adam_state = (
+            [torch.zeros_like(p.detach()) for p in phi_flat0],
+            [torch.zeros_like(p.detach()) for p in phi_flat0],
+        )
 
     inner_losses = [] if track_losses else None
 
-    for _ in range(inner_steps):
-        total_loss = 0.0
-
-        for layer_idx, layer in enumerate(kv_cache.layers):
-            k = layer.keys[:, :, support_slice, :].float()
-            if un_rope:
-                k = unrope(k, support_slice, rope_theta)
-            v = layer.values[:, :, support_slice, :].float()
-
-            mlp = layer_mlps[layer_idx]
-            weights, biases = phi[layer_idx]
-            v_hat = functional_mlp_forward(mlp, k.float(), weights, biases)
-            total_loss += loss_fn(v_hat, v)
+    for step in range(inner_steps):
+        total_loss = _support_loss(
+            layer_mlps, kv_cache, phi, loss_fn, un_rope, rope_theta
+        )
 
         if track_losses:
             inner_losses.append(float(total_loss.detach().cpu()))
@@ -101,24 +155,22 @@ def inner_loop_functional(
             total_loss, phi_flat, create_graph=False, retain_graph=False
         )
 
-        g_iter = iter(grads)
-        if isinstance(inner_lr, list):
-            lr_iter = iter(inner_lr)
-            phi = [
-                (
-                    [p - next(lr_iter) * next(g_iter) for p in w],
-                    [p - next(lr_iter) * next(g_iter) for p in b],
-                )
-                for w, b in phi
-            ]
+        if inner_optimizer == "adam":
+            m1, m2 = adam_state
+            updated_flat = _adam_update(
+                phi_flat,
+                grads,
+                inner_lr,
+                step,
+                m1,
+                m2,
+                inner_adam_beta1,
+                inner_adam_beta2,
+                inner_adam_eps,
+            )
+            phi = _phi_from_flat(updated_flat, layer_param_counts)
         else:
-            phi = [
-                (
-                    [p - inner_lr * next(g_iter) for p in w],
-                    [p - inner_lr * next(g_iter) for p in b],
-                )
-                for w, b in phi
-            ]
+            phi = _sgd_update(phi, grads, inner_lr)
 
     final_support_loss = None
     if track_losses:
@@ -126,7 +178,6 @@ def inner_loop_functional(
             final_support_loss, _ = compute_loss_functional(
                 layer_mlps,
                 kv_cache,
-                support_slice,
                 phi,
                 loss_fn,
                 un_rope=un_rope,
@@ -154,7 +205,6 @@ def functional_mlp_forward(mlp, x, weights, biases):
 def compute_loss_functional(
     layer_mlps,
     kv_cache,
-    token_slice,
     phi,
     loss_fn=F.mse_loss,
     track_per_layer=False,
@@ -165,10 +215,10 @@ def compute_loss_functional(
     per_layer_losses = [] if track_per_layer else None
 
     for layer_idx, layer in enumerate(kv_cache.layers):
-        k = layer.keys[:, :, token_slice, :].float()
+        k = layer.keys.float()
         if un_rope:
-            k = unrope(k, token_slice, rope_theta)
-        v = layer.values[:, :, token_slice, :].float()
+            k = unrope(k, rope_theta)
+        v = layer.values.float()
 
         mlp = layer_mlps[layer_idx]
         weights, biases = phi[layer_idx]
@@ -183,10 +233,55 @@ def compute_loss_functional(
     return total_loss, per_layer_losses
 
 
+def compute_query_loss(
+    layer_mlps,
+    kv_cache,
+    phi,
+    loss_fn=F.mse_loss,
+    target_perc_params=None,
+    tau=0.01,
+    lambda_compression=0.0,
+    track_per_layer=False,
+    un_rope=False,
+    rope_theta=500_000.0,
+):
+    if target_perc_params is not None:
+        return compute_compressed_loss(
+            layer_mlps,
+            kv_cache,
+            phi,
+            target_perc_params,
+            tau=tau,
+            lambda_compression=lambda_compression,
+            track_per_layer=track_per_layer,
+            un_rope=un_rope,
+            rope_theta=rope_theta,
+        )
+    return compute_loss_functional(
+        layer_mlps,
+        kv_cache,
+        phi,
+        loss_fn,
+        track_per_layer=track_per_layer,
+        un_rope=un_rope,
+        rope_theta=rope_theta,
+    )
+
+
+def get_differentiable_thresh(mse_per_token, index_perc):
+    B, H, T = mse_per_token.shape
+    sorted_errors, _ = torch.sort(mse_per_token.detach().view(B, -1), dim=1)
+    k_lo = index_perc.detach().long().clamp(0, H * T - 2)
+    frac = index_perc - k_lo.float()
+    thresh = torch.lerp(
+        sorted_errors[:, k_lo], sorted_errors[:, k_lo + 1], frac
+    ).view(B, 1, 1)
+    return thresh
+
+
 def compute_compressed_loss(
     layer_mlps,
     kv_cache,
-    query_slice,
     phi,
     target_perc_params,
     tau=0.01,
@@ -195,31 +290,14 @@ def compute_compressed_loss(
     un_rope=False,
     rope_theta=500_000.0,
 ):
-    """
-    Differentiable outer-loop query loss with soft compression.
-
-    For each layer:
-      - MLP errors on query tokens are computed with detached values so the
-        threshold does not create circular gradients back through the MLP.
-      - A differentiable threshold is derived from target_perc_params[layer_idx]
-        via linear interpolation of the sorted error distribution.
-      - A soft sigmoid mask (1 = keep residual, 0 = use MLP) gates the loss so
-        only "compressed" tokens (soft_mask ≈ 0) contribute reconstruction error.
-      - Optionally, lambda_compression * (1 - perc) is added to prevent the
-        trivial solution of target_perc → 0 (no compression).
-
-    Gradient flow:
-      - target_perc_params[l]  ←  soft_mask  ←  thresh  ←  frac  ←  perc
-      - phi (adapted MLP)      ←  mse_per_token  ←  v_hat
-    """
     total_loss = 0
     per_layer_losses = [] if track_per_layer else None
 
     for layer_idx, layer in enumerate(kv_cache.layers):
-        k_q = layer.keys[:, :, query_slice, :].float()
+        k_q = layer.keys.float()
         if un_rope:
-            k_q = unrope(k_q, query_slice, rope_theta)
-        v_q = layer.values[:, :, query_slice, :].float()
+            k_q = unrope(k_q, rope_theta)
+        v_q = layer.values.float()
 
         mlp = layer_mlps[layer_idx]
         weights, biases = phi[layer_idx]
@@ -228,45 +306,17 @@ def compute_compressed_loss(
         B, H, T, _ = v_q.shape
         N = H * T
 
-        # Detach errors for threshold/mask so gradients don't flow back through
-        # the MLP into the compression policy (avoids circular gradients).
-        with torch.no_grad():
-            errors_det = (v_q - v_hat_q).pow(2).mean(dim=-1)  # [B, H, T]
-        errors_flat = errors_det.view(B, -1)  # [B, N]
+        mse_per_token = (v_q - v_hat_q).pow(2).mean(dim=-1)
 
-        perc = torch.sigmoid(
-            target_perc_params[layer_idx]
-        )  # fraction to compress
-        k_float = (perc * N).clamp(1.0, float(N - 1))
+        perc = target_perc_params[layer_idx].clamp(0.0, 1.0)
+        index_perc = (perc * N).clamp(1.0, float(N - 1))
+        thresh = get_differentiable_thresh(mse_per_token, index_perc)
 
-        # Differentiable threshold: linearly interpolate adjacent sorted errors.
-        # k_lo is detached (integer index), frac carries the gradient through perc.
-        sorted_errors, _ = torch.sort(errors_flat, dim=1)  # [B, N], ascending
-        k_lo = k_float.detach().long().clamp(0, N - 2)
-        k_hi = k_lo + 1
-        frac = k_float - k_lo.float()  # scalar, differentiable w.r.t. perc
-
-        # Per-sequence threshold [B], differentiable w.r.t. frac → perc
-        thresh = (
-            sorted_errors[:, k_lo]
-            + frac * (sorted_errors[:, k_hi] - sorted_errors[:, k_lo])
-        ).view(
-            B, 1, 1
-        )  # [B, 1, 1] for broadcasting with [B, H, T]
-
-        # soft_mask ≈ 1: keep residual (high error); ≈ 0: use MLP (low error)
-        soft_mask = torch.sigmoid((errors_det - thresh) / tau)  # [B, H, T]
-
-        # Loss = MLP error weighted by (1 - soft_mask): compressed tokens must be
-        # well-predicted; residual tokens are "free" (stored explicitly).
-        mse_per_token = (
-            (v_q - v_hat_q).pow(2).mean(dim=-1)
-        )  # [B, H, T], grad → phi
+        soft_mask = torch.sigmoid((mse_per_token.detach() - thresh) / tau)
         layer_loss = ((1.0 - soft_mask) * mse_per_token).mean()
 
-        # Compression encouragement: penalise low perc to prevent trivial perc → 0
-        if lambda_compression > 0.0:
-            layer_loss = layer_loss + lambda_compression * (1.0 - perc)
+        # penalisation to prevent trivial perc
+        layer_loss = layer_loss + lambda_compression * (1.0 - perc)
 
         total_loss = total_loss + layer_loss
 
@@ -325,10 +375,12 @@ def meta_step(
     device,
     un_rope=False,
     rope_theta=500_000.0,
+    inner_optimizer="sgd",
+    inner_adam_beta1=0.9,
+    inner_adam_beta2=0.999,
+    inner_adam_eps=1e-8,
 ):
     batch_start_time = time.time()
-
-    all_tokens = slice(None)  # use the full sequence for both support and query
 
     with torch.no_grad():
         support_out = model(
@@ -342,13 +394,16 @@ def meta_step(
         inner_loop_functional(  # phi = adapted_params
             layer_mlps,
             support_kv,
-            all_tokens,
             inner_lr_params if inner_lr_params is not None else inner_lr,
             inner_steps,
             loss_fn,
             track_losses=should_log,
             un_rope=un_rope,
             rope_theta=rope_theta,
+            inner_optimizer=inner_optimizer,
+            inner_adam_beta1=inner_adam_beta1,
+            inner_adam_beta2=inner_adam_beta2,
+            inner_adam_eps=inner_adam_eps,
         )
     )
     del support_kv
@@ -361,30 +416,18 @@ def meta_step(
         )
         query_kv = query_out.past_key_values
 
-    if target_perc_params is not None:
-        query_loss, per_layer_losses = compute_compressed_loss(
-            layer_mlps,
-            query_kv,
-            all_tokens,
-            phi,
-            target_perc_params,
-            tau=tau,
-            lambda_compression=lambda_compression,
-            track_per_layer=should_log,
-            un_rope=un_rope,
-            rope_theta=rope_theta,
-        )
-    else:
-        query_loss, per_layer_losses = compute_loss_functional(
-            layer_mlps,
-            query_kv,
-            all_tokens,
-            phi,
-            loss_fn,
-            track_per_layer=should_log,
-            un_rope=un_rope,
-            rope_theta=rope_theta,
-        )
+    query_loss, per_layer_losses = compute_query_loss(
+        layer_mlps,
+        query_kv,
+        phi,
+        loss_fn=loss_fn,
+        target_perc_params=target_perc_params,
+        tau=tau,
+        lambda_compression=lambda_compression,
+        track_per_layer=should_log,
+        un_rope=un_rope,
+        rope_theta=rope_theta,
+    )
 
     del query_kv
     batch_time_ms = (time.time() - batch_start_time) * 1000
@@ -469,12 +512,16 @@ def run_epoch(
     inner_lr = config.inner_lr
     inner_steps = config.inner_steps
     log_interval = config.get("log_interval", 10)
-    batches_per_epoch = config.get("batches_per_epoch", None)
+    batches_per_epoch = config.batches_per_epoch
     grad_accum_steps = config.get("grad_accum_steps", 1)
     tau = config.get("tau", 0.01)
     lambda_compression = config.get("lambda_compression", 0.0)
     un_rope = config.get("un_rope", False)
     rope_theta = config.get("rope_theta", 500_000.0)
+    inner_optimizer = config.get("inner_optimizer", "sgd")
+    inner_adam_beta1 = config.get("inner_adam_beta1", 0.9)
+    inner_adam_beta2 = config.get("inner_adam_beta2", 0.999)
+    inner_adam_eps = config.get("inner_adam_eps", 1e-8)
 
     epoch_loss = 0
     num_batches = 0
@@ -509,6 +556,10 @@ def run_epoch(
             device,
             un_rope=un_rope,
             rope_theta=rope_theta,
+            inner_optimizer=inner_optimizer,
+            inner_adam_beta1=inner_adam_beta1,
+            inner_adam_beta2=inner_adam_beta2,
+            inner_adam_eps=inner_adam_eps,
         )
 
         accumulate_gradients(
@@ -523,6 +574,10 @@ def run_epoch(
         accum_count += 1
         if accum_count >= grad_accum_steps:  # gradient update every 32 batches
             meta_optimizer.step()
+            if target_perc_params is not None:
+                for p in target_perc_params:
+                    if p.requires_grad:
+                        p.data.clamp_(0.0, 1.0)
             meta_optimizer.zero_grad()
             global_step += 1
             accum_count = 0
@@ -547,6 +602,10 @@ def run_epoch(
     # Flush any remaining accumulated gradients at end of epoch
     if accum_count > 0:
         meta_optimizer.step()
+        if target_perc_params is not None:
+            for p in target_perc_params:
+                if p.requires_grad:
+                    p.data.clamp_(0.0, 1.0)
         meta_optimizer.zero_grad()
         global_step += 1
 
@@ -583,7 +642,7 @@ def evaluate_ruler(
 
     if target_perc_params is not None:
         target_perc = [
-            torch.sigmoid(p).item() * 100 for p in target_perc_params
+            p.clamp(0.0, 1.0).item() * 100 for p in target_perc_params
         ]
     else:
         default_perc = training_config.get("target_perc", 50.0)
@@ -841,11 +900,10 @@ def main():
 
     learn_target_perc = training_config.get("learn_target_perc", False)
     default_perc = training_config.get("target_perc", 75.0) / 100.0
-    init_logit = math.log(default_perc / (1.0 - default_perc))
     if learn_target_perc:
         target_perc_params = [
             nn.Parameter(
-                torch.tensor(init_logit, dtype=torch.float32, device=device)
+                torch.tensor(default_perc, dtype=torch.float32, device=device)
             )
             for _ in range(num_layers)
         ]
@@ -855,7 +913,7 @@ def main():
         )
     else:
         target_perc_params = [
-            torch.tensor(init_logit, dtype=torch.float32, device=device)
+            torch.tensor(default_perc, dtype=torch.float32, device=device)
             for _ in range(num_layers)
         ]
         print(
@@ -880,11 +938,10 @@ def main():
         collate_fn=collate_pairs,
     )
 
-    batches_per_epoch = training_config.get("batches_per_epoch", None)
     checkpoint_path = os.path.join(checkpoint_dir, "meta_learned_mlps.pt")
     loss_fn = get_loss_func(training_config.get("loss_func", "mse"))
     print(
-        f"Starting meta-training... (batches_per_epoch: {batches_per_epoch or 'unlimited'})"
+        f"Starting meta-training... (batches_per_epoch: {training_config.batches_per_epoch})"
     )
     layer_mlps, inner_lr_params, target_perc_params = meta_train(
         model=model,
