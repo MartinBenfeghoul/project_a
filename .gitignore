@@ -17,3 +17,5 @@ checkpoints/*
 scripts/lazy_runs
 data/NIAH
 results
+AGENTS.md
+CLAUDE.md

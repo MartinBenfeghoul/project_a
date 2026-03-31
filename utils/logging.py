@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import json
 import os
@@ -175,9 +177,8 @@ def log_batch(
 
     perc_str = ""
     if target_perc_params is not None:
-        mean_perc = (
-            sum(p.item() * 100 for p in target_perc_params)
-            / len(target_perc_params)
+        mean_perc = sum(p.item() * 100 for p in target_perc_params) / len(
+            target_perc_params
         )
         perc_str = f", Target Perc: {mean_perc:.1f}%"
 
@@ -215,7 +216,9 @@ def log_batch(
 
         if target_perc_params is not None:
             perc_values = [p.item() * 100 for p in target_perc_params]
-            log_dict["meta/target_perc_mean"] = sum(perc_values) / len(perc_values)
+            log_dict["meta/target_perc_mean"] = sum(perc_values) / len(
+                perc_values
+            )
             log_dict["meta/target_perc_min"] = min(perc_values)
             log_dict["meta/target_perc_max"] = max(perc_values)
             for layer_idx, pv in enumerate(perc_values):
@@ -224,7 +227,9 @@ def log_batch(
         wandb.log(log_dict, step=global_step)
 
 
-def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params=None):
+def save_checkpoint(
+    layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params=None
+):
     base, ext = os.path.splitext(checkpoint_path)
     epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
     epoch_params = {
@@ -238,13 +243,116 @@ def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_
         epoch_params["target_perc_params"] = [
             p.detach().cpu() for p in target_perc_params
         ]
-        epoch_params["target_perc_format"] = "direct"  # values in percentage-space instead of logit-space
+        epoch_params["target_perc_format"] = (
+            "direct"  # values in percentage-space instead of logit-space
+        )
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
 
+
+def extract_and_save_timing_stats(logger, results):
+    decompose_time = logger.get_log_mean("key_cache_decompose_time", std=True)
+    reconstruct_time = logger.get_log_mean(
+        "key_cache_reconstruct_time", std=True
+    )
+    decompose_relative = logger.get_log_mean(
+        "key_cache_decompose_relative", std=True
+    )
+    reconstruct_relative = logger.get_log_mean(
+        "key_cache_reconstruct_relative", std=True
+    )
+    if decompose_time is not None and reconstruct_time is not None:
+        slowest_op = (
+            "decompose"
+            if decompose_time[0] >= reconstruct_time[0]
+            else "reconstruct"
+        )
+        timing_str = (
+            "Key cache timings:"
+            f" decompose={decompose_time[0]:.4f}+-{decompose_time[1]:.4f}s"
+            f" ({decompose_relative[0]:.2%}+-{decompose_relative[1]:.2%}),"
+            f" reconstruct={reconstruct_time[0]:.4f}+-{reconstruct_time[1]:.4f}s"
+            f" ({reconstruct_relative[0]:.2%}+-{reconstruct_relative[1]:.2%}),"
+            f" slowest={slowest_op}"
+        )
+        print(timing_str)
+        results["results"]["key_cache_timings"] = timing_str
+    return results
+
+
+def extract_and_save_efficiency_stats(
+    logger, results, model_baseline_mem, start_time
+):
+    torch.cuda.synchronize()
+    wall_time_sec = time.perf_counter() - start_time
+    peak_mem = torch.cuda.max_memory_allocated()
+    prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
+    decode_ms = [s.elapsed_time(e) for s, e in logger.decode_events]
+
+    efficiency_metrics = {
+        "eval_wall_time_seconds": wall_time_sec,
+        "eval_wall_time_minutes": wall_time_sec / 60.0,
+        "gpu_peak_mem_gib": peak_mem
+        / (1024**3),  # (weights + kv cache + activations)
+        "gpu_kv_cache_overhead_gib": (peak_mem - model_baseline_mem)
+        / (1024**3),  # (kv cache + activations)
+        "prefill_latency_ms_mean": (
+            sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0
+        ),
+        "decode_latency_ms_mean": (
+            sum(decode_ms) / len(decode_ms) if decode_ms else 0.0
+        ),  # per-token
+        "decode_tokens_per_sec": (
+            1000.0 / (sum(decode_ms) / len(decode_ms)) if decode_ms else 0.0
+        ),
+        "n_prefill_passes": len(prefill_ms),
+        "n_decode_steps": len(decode_ms),
+    }
+    print("Efficiency metrics:", efficiency_metrics)
+    results["results"]["efficiency_metrics"] = efficiency_metrics
+    return results
+
+
 def get_output_path(output_path):
-    i=0
+    i = 0
     while True:
         if not os.path.exists(output_path.format(i)):
             return output_path.format(i)
-        i+=1
+        i += 1
+
+
+def init_timing_stats():
+    return {
+        "decompose_time": 0.0,
+        "reconstruct_time": 0.0,
+        "decompose_relative": 0.0,
+        "reconstruct_relative": 0.0,
+        "decompose_calls": 0,
+        "reconstruct_calls": 0,
+        "most_time_consuming": None,
+    }
+
+
+def sync_cuda(tensor):
+    if tensor.is_cuda:
+        torch.cuda.synchronize(device=tensor.device)
+
+
+def update_timing_stats(cache_cls, operation, elapsed_time):
+    cache_cls.timing_stats[f"{operation}_time"] += elapsed_time
+    cache_cls.timing_stats[f"{operation}_calls"] += 1
+    total_time = (
+        cache_cls.timing_stats["decompose_time"]
+        + cache_cls.timing_stats["reconstruct_time"]
+    )
+    if total_time > 0:
+        cache_cls.timing_stats["decompose_relative"] = (
+            cache_cls.timing_stats["decompose_time"] / total_time
+        )
+        cache_cls.timing_stats["reconstruct_relative"] = (
+            cache_cls.timing_stats["reconstruct_time"] / total_time
+        )
+        cache_cls.timing_stats["most_time_consuming"] = max(
+            ("decompose", "reconstruct"),
+            key=lambda op: cache_cls.timing_stats[f"{op}_time"],
+        )

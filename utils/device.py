@@ -1,4 +1,5 @@
-import torch 
+import torch
+
 
 def get_device(model):
     try:
@@ -17,4 +18,3 @@ def get_device_type():
         return "cuda"
     print("WARNING: CUDA not available. Continuing with CPU.")
     return "cpu"
-
