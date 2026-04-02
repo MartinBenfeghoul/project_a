@@ -22,6 +22,7 @@ class MLP(nn.Module):
         batch_size: int | None = None,
         deterministic_init: bool = True,
         intermediate_activation: str = "gelu",
+        use_residual: bool = False,
     ):
         super().__init__()
 
@@ -30,6 +31,7 @@ class MLP(nn.Module):
         self.per_sequence = per_sequence
         self.num_heads = num_heads
         self.batch_size = batch_size
+        self.use_residual = use_residual
 
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
@@ -43,13 +45,10 @@ class MLP(nn.Module):
         for i in range(num_layers):
             out_dim = head_dim if i == num_layers - 1 else hidden_dim
 
-            if per_sequence:
-                assert batch_size is not None
-                w = nn.Parameter(torch.empty(batch_size, num_heads, curr_dim, out_dim))
-                b = nn.Parameter(torch.empty(batch_size, num_heads, 1, out_dim))
-            else:
-                w = nn.Parameter(torch.empty(1, num_heads, curr_dim, out_dim))
-                b = nn.Parameter(torch.empty(1, num_heads, 1, out_dim))
+            w_shape = (batch_size if per_sequence else 1, num_heads, curr_dim, out_dim)
+            b_shape = (batch_size if per_sequence else 1, num_heads, 1, out_dim)
+            w = nn.Parameter(torch.zeros(*w_shape))
+            b = nn.Parameter(torch.zeros(*b_shape))
 
             nn.init.kaiming_uniform_(w, a=math.sqrt(5))
             nn.init.zeros_(b)
@@ -58,8 +57,13 @@ class MLP(nn.Module):
             self.biases.append(b)
             curr_dim = out_dim
 
+        if use_residual:
+            shape = (batch_size if per_sequence else 1, num_heads, head_dim, head_dim)
+            self.W_linear = nn.Parameter(torch.zeros(*shape))
+
     def forward(self, x):
         # x: [B, H, T, D]
+        x_in = x
         for i in range(self.num_layers):
             w = self.weights[i]
             b = self.biases[i]
@@ -68,5 +72,8 @@ class MLP(nn.Module):
 
             if i < self.num_layers - 1:
                 x = self.intermediate_activation(x)
+
+        if self.use_residual:
+            x = x + torch.matmul(x_in, self.W_linear)
 
         return x

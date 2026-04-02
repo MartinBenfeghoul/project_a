@@ -1,5 +1,5 @@
 from .metrics import eval_model, avg_nll, clean, cosine_loss, get_loss_func
-from .model import get_model_and_tokenizer, clone_mlp_params
+from .model import get_model_and_tokenizer, clone_mlp_params, extract_kv_linear_init
 from .kv_generator import generate_kv_batched
 from .matrix_decomposition import truncated_svd, full_svd, learn_lora_matrix
 from .dataloader import (

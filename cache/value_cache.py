@@ -33,6 +33,9 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
         global_compression: bool = False,
+        use_residual: bool = False,
+        intermediate_activation: str = 'gelu',
+        W_linear_init: torch.Tensor | None = None,
     ):
         super().__init__()
 
@@ -53,6 +56,9 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
         self.un_rope = un_rope
         self.rope_theta = rope_theta
+        self.use_residual = use_residual
+        self.W_linear_init = W_linear_init
+        self.intermediate_activation = intermediate_activation
 
         self.mlp = None
         self.indices = None
@@ -81,10 +87,17 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             per_sequence=self.per_sequence,
             batch_size=value_states.shape[0] if self.per_sequence else None,
             deterministic_init=self.meta_weights is None,
+            use_residual=self.use_residual,
             ).to(device=value_states.device, dtype=value_states.dtype)
 
         if self.meta_weights is not None:
             self.mlp.load_state_dict(self.meta_weights)
+
+        if self.use_residual and self.W_linear_init is not None:
+            with torch.no_grad():
+                self.mlp.W_linear.copy_(
+                    self.W_linear_init.to(device=value_states.device, dtype=value_states.dtype)
+                )
     
     def train_mlp(self, keys: torch.Tensor) -> None:
         with torch.enable_grad():
@@ -290,6 +303,8 @@ class MLPValueCache(SingleTensorCache):
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
         global_compression: bool = False,
+        use_residual: bool = False,
+        W_linear_per_layer: list[torch.Tensor] | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -312,6 +327,18 @@ class MLPValueCache(SingleTensorCache):
         self.un_rope = un_rope
         self.rope_theta = rope_theta
         self.global_compression = global_compression
+        self.use_residual = use_residual
+        self.W_linear_per_layer = W_linear_per_layer
+
+        if use_residual and W_linear_per_layer is not None:
+            if not un_rope:
+                raise ValueError(
+                    "use_residual with W_linear_per_layer initialisation requires un_rope=True."
+                )
+            if normalise_keys:
+                raise ValueError(
+                    "use_residual with W_linear_per_layer init is incompatible with normalise_keys=True."
+                )
         self._global_compression_done = False
         self.comp_ratio = 0
 
@@ -352,6 +379,8 @@ class MLPValueCache(SingleTensorCache):
             un_rope=self.un_rope,
             rope_theta=self.rope_theta,
             global_compression=self.global_compression,
+            use_residual=self.use_residual,
+            W_linear_init=self.W_linear_per_layer[layer_idx] if self.W_linear_per_layer is not None else None,
         )
 
     def _run_global_compression(self):

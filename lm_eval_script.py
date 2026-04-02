@@ -15,6 +15,7 @@ from cache import CompressedCache
 from utils import (
     Logger,
     get_model_and_tokenizer,
+    extract_kv_linear_init,
     get_device,
     get_device_type,
     list_of_strings,
@@ -199,7 +200,11 @@ def main(args):
         "un_rope": args.un_rope,
         "rope_theta": args.rope_theta,
         "global_compression": args.global_compression,
+        "use_residual": args.use_residual,
+        "intermediate_activation": args.intermediate_activation,
     }
+    if args.use_residual and args.v_cache_type == "mlp":
+        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model)
 
     model.eval()
 
@@ -332,6 +337,7 @@ def parse_args():
     parser.add_argument("--global_compression", action="store_true", help="Pool errors across all layers and apply a single global threshold instead of per-layer thresholds.")
     parser.add_argument("--un_rope", action="store_true", help="Undo RoPE on keys before MLP training and inference.")
     parser.add_argument("--rope_theta", type=float, default=500_000.0, help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).")
+    parser.add_argument("--use_residual", action="store_true", help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.")
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:
