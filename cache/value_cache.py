@@ -33,6 +33,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
         global_compression: bool = False,
+        normalise_keys: bool = False,
         use_residual: bool = False,
         intermediate_activation: str = 'gelu',
         W_linear_init: torch.Tensor | None = None,
@@ -56,6 +57,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
         self.un_rope = un_rope
         self.rope_theta = rope_theta
+        self.normalise_keys = normalise_keys
         self.use_residual = use_residual
         self.W_linear_init = W_linear_init
         self.intermediate_activation = intermediate_activation
@@ -68,6 +70,17 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.compressed_len = 0
         self.rope_cos: torch.Tensor | None = None
         self.rope_sin: torch.Tensor | None = None
+        self.key_mean: torch.Tensor | None = None
+        self.key_std: torch.Tensor | None = None
+
+    def _normalise_keys(self, keys: torch.Tensor) -> torch.Tensor:
+        if not self.normalise_keys:
+            return keys
+        if self.prefill:
+            self.key_mean = keys.mean(dim=2, keepdim=True)
+            self.key_std = keys.std(dim=2, keepdim=True).clamp(min=1e-6)
+        return (keys - self.key_mean) / self.key_std
+
 
     def lazy_initialization(self, value_states: torch.Tensor) -> None:
         
@@ -88,6 +101,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             batch_size=value_states.shape[0] if self.per_sequence else None,
             deterministic_init=self.meta_weights is None,
             use_residual=self.use_residual,
+            intermediate_activation=self.intermediate_activation
             ).to(device=value_states.device, dtype=value_states.dtype)
 
         if self.meta_weights is not None:
@@ -238,6 +252,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         
         keys = cache_kwargs["keys"]
         keys_for_mlp = self._unrope(keys, cache_kwargs)
+        keys_for_mlp = self._normalise_keys(keys_for_mlp)
         values = super().update(value_states)
 
         if self.prefill:
@@ -303,8 +318,10 @@ class MLPValueCache(SingleTensorCache):
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
         global_compression: bool = False,
+        normalise_keys: bool = False,
         use_residual: bool = False,
         W_linear_per_layer: list[torch.Tensor] | None = None,
+        intermediate_activation: str = 'gelu',
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -327,8 +344,10 @@ class MLPValueCache(SingleTensorCache):
         self.un_rope = un_rope
         self.rope_theta = rope_theta
         self.global_compression = global_compression
+        self.normalise_keys = normalise_keys
         self.use_residual = use_residual
         self.W_linear_per_layer = W_linear_per_layer
+        self.intermediate_activation = intermediate_activation
 
         if use_residual and W_linear_per_layer is not None:
             if not un_rope:
@@ -379,8 +398,10 @@ class MLPValueCache(SingleTensorCache):
             un_rope=self.un_rope,
             rope_theta=self.rope_theta,
             global_compression=self.global_compression,
+            normalise_keys=self.normalise_keys,
             use_residual=self.use_residual,
             W_linear_init=self.W_linear_per_layer[layer_idx] if self.W_linear_per_layer is not None else None,
+            intermediate_activation=self.intermediate_activation,
         )
 
     def _run_global_compression(self):
