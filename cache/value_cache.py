@@ -145,7 +145,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     for p, b in zip(self.mlp.biases, biases):
                         p.copy_(b)
             else:
-                all_params = list(self.mlp.parameters())
+                all_params = [p for name, p in self.mlp.named_parameters() if name != "W_linear"]
                 optimizer = self.optimizer_cls(all_params, lr=self.lr)
                 for _ in range(self.num_epochs):
                     optimizer.zero_grad()
@@ -154,6 +154,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     loss = self.loss_func(v_hat, values)
                     loss.backward()
                     optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
     def compress(self, keys: torch.Tensor) -> None:
         v_approx = self.mlp(keys)
