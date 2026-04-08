@@ -48,14 +48,14 @@ def extract_kv_linear_init(model) -> list[torch.Tensor]:
     W_v = W_v_raw.view(len(layers), num_kv_heads, head_dim, cfg.hidden_size).transpose(-1, -2)
 
     # flatten L*H for a single batched pinv call
-    LH = L * num_kv_heads
+    LH = len(layers) * num_kv_heads
     W_k_flat = W_k.reshape(LH, cfg.hidden_size, head_dim).float()
     W_v_flat = W_v.reshape(LH, cfg.hidden_size, head_dim).float()
 
     W_linear = (torch.linalg.pinv(W_k_flat) @ W_v_flat).to(W_k_raw.dtype)
 
-    W_linear = W_linear.view(L, num_kv_heads, head_dim, head_dim)
-    return [W_linear[i].unsqueeze(0) for i in range(L)]
+    W_linear = W_linear.view(len(layers), num_kv_heads, head_dim, head_dim)
+    return [W_linear[i].unsqueeze(0) for i in range(len(layers))]
 
 
 def clone_mlp_params(layer_mlps):
