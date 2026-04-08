@@ -1,4 +1,4 @@
-from .cache import SingleTensorCache, SingleTensorDynamicLayer
+from .base import SingleTensorCache, SingleTensorDynamicLayer
 from torch.optim import Adam, SGD
 from torch.nn.functional import mse_loss
 from torch.func import functional_call

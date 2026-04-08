@@ -25,7 +25,7 @@ from utils.logging import (
     update_timing_stats,
     sync_cuda,
 )
-from .cache import SingleTensorCache
+from .base import SingleTensorCache
 
 
 def get_expected_seq_len(cache_kwargs):

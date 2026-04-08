@@ -250,7 +250,7 @@ def save_checkpoint(
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
 
 
-def extract_and_save_timing_stats(logger, results):
+def extract_and_save_stats(logger, results):
     decompose_time = logger.get_log_mean("key_cache_decompose_time", std=True)
     reconstruct_time = logger.get_log_mean(
         "key_cache_reconstruct_time", std=True
@@ -277,31 +277,30 @@ def extract_and_save_timing_stats(logger, results):
         )
         print(timing_str)
         results["results"]["key_cache_timings"] = timing_str
-    return results
 
-
-def extract_and_save_event_stats(logger, results):
     n_events_stats = logger.get_log_mean("n_events", std=True)
     avg_event_size_stats = logger.get_log_mean("avg_event_size", std=True)
-    if n_events_stats is None or avg_event_size_stats is None:
-        return results
+    if n_events_stats is not None and avg_event_size_stats is not None:
+        n_events, n_events_std = (
+            float(n_events_stats[0]),
+            float(n_events_stats[1]),
+        )
+        avg_event_size, avg_event_size_std = (
+            float(avg_event_size_stats[0]),
+            float(avg_event_size_stats[1]),
+        )
+        results["results"]["event_stats"] = {
+            "n_events": n_events,
+            "n_events_std": n_events_std,
+            "avg_event_size": avg_event_size,
+            "avg_event_size_std": avg_event_size_std,
+        }
+        print(
+            f"Logged an average of {n_events:.2f}+/-{n_events_std:.2f}"
+            f" events with average size of"
+            f" {avg_event_size:.2f}+/-{avg_event_size_std:.2f} tokens"
+        )
 
-    n_events, n_events_std = (
-        float(n_events_stats[0]), float(n_events_stats[1])
-    )
-    avg_event_size, avg_event_size_std = (
-        float(avg_event_size_stats[0]), float(avg_event_size_stats[1])
-    )
-    results["results"]["event_stats"] = {
-        "n_events": n_events,
-        "n_events_std": n_events_std,
-        "avg_event_size": avg_event_size,
-        "avg_event_size_std": avg_event_size_std,
-    }
-    print(
-        f"Logged an average of {n_events:.2f}+/-{n_events_std:.2f} events"
-        f" with average size of {avg_event_size:.2f}+/-{avg_event_size_std:.2f} tokens"
-    )
     return results
 
 

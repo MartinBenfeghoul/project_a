@@ -17,8 +17,7 @@ from utils import (
     get_device_type,
     list_of_strings,
     get_output_path,
-    extract_and_save_event_stats,
-    extract_and_save_timing_stats,
+    extract_and_save_stats,
     extract_and_save_efficiency_stats,
 )
 
@@ -236,8 +235,7 @@ def main(args):
 
     print(make_table(results))
 
-    results = extract_and_save_timing_stats(logger, results)
-    results = extract_and_save_event_stats(logger, results)
+    results = extract_and_save_stats(logger, results)
     if args.log_efficiency_metrics:
         results = extract_and_save_efficiency_stats(
             logger, results, model_baseline_mem, start_time
