@@ -21,6 +21,7 @@ def get_output_path(output_path):
     for i in range(100):
         if not os.path.exists(output_path.format(i)):
             return output_path.format(i)
+    raise RuntimeError(f"No free output path found using template: {output_path!r}")
 
 def print_dict(d, prefix=''):
     """Prints a dictionary in a readable format."""
