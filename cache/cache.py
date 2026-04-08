@@ -6,9 +6,6 @@ from transformers.cache_utils import (
     PreTrainedConfig,
 )
 
-from .base import SingleTensorDynamicLayer, SingleTensorCache  # noqa: F401
-
-
 def get_cache(cache_type, CACHE_CLASSES, verbose=True):
     if cache_type not in CACHE_CLASSES:
         raise ValueError(f"Invalid cache type: {cache_type}")
@@ -44,7 +41,7 @@ class CompressedCache:
             value_cache_kwargs = dict(value_cache_kwargs)
 
         # local import to avoid circular import at module load
-        from .key_cache import KEY_CACHE_CLASSES
+        from .keys import KEY_CACHE_CLASSES
 
         key_cache_type = key_cache_kwargs.pop("cache_type")
         self.key_cache = get_cache(
@@ -54,7 +51,7 @@ class CompressedCache:
             **key_cache_kwargs,
         )
 
-        from .value_cache import VALUE_CACHE_CLASSES
+        from .values import VALUE_CACHE_CLASSES
 
         value_cache_type = value_cache_kwargs.pop("cache_type")
         self.value_cache = get_cache(

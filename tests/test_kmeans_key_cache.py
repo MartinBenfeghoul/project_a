@@ -1,6 +1,6 @@
 import torch
 
-from cache.key_cache import KMeansLRKCache
+from cache.keys import KMeansLRKCache
 
 
 def build_cache(**kwargs):

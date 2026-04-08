@@ -6,7 +6,7 @@ from transformers.cache_utils import (
     Iterable,
 )
 
-from utils import inverse_rope, apply_rope, compute_rope_cos_sin
+from utils.rope import inverse_rope, apply_rope, compute_rope_cos_sin
 
 
 class RopeLayerMixin:
