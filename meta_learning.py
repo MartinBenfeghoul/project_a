@@ -656,7 +656,7 @@ def evaluate_ruler(
         "energy_threshold": 1.0,
         "rank_selection": "comp_ratio",
         "lr": 1e-2,
-        "n_iter": 3,
+        "decomp_n_iter": 3,
         "gamma": 3.0,
         "min_size": 8.0,
         "unrope_keys": training_config.get("un_rope", False),
