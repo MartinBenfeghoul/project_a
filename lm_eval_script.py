@@ -372,7 +372,7 @@ def parse_args():
     parser.add_argument(
         "--rope_theta",
         type=float,
-        default=500_000.0,
+        default=None,  # TODO: set default based on model config if not passed
         help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).",
     )
 
