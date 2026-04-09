@@ -1,9 +1,8 @@
 import time
+from typing import Any
 
 import torch
 import torch.nn.functional as F
-
-from transformers.cache_utils import Any
 
 from utils.matrix_decomposition import (
     DECOMP_METHODS,
