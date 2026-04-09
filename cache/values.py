@@ -21,6 +21,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         target_perc: float | None = None,
         threshold: float | None = None,
         optimizer_cls: str = "adam",
+        intermediate_activation: str = "gelu",
         num_epochs: int = 5,
         lr: float = 1.0e-3,
         loss_func: str = "mse",
@@ -38,6 +39,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.per_sequence = per_sequence
         self.target_perc = target_perc
         self.threshold = threshold
+        self.intermediate_activation = intermediate_activation
         self.global_compression = global_compression
 
         self.loss_func = LOSS_FUNC[loss_func]
@@ -78,7 +80,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             per_sequence=self.per_sequence,
             batch_size=value_states.shape[0] if self.per_sequence else None,
             deterministic_init=self.meta_weights is None,
-        ).to(device=value_states.device, dtype=value_states.dtype)
+            intermediate_activation=self.intermediate_activation,
+            ).to(device=value_states.device, dtype=value_states.dtype)
 
         if self.meta_weights is not None:
             self.mlp.load_state_dict(self.meta_weights)
@@ -274,6 +277,7 @@ class MLPValueCache(SingleTensorCache):
         hidden_factors_per_mlp: list[int],
         num_heads_per_mlp: list[int],
         target_perc: list[float],
+        intermediate_activation: str = "gelu",
         target_model_num_heads: int = 8,
         per_sequence: bool = False,
         lr: float = 1e-3,
@@ -299,6 +303,7 @@ class MLPValueCache(SingleTensorCache):
         self.hidden_factors_per_mlp = hidden_factors_per_mlp
         self.num_heads_per_mlp = num_heads_per_mlp
         self.target_perc = target_perc
+        self.intermediate_activation = intermediate_activation
         self.per_sequence = per_sequence
 
         self.target_model_num_heads = target_model_num_heads
@@ -340,9 +345,8 @@ class MLPValueCache(SingleTensorCache):
             mlp_num_layers=self.num_layers_per_mlp[layer_idx],
             mlp_hidden_factor=self.hidden_factors_per_mlp[layer_idx],
             mlp_num_heads=self.num_heads_per_mlp[layer_idx],
-            target_perc=(
-                None if self.global_compression else self.target_perc[layer_idx]
-            ),
+            intermediate_activation=self.intermediate_activation,
+            target_perc=None if self.global_compression else self.target_perc[layer_idx],
             per_sequence=self.per_sequence,
             loss_func=self.loss_func,
             num_epochs=self.num_epochs,
