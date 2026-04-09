@@ -58,8 +58,7 @@ class MLP(nn.Module):
             curr_dim = out_dim
 
         if use_residual:
-            shape = (batch_size if per_sequence else 1, num_heads, head_dim, head_dim)
-            self.W_linear = nn.Parameter(torch.zeros(*shape))
+            self.W_linear = nn.Parameter(torch.zeros(num_heads, head_dim, num_heads, head_dim))
 
     def forward(self, x):
         # x: [B, H, T, D]
@@ -74,6 +73,6 @@ class MLP(nn.Module):
                 x = self.intermediate_activation(x)
 
         if self.use_residual:
-            x = x + torch.matmul(x_in, self.W_linear)
+            x = x + torch.einsum('bhtd,hdqe->bqte', x_in, self.W_linear)
 
         return x
