@@ -203,8 +203,9 @@ def main(args):
         "normalise_keys": args.normalise_keys,
         "use_residual": args.use_residual,
         "intermediate_activation": args.intermediate_activation,
+        "linear_only": args.linear_only,
     }
-    if args.use_residual and args.v_cache_type == "mlp":
+    if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model)
 
     model.eval()
@@ -341,6 +342,7 @@ def parse_args():
     parser.add_argument("--normalise_keys", action="store_true", help="Normalise keys (z-score over token dim, per head) before passing to the MLP.")
     parser.add_argument("--use_residual", action="store_true", help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.")
     parser.add_argument("--intermediate_activation", type=str, default='gelu', help="The activation function for the MLP in the value cache.")
+    parser.add_argument("--linear_only", action="store_true", help="Recover values directly from W_linear_init (keys @ pinv(W_k) @ W_v), skipping MLP training entirely. Requires --un_rope.")
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:
