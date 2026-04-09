@@ -1,10 +1,7 @@
 import warnings
 import torch
 
-from transformers.cache_utils import (
-    Any,
-    Iterable,
-)
+from typing import Any, Iterable
 
 from utils.rope import inverse_rope, apply_rope, compute_rope_cos_sin
 
