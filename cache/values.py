@@ -172,6 +172,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         errors = self.loss_func(self.tensor, v_approx, reduction="none").mean(
             dim=-1
         )
+        errors = self.loss_func(self.tensor, v_approx, reduction='none').mean(dim=-1)
+        self._B, self._H, self._T, _ = keys.shape
         self.compressed_len = self.tensor.shape[2]
 
         if self.global_compression:
@@ -190,7 +192,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         if self.target_perc is not None:
             B = errors.shape[0]
             errors_b = errors.view(B, -1)
-            k = int(errors_b.shape[1] * (self.target_perc / 100))
+            k = max(1, int(errors_b.shape[1] * (self.target_perc / 100)))
             thresh = torch.topk(errors_b, k, largest=False).values[:, -1]
             mask = errors > thresh[:, None, None]
         else:
@@ -204,6 +206,13 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.tensor = self.tensor.new_empty(
             (*self.tensor.shape[:2], 0, self.tensor.shape[3])
         )
+        
+        b, h, t = mask.nonzero(as_tuple=True)
+        max_index = self._B * self._H * self._T - 1
+        idx_dtype = torch.int32 if max_index < 2**31 else torch.int64
+        self.indices = (b * (self._H * self._T) + h * self._T + t).to(idx_dtype)
+        self.value_residuals = (self.tensor[b, h, t] - v_approx[b, h, t]).detach()
+        self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
         self.is_compressed = True
 
     def decompress(self, keys: torch.Tensor, temp: bool = True) -> torch.Tensor:
@@ -395,8 +404,10 @@ class MLPValueCache(SingleTensorCache):
 
         for layer in self.layers:
             mask = layer.errors > thresh
-            layer.indices = mask.nonzero(as_tuple=True)
-            b, h, t = layer.indices
+            b, h, t = mask.nonzero(as_tuple=True)
+            max_index = self._B * self._H * self._T - 1
+            idx_dtype = torch.int32 if max_index < 2**31 else torch.int64
+            self.indices = (b * (self._H * self._T) + h * self._T + t).to(idx_dtype)
             layer.value_residuals = layer.value_residuals[b, h, t]
             layer.is_compressed = True
 
