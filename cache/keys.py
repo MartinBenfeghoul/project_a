@@ -43,6 +43,10 @@ def check_recon_length(recon_keys, cache_kwargs):
             f"Reconstructed keys have seq_len {recon_keys.size(-2)} "
             f"but cache_position expects {exp_seq_len}."
         )
+    elif exp_seq_len is None:
+        raise ValueError(
+            "Expected sequence length could not be determined from cache_kwargs."
+        )
 
 
 class DecomposedKeysCache(SingleTensorCache):
