@@ -1,6 +1,6 @@
 from .base import SingleTensorCache, SingleTensorDynamicLayer
 from torch.optim import Adam, SGD
-from torch.nn.functional import mse_loss
+from torch.nn.functional import mse_loss, huber_loss
 from torch.func import functional_call
 import torch
 from model.mlp import MLP
