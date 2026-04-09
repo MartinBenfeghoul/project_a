@@ -227,11 +227,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
     def _reset_residuals(self):
         self.is_compressed = False
         self.value_residuals = self.value_residuals.new_empty(0)
-        self.indices = (
-            self.indices[0][:0],
-            self.indices[1][:0],
-            self.indices[2][:0],
-        )
+        self.indices = self.indices.new_empty(0)    
 
     def update(
         self,
