@@ -1,3 +1,4 @@
+import copy
 import torch
 
 from transformers.cache_utils import (
@@ -54,12 +55,28 @@ class CompressedCache:
         from .values import VALUE_CACHE_CLASSES
 
         value_cache_type = value_cache_kwargs.pop("cache_type")
-        self.value_cache = get_cache(
-            value_cache_type, VALUE_CACHE_CLASSES, kwargs.get("verbose", True)
-        )(
-            ddp_cache_data=ddp_cache_data,
-            **value_cache_kwargs,
-        )
+        if value_cache_type in VALUE_CACHE_CLASSES:
+            self.value_cache = get_cache(
+                value_cache_type,
+                VALUE_CACHE_CLASSES,
+                kwargs.get("verbose", True),
+            )(
+                ddp_cache_data=ddp_cache_data,
+                **value_cache_kwargs,
+            )
+        elif value_cache_type in KEY_CACHE_CLASSES:
+            value_cache_kwargs = copy.deepcopy(key_cache_kwargs)
+            value_cache_kwargs["unrope_keys"] = False
+            self.value_cache = get_cache(
+                value_cache_type,
+                KEY_CACHE_CLASSES,
+                kwargs.get("verbose", True),
+            )(
+                ddp_cache_data=ddp_cache_data,
+                **value_cache_kwargs,
+            )
+        else:
+            raise ValueError(f"Invalid cache type: {value_cache_type}")
 
     def update(
         self,
@@ -118,6 +135,8 @@ class CompressedCache:
             v_layer.crop(max_length)
 
     def __getattr__(self, name):
+        # Allow direct access to key_cache attributes where not defined in CompressedCache
+        # TODO: check this makes sense for all attributes we want to expose
         return getattr(self.key_cache, name)
 
     def __iter__(self):
