@@ -424,7 +424,6 @@ class MLPValueCache(SingleTensorCache):
         return values
 
     def calc_compression_ratio(self) -> float:
-
         original_total = 0
         compressed_total = 0
 
@@ -435,8 +434,13 @@ class MLPValueCache(SingleTensorCache):
                 if layer.tensor.numel()
                 else layer.compressed_len
             )
+            t = layer.compressed_len + layer.tensor.shape[2] if layer.tensor.numel() else layer.compressed_len
+            delta_dtype = layer._quantized_delta or layer.tensor.dtype
+            value_dtype_size = torch.finfo(layer.tensor.dtype).bits / 8
+            delta_dtype_size = torch.finfo(delta_dtype).bits / 8
+            index_dtype_size = torch.iinfo(layer.indices.dtype).bits / 8
 
-            original = h * t * d
+            original = h * t * d * value_dtype_size
 
             if not layer.is_compressed:
                 original_total += original
@@ -444,9 +448,14 @@ class MLPValueCache(SingleTensorCache):
                 continue
 
             num_params = sum(p.numel() for p in layer.mlp.parameters())
-            num_stored = layer.indices[0].numel() if layer.is_compressed else 0
+            num_stored = layer.indices.numel() if layer.is_compressed else 0
 
             compressed = num_params + num_stored * d + num_stored * 3
+            compressed = (
+                num_params * value_dtype_size
+                + num_stored * d * delta_dtype_size
+                + num_stored * index_dtype_size
+            )
 
             original_total += original
             compressed_total += compressed
