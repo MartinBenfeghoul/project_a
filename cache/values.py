@@ -215,9 +215,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
         self.is_compressed = True
 
-    def decompress(self, keys: torch.Tensor, temp: bool = True) -> torch.Tensor:
-        values = self.mlp(keys[:, :, : self.compressed_len, :])
-        b, h, t = self.indices
+    def decompress(self, keys: torch.Tensor, reset: bool = False) -> torch.Tensor:
+        values = self.mlp(keys[:, :, :self.compressed_len, :])
+        t = self.indices % self._T
+        b = (self.indices // self._T) // self._H
+        h = (self.indices // self._T) % self._H
         values[b, h, t] += self.value_residuals
         if not temp:
             self.tensor = values
