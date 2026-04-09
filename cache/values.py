@@ -29,6 +29,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         meta_inner_lrs: list | None = None,
         un_rope: bool = False,
         global_compression: bool = False,
+        target_cr: float | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -57,6 +58,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.is_compressed = False
         self.prefill = True
         self.compressed_len = 0
+        self.rope_cos: torch.Tensor | None = None
+        self.rope_sin: torch.Tensor | None = None
+        self.target_cr = target_cr
+        
 
     def lazy_initialization(self, value_states: torch.Tensor) -> None:
 
@@ -148,6 +153,20 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     loss.backward()
                     optimizer.step()
 
+    def compute_new_perc(self, keys):
+        b, h, t, d = keys.shape
+        num_params = sum(p.numel() for p in self.mlp.parameters())
+        delta_dtype = self._quantized_delta or self.tensor.dtype
+        value_dtype_size = torch.finfo(self.tensor.dtype).bits / 8
+        delta_dtype_size = torch.finfo(delta_dtype).bits / 8
+        index_dtype_size = torch.iinfo(torch.int32).bits / 8
+        orig = b * h * t * d * value_dtype_size
+        target_compressed = orig / self.target_cr
+        allowed_delta_storage = target_compressed - (num_params * value_dtype_size)
+        n_deltas = int(allowed_delta_storage / (d * delta_dtype_size + index_dtype_size))
+        n_deltas = max(0, min(n_deltas, b * h * t))
+        self.target_perc = 100 * (1 - (n_deltas / (b * h * t)))
+
     def compress(self, keys: torch.Tensor) -> None:
         v_approx = self.mlp(keys)
         errors = self.loss_func(self.tensor, v_approx, reduction="none").mean(
@@ -225,6 +244,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         values = super().update(value_states)
 
         if self.prefill:
+            if not self._compress:
+                return values
+            if self.target_cr:
+                self.compute_new_perc(keys_for_mlp)
             self.train_mlp(keys_for_mlp)
             self.compress(keys_for_mlp)
             self.prefill = False
@@ -288,6 +311,7 @@ class MLPValueCache(SingleTensorCache):
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
         global_compression: bool = False,
+        target_cr: float | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -318,6 +342,7 @@ class MLPValueCache(SingleTensorCache):
         self.global_compression = global_compression
         self._global_compression_done = False
         self.comp_ratio = 0
+        self.target_cr = target_cr
 
         if meta_weights_path is not None:
             checkpoint = torch.load(meta_weights_path, map_location="cpu")
@@ -357,6 +382,7 @@ class MLPValueCache(SingleTensorCache):
             un_rope=self.un_rope,
             rope_theta=self.rope_theta,
             global_compression=self.global_compression,
+            target_cr=self.target_cr,
         )
 
     def _run_global_compression(self):
