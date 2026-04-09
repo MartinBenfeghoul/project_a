@@ -17,7 +17,7 @@ from utils import (
     get_device_type,
     list_of_strings,
     get_output_path,
-    extract_and_save_timing_stats,
+    extract_and_save_stats,
     extract_and_save_efficiency_stats,
 )
 
@@ -76,10 +76,14 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                 else:
                     label_ed = None
                 logits = output.logits
-                pkv.update_events(
+                n_events = pkv.update_events(
                     logits[..., : -1 - uncompressed_window, :],
                     input_ids[..., 1:label_ed],
                 )
+                if n_events is not None and n_events > 0:
+                    avg_event_size = seq_len / n_events
+                    logger.add_log("n_events", n_events)
+                    logger.add_log("avg_event_size", avg_event_size)
             if _cuda:
                 logger.prefill_events.append((_start_evt[0], end_evt))
         else:
@@ -126,17 +130,28 @@ def main(args):
     logger.decode_events = []
     logger.recorded_k_timing = False
 
+    rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
+
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
+        "local_window": args.local_window,
         "log_timing_stats": args.log_key_cache_timing,
         "comp_ratio": args.comp_ratio,
         "energy_threshold": args.energy_threshold,
         "rank_selection": args.rank_selection,
         "lr": args.k_lr,
-        "n_iter": args.n_iter,
+        "decomp_n_iter": args.decomp_n_iter,
         "gamma": args.gamma,
         "min_size": 8,
+        "kmeans_cluster_size": args.kmeans_cluster_size,
+        "kmeans_n_iter": args.kmeans_n_iter,
+        "kmeans_init": args.kmeans_init,
+        "kmeans_dtype": args.kmeans_dtype,
+        "kmeans_avg_heads": args.kmeans_avg_heads,
+        "kmeans_per_head": args.kmeans_per_head,
+        "unrope_keys": args.un_rope,
+        "rope_theta": rope_theta,
     }
 
     num_layers = model.config.num_hidden_layers
@@ -160,7 +175,7 @@ def main(args):
         "num_epochs": args.num_epochs,
         "meta_weights_path": args.meta_weights_path,
         "un_rope": args.un_rope,
-        "rope_theta": args.rope_theta,
+        "rope_theta": rope_theta,
         "global_compression": args.global_compression,
     }
 
@@ -179,7 +194,8 @@ def main(args):
         model_baseline_mem = torch.cuda.memory_allocated()
 
     pre_hook, post_hook = make_hooks(
-        logger, measure_latency=args.log_efficiency_metrics
+        logger,
+        measure_latency=args.log_efficiency_metrics,
     )
     model.register_forward_pre_hook(pre_hook, with_kwargs=True)
     model.register_forward_hook(post_hook, with_kwargs=True)
@@ -219,11 +235,12 @@ def main(args):
 
     print(make_table(results))
 
-    results = extract_and_save_timing_stats(logger, results)
+    results = extract_and_save_stats(logger, results)
     if args.log_efficiency_metrics:
         results = extract_and_save_efficiency_stats(
             logger, results, model_baseline_mem, start_time
         )
+    results["results"]["config"] = vars(args)
 
     if args.debug:
         print("Debug mode — not saving results.")
@@ -292,8 +309,29 @@ def parse_args():
         choices=["comp_ratio", "energy"],
     )
     parser.add_argument("--k_lr", type=float, default=1e-2)
-    parser.add_argument("--n_iter", type=int, default=3)
+    parser.add_argument("--decomp_n_iter", type=int, default=3)
     parser.add_argument("--gamma", type=float, default=3.0)
+    parser.add_argument("--local_window", type=int, default=0)
+    parser.add_argument(
+        "--kmeans_cluster_size",
+        type=float,
+        default=None,
+    )
+    parser.add_argument("--kmeans_n_iter", type=int, default=3)
+    parser.add_argument(
+        "--kmeans_init",
+        type=str,
+        default="infllm",
+        choices=["infllm", "random", "kmeans++"],
+    )
+    parser.add_argument(
+        "--kmeans_dtype",
+        type=str,
+        default="float32",
+        choices=["float16", "float32", "bfloat16"],
+    )
+    parser.add_argument("--kmeans_avg_heads", action="store_true")
+    parser.add_argument("--kmeans_per_head", action="store_true")
     parser.add_argument("--log_key_cache_timing", action="store_true")
 
     # value cache
@@ -334,7 +372,7 @@ def parse_args():
     parser.add_argument(
         "--rope_theta",
         type=float,
-        default=500_000.0,
+        default=None,  # TODO: set default based on model config if not passed
         help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).",
     )
 

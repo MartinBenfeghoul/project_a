@@ -118,7 +118,7 @@ def inner_loop_functional(
     loss_fn=F.mse_loss,
     track_losses=False,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
     inner_optimizer="sgd",
     inner_adam_beta1=0.9,
     inner_adam_beta2=0.999,
@@ -206,7 +206,7 @@ def compute_loss_functional(
     loss_fn=F.mse_loss,
     track_per_layer=False,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
 ):
     total_loss = 0
     per_layer_losses = [] if track_per_layer else None
@@ -240,7 +240,7 @@ def compute_query_loss(
     lambda_compression=0.0,
     track_per_layer=False,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
 ):
     if target_perc_params is not None:
         return compute_compressed_loss(
@@ -285,7 +285,7 @@ def compute_compressed_loss(
     lambda_compression=0.0,
     track_per_layer=False,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
 ):
     total_loss = 0
     per_layer_losses = [] if track_per_layer else None
@@ -371,7 +371,7 @@ def meta_step(
     should_log,
     device,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
     inner_optimizer="sgd",
     inner_adam_beta1=0.9,
     inner_adam_beta2=0.999,
@@ -656,9 +656,11 @@ def evaluate_ruler(
         "energy_threshold": 1.0,
         "rank_selection": "comp_ratio",
         "lr": 1e-2,
-        "n_iter": 3,
+        "decomp_n_iter": 3,
         "gamma": 3.0,
         "min_size": 8.0,
+        "unrope_keys": training_config.get("un_rope", False),
+        "rope_theta": training_config.get("rope_theta", 500_000.0),
     }
 
     value_cache_kwargs = {

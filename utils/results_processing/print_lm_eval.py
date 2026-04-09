@@ -1,5 +1,6 @@
 import json
 import argparse
+from copy import deepcopy
 
 LM_EVAL_TASKS = {
     "piqa": "acc,none",
@@ -44,9 +45,27 @@ LONGBENCH_TASKS = {
     "longbench_triviaqa": "qa_f1_score,none",
 }
 
-
 ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS}
 
+KEY_CONFIGS = [
+    'model_name',
+    'tasks',
+    'k_cache_type',
+    'decomposition_method',
+    'comp_ratio',
+    'energy_threshold',
+    'rank_selection',
+    'decomp_n_iter',
+    'gamma',
+    'local_window',
+    'kmeans_cluster_size',
+    'kmeans_n_iter',
+    'kmeans_init',
+    'kmeans_dtype',
+    'kmeans_avg_heads',
+    'kmeans_per_head',
+    'un_rope',
+]
 
 def get_task_dict(benchmark_name):
     if benchmark_name == "longbench":
@@ -77,6 +96,25 @@ def process_rouge(task_results, metric):
     return task_results[metric]
 
 
+def get_nested_value(config, key_path):
+    keys = key_path.split('.')
+    value = config
+    for k in keys:
+        value = value.get(k, None)
+        if value is None:
+            return None
+    return value
+
+def print_configs(config):
+    key_configs = deepcopy(KEY_CONFIGS)
+    print(" ===== KEY CONFIGS ===== ")
+    for key in key_configs:
+        value = get_nested_value(config, key)
+        if value is not None:
+            print(f"{key}: {value}")
+    print("\n ======= RESULTS ======= ")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Print LM evaluation results.")
     parser.add_argument(
@@ -94,15 +132,28 @@ def parse_args():
         choices=["lm_eval", "ruler", "longbench"],
         help="Benchmark to use for evaluation. Default is 'lm_eval'.",
     )
+    parser.add_argument(
+        "-s",
+        "--show_key_configs",
+        action='store_true',
+        help="Whether to show key arguments."
+    )
     return parser.parse_args()
 
 
-def main(benchmark, file_path, decimal_points=4):
+def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
     task_dict = get_task_dict(benchmark)
     # Load the evaluation results from the JSON file
     with open(file_path, "r") as f:
         results = json.load(f)
+    
+    if show_key_configs:
+        if 'config' in results:
+            print_configs(results['config'])
+        else:
+            print("No config found in results.\n")
 
+       
     for task, metric in task_dict.items():
         if task in results:
             if isinstance(metric, list):
@@ -153,9 +204,17 @@ def main(benchmark, file_path, decimal_points=4):
             else gpu_kv_cache_overhead
         )
 
+    events_stats = results.get("event_stats", {})
+    if events_stats:
+        print("\nEvents stats:")
+        print(f"{events_stats.get('n_events', 'N/A'):.0f}")
+        print(f"{events_stats.get('n_events_std', 'N/A'):.0f}")
+        print(f"{events_stats.get('avg_event_size', 'N/A'):.0f}")
+        print(f"{events_stats.get('avg_event_size_std', 'N/A'):.0f}")
+
 
 if __name__ == "__main__":
     args = parse_args()
     file_path = args.file_path
 
-    main(args.benchmark, file_path)
+    main(args.benchmark, file_path, show_key_configs=args.show_key_configs)

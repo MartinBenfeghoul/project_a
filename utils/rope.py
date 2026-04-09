@@ -8,11 +8,16 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def inverse_rope(
-    keys: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
-    """Undo RoPE: k = k_rotated * cos - rotate_half(k_rotated) * sin"""
-    return keys * cos - rotate_half(keys) * sin
+    """Undo RoPE: x = x_rotated * cos - rotate_half(x_rotated) * sin"""
+    return x * cos - rotate_half(x) * sin
 
+def apply_rope(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
+    """Apply RoPE: x_rotated = x * cos + rotate_half(x) * sin"""
+    return x * cos + rotate_half(x) * sin
 
 def compute_rope_cos_sin(
     seq_len: int,

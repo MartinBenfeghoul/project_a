@@ -20,9 +20,9 @@ from .logging import (
     init_wandb,
     save_checkpoint,
     log_batch,
-    extract_and_save_timing_stats,
+    extract_and_save_stats,
     extract_and_save_efficiency_stats,
     get_output_path,
 )
-from .rope import inverse_rope, compute_rope_cos_sin
+from .rope import inverse_rope, apply_rope, compute_rope_cos_sin
 from .device import get_device, get_device_type
