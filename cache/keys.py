@@ -141,9 +141,7 @@ class DecomposedKeysCache(SingleTensorCache):
         super().batch_select_indices(indices)
         indices_list = indices.tolist()
         self._apply_lr_keys_batch_op(
-            lambda layer_segments: [
-                layer_segments[idx] for idx in indices_list
-            ]
+            lambda layer_segments: [layer_segments[idx] for idx in indices_list]
         )
 
     def _get_suffix_start(self, keys, segment_ranges=None):
@@ -190,8 +188,10 @@ class DecomposedKeysCache(SingleTensorCache):
         decomp_keys = keys[..., :suffix_start, :]
         if self.unrope_keys:
             decomp_keys = self.layers[layer_idx]._undo_rope(
-                decomp_keys, cache_kwargs,
-                prefill=self.prefill, compressed_len=suffix_start,
+                decomp_keys,
+                cache_kwargs,
+                prefill=self.prefill,
+                compressed_len=suffix_start,
             )
         trimmed_segment_ranges = self._trim_segment_ranges(
             segment_ranges, suffix_start
@@ -204,7 +204,7 @@ class DecomposedKeysCache(SingleTensorCache):
                 keys_to_decompose = decomp_keys
             else:
                 keys_to_decompose = keys
-            
+
             layer_segments = decompose_to_segment_store(
                 keys_to_decompose,
                 self.decompose,
@@ -229,7 +229,8 @@ class DecomposedKeysCache(SingleTensorCache):
         recon_keys = reconstruct_segments(self.lr_keys[layer_idx], keys)
         if self.unrope_keys:
             recon_keys = self.layers[layer_idx]._apply_rope(
-                recon_keys, compressed_len=self.compressed_len,
+                recon_keys,
+                compressed_len=self.compressed_len,
             )
         if self.log_timing_stats:
             sync_cuda(recon_keys)
@@ -274,7 +275,9 @@ class SurpriseLRKCache(DecomposedKeysCache):
         min_size: int = 8,
         **kwargs,
     ):
-        super().__init__(*args,**kwargs,
+        super().__init__(
+            *args,
+            **kwargs,
         )
         self.gamma = gamma
         self.min_size = min_size
@@ -421,8 +424,8 @@ class KMeansLRKCache(DecomposedKeysCache):
                 kmeans_init=self.kmeans_init,
                 dtype=self.kmeans_dtype,
             )
-            grouped_prefix, _, inverse_permutation = (
-                group_sequences_by_cluster(flat_prefix, assignments)
+            grouped_prefix, _, inverse_permutation = group_sequences_by_cluster(
+                flat_prefix, assignments
             )
             segment_ranges = build_cluster_segment_ranges(
                 assignments,

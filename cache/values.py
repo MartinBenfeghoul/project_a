@@ -214,8 +214,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         keys = cache_kwargs["keys"]
         if self.un_rope:
             keys_for_mlp = self._undo_rope(
-                keys, cache_kwargs,
-                prefill=self.prefill, compressed_len=self.compressed_len,
+                keys,
+                cache_kwargs,
+                prefill=self.prefill,
+                compressed_len=self.compressed_len,
             )
         else:
             keys_for_mlp = keys

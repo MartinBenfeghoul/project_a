@@ -48,25 +48,26 @@ LONGBENCH_TASKS = {
 ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS}
 
 KEY_CONFIGS = [
-    'model_name',
-    'tasks',
-    'v_cache_type',
-    'k_cache_type',
-    'decomposition_method',
-    'comp_ratio',
-    'energy_threshold',
-    'rank_selection',
-    'decomp_n_iter',
-    'gamma',
-    'local_window',
-    'kmeans_cluster_size',
-    'kmeans_n_iter',
-    'kmeans_init',
-    'kmeans_dtype',
-    'kmeans_avg_heads',
-    'kmeans_per_head',
-    'un_rope',
+    "model_name",
+    "tasks",
+    "v_cache_type",
+    "k_cache_type",
+    "decomposition_method",
+    "comp_ratio",
+    "energy_threshold",
+    "rank_selection",
+    "decomp_n_iter",
+    "gamma",
+    "local_window",
+    "kmeans_cluster_size",
+    "kmeans_n_iter",
+    "kmeans_init",
+    "kmeans_dtype",
+    "kmeans_avg_heads",
+    "kmeans_per_head",
+    "un_rope",
 ]
+
 
 def get_task_dict(benchmark_name):
     if benchmark_name == "longbench":
@@ -98,13 +99,14 @@ def process_rouge(task_results, metric):
 
 
 def get_nested_value(config, key_path):
-    keys = key_path.split('.')
+    keys = key_path.split(".")
     value = config
     for k in keys:
         value = value.get(k, None)
         if value is None:
             return None
     return value
+
 
 def print_configs(config):
     key_configs = deepcopy(KEY_CONFIGS)
@@ -136,8 +138,8 @@ def parse_args():
     parser.add_argument(
         "-s",
         "--show_key_configs",
-        action='store_true',
-        help="Whether to show key arguments."
+        action="store_true",
+        help="Whether to show key arguments.",
     )
     return parser.parse_args()
 
@@ -147,14 +149,13 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
     # Load the evaluation results from the JSON file
     with open(file_path, "r") as f:
         results = json.load(f)
-    
+
     if show_key_configs:
-        if 'config' in results:
-            print_configs(results['config'])
+        if "config" in results:
+            print_configs(results["config"])
         else:
             print("No config found in results.\n")
 
-       
     for task, metric in task_dict.items():
         if task in results:
             if isinstance(metric, list):

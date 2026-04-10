@@ -13,11 +13,13 @@ def inverse_rope(
     """Undo RoPE: x = x_rotated * cos - rotate_half(x_rotated) * sin"""
     return x * cos - rotate_half(x) * sin
 
+
 def apply_rope(
     x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
     """Apply RoPE: x_rotated = x * cos + rotate_half(x) * sin"""
     return x * cos + rotate_half(x) * sin
+
 
 def compute_rope_cos_sin(
     seq_len: int,
