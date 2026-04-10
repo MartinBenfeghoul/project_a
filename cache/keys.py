@@ -348,7 +348,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         *args,
         n_clusters: int = 8,
         kmeans_cluster_size: float | None = None,
-        kmeans_n_iter: int = 3,
+        kmeans_n_iter: int = 8,
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
         kmeans_avg_heads: bool = False,

@@ -50,6 +50,7 @@ ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS}
 KEY_CONFIGS = [
     'model_name',
     'tasks',
+    'v_cache_type',
     'k_cache_type',
     'decomposition_method',
     'comp_ratio',
