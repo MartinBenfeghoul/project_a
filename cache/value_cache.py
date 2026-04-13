@@ -1,11 +1,17 @@
 from .cache import SingleTensorCache, SingleTensorDynamicLayer
 from torch.optim import Adam, SGD
 from torch.nn.functional import mse_loss
-from torch.func import functional_call
 import torch
 from model.mlp import MLP
 from typing import Any
-from utils import inverse_rope, compute_rope_cos_sin
+from utils import (
+    inverse_rope,
+    compute_rope_cos_sin,
+    MetaLearningInit,
+    MetaLearningLayerInit,
+    adapt_mlp_with_meta_lrs
+    )
+
 LOSS_FUNC = {
     'mse': mse_loss
 }
@@ -28,8 +34,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         num_epochs: int = 5,
         lr: float = 1.e-3,
         loss_func: str = "mse",
-        meta_weights: dict | None = None,
-        meta_inner_lrs: list | None = None,
+        meta_init: MetaLearningLayerInit | None = None,
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
         global_compression: bool = False,
@@ -55,8 +60,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.optimizer_cls = OPTIMIZER[optimizer_cls]
         self.num_epochs = num_epochs
         self.lr = lr
-        self.meta_weights = meta_weights
-        self.meta_inner_lrs = meta_inner_lrs
+        self.meta_init = meta_init or MetaLearningLayerInit()
 
         self.un_rope = un_rope
         self.rope_theta = rope_theta
@@ -107,14 +111,14 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 num_heads=self.mlp_num_heads,
                 per_sequence=self.per_sequence,
                 batch_size=value_states.shape[0] if self.per_sequence else None,
-                deterministic_init=self.meta_weights is None,
+                deterministic_init=not self.meta_init.has_weights,
                 use_residual=self.use_residual,
                 per_head_residual=per_head_residual,
                 intermediate_activation=self.intermediate_activation
                 ).to(device=value_states.device, dtype=value_states.dtype)
 
-            if self.meta_weights is not None:
-                self.mlp.load_state_dict(self.meta_weights)
+            if self.meta_init.has_weights:
+                self.mlp.load_state_dict(self.meta_init.weights)
 
             if self.use_residual and self.W_linear_init is not None:
                 with torch.no_grad():
@@ -128,32 +132,18 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         with torch.enable_grad():
             keys = keys.detach()
             values = self.tensor.detach()
-            if self.meta_inner_lrs is not None:
-                n = self.mlp.num_layers
-                # meta_inner_lrs ordered: weights[0..n-1] then biases[0..n-1]
-                weights = [p.detach().clone().requires_grad_(True) for p in self.mlp.weights]
-                biases = [p.detach().clone().requires_grad_(True) for p in self.mlp.biases]
-                weight_lrs = [lr.to(device=keys.device, dtype=keys.dtype) for lr in self.meta_inner_lrs[:n]]
-                bias_lrs = [lr.to(device=keys.device, dtype=keys.dtype) for lr in self.meta_inner_lrs[n:]]
-
-                for _ in range(self.num_epochs):
-                    params = {f"weights.{i}": w for i, w in enumerate(weights)}
-                    params |= {f"biases.{i}": b for i, b in enumerate(biases)}
-                    # keys/values shape: [num_sequences, num_head, num_token, head_dim]
-                    v_hat = functional_call(self.mlp, params, (keys,))
-                    loss = self.loss_func(v_hat, values)
-                    grads = torch.autograd.grad(loss, weights + biases, create_graph=False)
-                    weight_grads, bias_grads = grads[:n], grads[n:]
-                    weights = [w - lr * g for w, lr, g in zip(weights, weight_lrs, weight_grads)]
-                    biases = [b - lr * g for b, lr, g in zip(biases, bias_lrs, bias_grads)]
-                    weights = [w.detach().requires_grad_(True) for w in weights]
-                    biases = [b.detach().requires_grad_(True) for b in biases]
-
-                with torch.no_grad():
-                    for p, w in zip(self.mlp.weights, weights):
-                        p.copy_(w)
-                    for p, b in zip(self.mlp.biases, biases):
-                        p.copy_(b)
+            if self.meta_init.has_inner_lrs:
+                adapt_mlp_with_meta_lrs(
+                    mlp=self.mlp,
+                    keys=keys,
+                    values=values,
+                    loss_func=self.loss_func,
+                    num_epochs=self.num_epochs,
+                    meta_init=self.meta_init,
+                    use_residual=self.use_residual,
+                    freeze_W_linear=self.freeze_W_linear,
+                    early_stopping_tol=self.early_stopping_tol,
+                )
             else:
                 all_params = [p for name, p in self.mlp.named_parameters() if not (self.freeze_W_linear and name == "W_linear")]
                 optimizer = self.optimizer_cls(all_params, lr=self.lr)
@@ -410,26 +400,16 @@ class MLPValueCache(SingleTensorCache):
         self._global_compression_done = False
         self.comp_ratio = 0
 
-        if meta_weights_path is not None:
-            checkpoint = torch.load(meta_weights_path, map_location="cpu")
-            self._meta_weights: dict[int, dict] = {
-                int(k.split("_")[1]): v
-                for k, v in checkpoint.items()
-                if k.startswith("layer_")
-            }
-            if "inner_lr_params" in checkpoint:
-                flat_lrs = checkpoint["inner_lr_params"]
-                self._meta_inner_lrs: dict[int, list] = {}
-                offset = 0
-                for i, n_mlp in enumerate(num_layers_per_mlp):
-                    chunk = 2 * n_mlp
-                    self._meta_inner_lrs[i] = flat_lrs[offset: offset + chunk]
-                    offset += chunk
-            else:
-                self._meta_inner_lrs = {}
-        else:
-            self._meta_weights = {}
-            self._meta_inner_lrs = {}
+        self.meta_init = (
+            MetaLearningInit.from_checkpoint(
+                path=meta_weights_path,
+                num_layers_per_mlp=num_layers_per_mlp,
+                use_residual=use_residual,
+                freeze_W_linear=freeze_W_linear,
+            )
+            if meta_weights_path is not None
+            else MetaLearningInit.empty()
+        )
 
     def _build_layer(self, layer_idx: int) -> MLPValueLayer:
         return MLPValueLayer(
@@ -442,8 +422,7 @@ class MLPValueCache(SingleTensorCache):
             num_epochs=self.num_epochs,
             lr=self.lr,
             optimizer_cls=self.optimizer_cls,
-            meta_weights=self._meta_weights.get(layer_idx),
-            meta_inner_lrs=self._meta_inner_lrs.get(layer_idx),
+            meta_init=self.meta_init.for_layer(layer_idx),
             un_rope=self.un_rope,
             rope_theta=self.rope_theta,
             global_compression=self.global_compression,

@@ -24,3 +24,4 @@ from .logging import (
 )
 from .rope import inverse_rope, compute_rope_cos_sin
 from .device import get_device, get_device_type
+from .meta_learning import MetaLearningInit, MetaLearningLayerInit, adapt_mlp_with_meta_lrs
