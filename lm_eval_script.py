@@ -345,7 +345,7 @@ def parse_args():
     parser.add_argument("--target_cr", type=float, default=None)
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
-    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "adamw", "sgd"])
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)

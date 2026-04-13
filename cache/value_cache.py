@@ -1,5 +1,5 @@
 from .cache import SingleTensorCache, SingleTensorDynamicLayer
-from torch.optim import Adam, SGD
+from torch.optim import Adam, AdamW, SGD
 from torch.nn.functional import mse_loss
 import torch
 from model.mlp import MLP
@@ -18,6 +18,7 @@ LOSS_FUNC = {
 
 OPTIMIZER = {
     'adam': Adam,
+    'adamw': AdamW,
     'sgd': SGD
 }
 
