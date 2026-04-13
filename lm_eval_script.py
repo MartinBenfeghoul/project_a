@@ -262,6 +262,17 @@ def main(args):
         limit=args.limit,
     )
 
+    cr_values = logger.get_log_list("crs")
+    if cr_values:
+        cr_mean, cr_std = logger.get_log_mean("crs", std=True)
+        compression_metrics = {
+            "compression_ratio_mean": float(cr_mean),
+            "compression_ratio_std": float(cr_std),
+            "n_compression_ratio_samples": len(cr_values),
+        }
+        print("Compression metrics:", compression_metrics)
+        results["results"]["compression_metrics"] = compression_metrics
+
     if args.log_efficiency_metrics:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
