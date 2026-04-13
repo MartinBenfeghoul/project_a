@@ -38,6 +38,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         intermediate_activation: str = 'gelu',
         W_linear_init: torch.Tensor | None = None,
         linear_only: bool = False,
+        early_stopping_tol: float | None = None,
+        freeze_W_linear: bool = True,
     ):
         super().__init__()
 
@@ -62,6 +64,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.use_residual = use_residual
         self.W_linear_init = W_linear_init
         self.linear_only = linear_only
+        self.early_stopping_tol = early_stopping_tol
+        self.freeze_W_linear = freeze_W_linear
         self.intermediate_activation = intermediate_activation
 
         self.mlp = None
@@ -95,6 +99,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.value_residuals = torch.tensor([], dtype=value_states.dtype, device=value_states.device)
 
         if not self.linear_only:
+            per_head_residual = self.W_linear_init is not None and self.W_linear_init.ndim == 3
             self.mlp = MLP(
                 head_dim=self.head_dim,
                 num_layers=self.mlp_num_layers,
@@ -104,6 +109,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 batch_size=value_states.shape[0] if self.per_sequence else None,
                 deterministic_init=self.meta_weights is None,
                 use_residual=self.use_residual,
+                per_head_residual=per_head_residual,
                 intermediate_activation=self.intermediate_activation
                 ).to(device=value_states.device, dtype=value_states.dtype)
 
@@ -149,8 +155,9 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     for p, b in zip(self.mlp.biases, biases):
                         p.copy_(b)
             else:
-                all_params = [p for name, p in self.mlp.named_parameters() if name != "W_linear"]
+                all_params = [p for name, p in self.mlp.named_parameters() if not (self.freeze_W_linear and name == "W_linear")]
                 optimizer = self.optimizer_cls(all_params, lr=self.lr)
+                prev_loss = float('inf')
                 for _ in range(self.num_epochs):
                     optimizer.zero_grad()
                     # keys/values shape: [num_sequences, num_head, num_token, head_dim]
@@ -158,10 +165,17 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     loss = self.loss_func(v_hat, values)
                     loss.backward()
                     optimizer.step()
+                    loss_val = loss.item()
+                    improvement = (prev_loss - loss_val) / (prev_loss + 1e-8)
+                    if self.early_stopping_tol is not None and improvement < self.early_stopping_tol:
+                        break
+                    prev_loss = loss_val
                 optimizer.zero_grad(set_to_none=True)
 
     def _linear_approx(self, keys: torch.Tensor) -> torch.Tensor:
         w = self.W_linear_init.to(device=keys.device, dtype=keys.dtype)
+        if w.ndim == 3:
+            return torch.einsum('bhtd,hde->bhte', keys, w)
         return torch.einsum('bhtd,hdqe->bqte', keys, w)
 
     def compress(self, keys: torch.Tensor) -> None:
@@ -342,6 +356,8 @@ class MLPValueCache(SingleTensorCache):
         W_linear_per_layer: list[torch.Tensor] | None = None,
         intermediate_activation: str = 'gelu',
         linear_only: bool = False,
+        early_stopping_tol: float | None = None,
+        freeze_W_linear: bool = True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -369,6 +385,8 @@ class MLPValueCache(SingleTensorCache):
         self.W_linear_per_layer = W_linear_per_layer
         self.intermediate_activation = intermediate_activation
         self.linear_only = linear_only
+        self.early_stopping_tol = early_stopping_tol
+        self.freeze_W_linear = freeze_W_linear
 
         if use_residual and W_linear_per_layer is not None:
             if not un_rope:
@@ -434,6 +452,8 @@ class MLPValueCache(SingleTensorCache):
             W_linear_init=self.W_linear_per_layer[layer_idx] if self.W_linear_per_layer is not None else None,
             intermediate_activation=self.intermediate_activation,
             linear_only=self.linear_only,
+            early_stopping_tol=self.early_stopping_tol,
+            freeze_W_linear=self.freeze_W_linear,
         )
 
     def _run_global_compression(self):

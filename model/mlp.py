@@ -23,6 +23,7 @@ class MLP(nn.Module):
         deterministic_init: bool = True,
         intermediate_activation: str = "gelu",
         use_residual: bool = False,
+        per_head_residual: bool = False,
     ):
         super().__init__()
 
@@ -32,6 +33,7 @@ class MLP(nn.Module):
         self.num_heads = num_heads
         self.batch_size = batch_size
         self.use_residual = use_residual
+        self.per_head_residual = per_head_residual
 
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
@@ -58,7 +60,10 @@ class MLP(nn.Module):
             curr_dim = out_dim
 
         if use_residual:
-            self.W_linear = nn.Parameter(torch.zeros(num_heads, head_dim, num_heads, head_dim))
+            if per_head_residual:
+                self.W_linear = nn.Parameter(torch.zeros(num_heads, head_dim, head_dim))
+            else:
+                self.W_linear = nn.Parameter(torch.zeros(num_heads, head_dim, num_heads, head_dim))
 
     def forward(self, x):
         # x: [B, H, T, D]
@@ -73,6 +78,14 @@ class MLP(nn.Module):
                 x = self.intermediate_activation(x)
 
         if self.use_residual:
-            x = x + torch.einsum('bhtd,hdqe->bqte', x_in, self.W_linear)
+            if self.per_head_residual:
+                x = x + torch.einsum('bhtd,hde->bhte', x_in, self.W_linear)
+            else:
+                x = x + torch.einsum('bhtd,hdqe->bqte', x_in, self.W_linear)
+                # equivalent to:
+                # x_in = x_in.permute(0, 2, 1, 3)  # [B, T, H, D]
+                # x_in = x_in.reshape(x_in.shape[0], x_in.shape[1], -1)  # [B, T, H*D]            
+                # W_linear = self.W_linear.reshape(self.num_heads * self.head_dim, -1)  # [H*D, H*D]
+                # x = x + torch.matmul(x_in, W_linear)
 
         return x

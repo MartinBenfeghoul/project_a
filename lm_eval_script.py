@@ -204,9 +204,11 @@ def main(args):
         "use_residual": args.use_residual,
         "intermediate_activation": args.intermediate_activation,
         "linear_only": args.linear_only,
+        "early_stopping_tol": args.early_stopping_tol,
+        "freeze_W_linear": args.freeze_W_linear,
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
-        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model)
+        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model, per_head=args.per_head_kv_linear)
 
     model.eval()
 
@@ -343,6 +345,9 @@ def parse_args():
     parser.add_argument("--use_residual", action="store_true", help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.")
     parser.add_argument("--intermediate_activation", type=str, default='gelu', help="The activation function for the MLP in the value cache.")
     parser.add_argument("--linear_only", action="store_true", help="Recover values directly from W_linear_init (keys @ pinv(W_k) @ W_v), skipping MLP training entirely. Requires --un_rope.")
+    parser.add_argument("--per_head_kv_linear", action="store_true", help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.")
+    parser.add_argument("--freeze_W_linear", action="store_true", default=False, help="Freeze W_linear during MLP training.")
+    parser.add_argument("--early_stopping_tol", type=float, default=None, help="Stop MLP training early when relative loss improvement falls below this threshold.")
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:
