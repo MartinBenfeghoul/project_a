@@ -4,6 +4,8 @@ import argparse
 import time
 from omegaconf import OmegaConf
 import torch
+import uuid
+from datetime import datetime
 
 from lm_eval import evaluator
 from lm_eval.utils import make_table
@@ -37,6 +39,11 @@ def get_tasks(tasks, print_tasks=True):
         print(f"Evaluating tasks: {tasks}")
     return tasks
 
+def make_run_id():
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    uid = uuid.uuid4().hex[:6]
+    pid = os.getpid()
+    return f"{ts}_{pid}_{uid}"
 
 def make_hooks(logger, uncompressed_window=0, measure_latency=False):
     """
@@ -160,11 +167,12 @@ def main(args):
         if isinstance(args.target_perc, list)
         else [args.target_perc] * num_layers
     )
+
     value_cache_kwargs = {
         "cache_type": args.v_cache_type,
-        "num_layers_per_mlp": [args.num_layers_per_mlp] * num_layers,
-        "hidden_factors_per_mlp": [args.hidden_factors_per_mlp] * num_layers,
-        "num_heads_per_mlp": [args.num_heads_per_mlp] * num_layers,
+        "num_layers_per_mlp": args.num_layers_per_mlp,
+        "hidden_factors_per_mlp": args.hidden_factors_per_mlp,
+        "num_heads_per_mlp": args.num_heads_per_mlp,
         "per_sequence": args.per_sequence,
         "target_perc": target_perc_per_layer,
         "target_model_num_heads": args.target_model_num_heads,
@@ -177,6 +185,9 @@ def main(args):
         "un_rope": args.un_rope,
         "rope_theta": rope_theta,
         "global_compression": args.global_compression,
+        "max_error": args.max_error,
+        "target_cr": args.target_cr,
+        "intermediate_activation": args.intermediate_activation,
     }
 
     model.eval()
@@ -233,6 +244,7 @@ def main(args):
         limit=args.limit,
     )
 
+
     print(make_table(results))
 
     results = extract_and_save_stats(logger, results)
@@ -257,7 +269,8 @@ def main(args):
     )
     output_path = get_output_path(output_path)
     with open(output_path, "w") as f:
-        json.dump(results["results"], f, ensure_ascii=False, indent=4)
+        json.dump(record, f, ensure_ascii=False, indent=4)
+
     print(f"Results saved to {output_path}")
     return results
 
@@ -375,6 +388,8 @@ def parse_args():
         default=None,  # TODO: set default based on model config if not passed
         help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).",
     )
+    parser.add_argument("--target_cr", type=float, default=None)
+    parser.add_argument("--intermediate_activation", type=str, default="relu")
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:

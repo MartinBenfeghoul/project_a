@@ -61,6 +61,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.rope_cos: torch.Tensor | None = None
         self.rope_sin: torch.Tensor | None = None
         self.target_cr = target_cr
+        self._num_params = None
         
 
     def lazy_initialization(self, value_states: torch.Tensor) -> None:
@@ -87,6 +88,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             deterministic_init=self.meta_weights is None,
             intermediate_activation=self.intermediate_activation,
             ).to(device=value_states.device, dtype=value_states.dtype)
+        
+        self._num_params = sum(p.numel() for p in self.mlp.parameters())
 
         if self.meta_weights is not None:
             self.mlp.load_state_dict(self.meta_weights)
@@ -155,7 +158,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
     def compute_new_perc(self, keys):
         b, h, t, d = keys.shape
-        num_params = sum(p.numel() for p in self.mlp.parameters())
+        num_params = self._num_params
         delta_dtype = self._quantized_delta or self.tensor.dtype
         value_dtype_size = torch.finfo(self.tensor.dtype).bits / 8
         delta_dtype_size = torch.finfo(delta_dtype).bits / 8
@@ -456,7 +459,7 @@ class MLPValueCache(SingleTensorCache):
                 compressed_total += original
                 continue
 
-            num_params = sum(p.numel() for p in layer.mlp.parameters())
+            num_params = layer._num_params
             num_stored = layer.indices.numel() if layer.is_compressed else 0
 
             compressed = num_params + num_stored * d + num_stored * 3
