@@ -206,6 +206,7 @@ def main(args):
         "linear_only": args.linear_only,
         "early_stopping_tol": args.early_stopping_tol,
         "freeze_W_linear": args.freeze_W_linear,
+        "target_cr": args.target_cr,
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model, per_head=args.per_head_kv_linear)
@@ -329,7 +330,8 @@ def parse_args():
     parser.add_argument("--hidden_factors_per_mlp", type=int, default=2)
     parser.add_argument("--num_heads_per_mlp", type=int, default=8) 
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument("--target_perc", type=int, default=85) # TODO: I think this would be better as a dictionary with number of layers for each target perc
+    parser.add_argument("--target_perc", type=int, default=85)
+    parser.add_argument("--target_cr", type=float, default=None)
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", type=str, default="adam")

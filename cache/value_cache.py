@@ -45,6 +45,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         linear_only: bool = False,
         early_stopping_tol: float | None = None,
         freeze_W_linear: bool = True,
+        target_cr: float | None = None,
     ):
         super().__init__()
 
@@ -82,6 +83,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.rope_sin: torch.Tensor | None = None
         self.key_mean: torch.Tensor | None = None
         self.key_std: torch.Tensor | None = None
+        self.target_cr = target_cr
+        self._num_params = None
 
     def _normalise_keys(self, keys: torch.Tensor) -> torch.Tensor:
         if not self.normalise_keys:
@@ -116,6 +119,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 per_head_residual=per_head_residual,
                 intermediate_activation=self.intermediate_activation
                 ).to(device=value_states.device, dtype=value_states.dtype)
+            
+            self._num_params = sum(p.numel() for p in self.mlp.parameters())
 
             if self.meta_init.has_weights:
                 self.mlp.load_state_dict(self.meta_init.weights)
@@ -168,11 +173,26 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             return torch.einsum('bhtd,hde->bhte', keys, w)
         return torch.einsum('bhtd,hdqe->bqte', keys, w)
 
+    def compute_new_perc(self, keys):
+        b, h, t, d = keys.shape
+        num_params = sum(p.numel() for p in self.mlp.parameters())
+        delta_dtype = self.tensor.dtype
+        value_dtype_size = torch.finfo(self.tensor.dtype).bits / 8
+        delta_dtype_size = torch.finfo(delta_dtype).bits / 8
+        index_dtype_size = torch.iinfo(torch.int32).bits / 8
+        orig = b * h * t * d * value_dtype_size
+        target_compressed = orig / self.target_cr
+        allowed_delta_storage = target_compressed - (num_params * value_dtype_size)
+        n_deltas = int(allowed_delta_storage / (d * delta_dtype_size + index_dtype_size))
+        n_deltas = max(0, min(n_deltas, b * h * t))
+        self.target_perc = 100 * (1 - (n_deltas / (b * h * t)))
+
     def compress(self, keys: torch.Tensor) -> None:
+        self._B, self._H, self._T, _ = keys.shape
+
         if self.linear_only:
             self.compressed_len = self.tensor.shape[2]
-            empty = torch.tensor([], dtype=torch.long, device=self.tensor.device)
-            self.indices = (empty, empty, empty)
+            self.indices = torch.empty(0, dtype=torch.int64, device=self.tensor.device)
             self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
             self.is_compressed = True
             return
@@ -193,25 +213,29 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         if self.target_perc is not None:
             B = errors.shape[0]
             errors_b = errors.view(B, -1)
-            k = int(errors_b.shape[1] * (self.target_perc / 100))
+            k = max(1, int(errors_b.shape[1] * (self.target_perc / 100)))
             thresh = torch.topk(errors_b, k, largest=False).values[:, -1]
             mask = errors > thresh[:, None, None]
         else:
             mask = errors > self.threshold
 
-        self.indices = mask.nonzero(as_tuple=True)
-        b, h, t = self.indices
+        b, h, t = mask.nonzero(as_tuple=True)
+        max_index = self._B * self._H * self._T - 1
+        idx_dtype = torch.int32 if max_index < torch.iinfo(torch.int32).max else torch.int64
+        self.indices = (b * (self._H * self._T) + h * self._T + t).to(idx_dtype)
         self.value_residuals = (self.tensor[b, h, t] - v_approx[b, h, t]).detach()
         self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
         self.is_compressed = True
 
-    def decompress(self, keys: torch.Tensor, temp: bool = True) -> torch.Tensor:
+    def decompress(self, keys: torch.Tensor, reset: bool = False) -> torch.Tensor:
         prefix_keys = keys[:, :, :self.compressed_len, :]
         values = self._linear_approx(prefix_keys) if self.linear_only else self.mlp(prefix_keys)
-        b, h, t = self.indices
+        t = self.indices % self._T
+        b = (self.indices // self._T) // self._H
+        h = (self.indices // self._T) % self._H
         if b.numel() > 0:
             values[b, h, t] += self.value_residuals
-        if not temp:
+        if reset:
             self.tensor = values
             self._reset_residuals()
         return values
@@ -219,11 +243,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
     def _reset_residuals(self):
         self.is_compressed = False
         self.value_residuals = self.value_residuals.new_empty(0)
-        self.indices = (
-            self.indices[0][:0],
-            self.indices[1][:0],
-            self.indices[2][:0],
-        )        
+        self.indices = self.indices.new_empty(0)     
 
     def _unrope(
         self,
@@ -279,6 +299,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         values = super().update(value_states)
 
         if self.prefill:
+            if self.target_cr and not self.linear_only:
+                self.compute_new_perc(keys_for_mlp)
             self.train_mlp(keys_for_mlp)
             self.compress(keys_for_mlp)
             self.prefill = False
@@ -348,6 +370,7 @@ class MLPValueCache(SingleTensorCache):
         linear_only: bool = False,
         early_stopping_tol: float | None = None,
         freeze_W_linear: bool = True,
+        target_cr: float | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -399,6 +422,7 @@ class MLPValueCache(SingleTensorCache):
                 raise ValueError("linear_only is incompatible with global_compression.")
         self._global_compression_done = False
         self.comp_ratio = 0
+        self.target_cr = target_cr
 
         self.meta_init = (
             MetaLearningInit.from_checkpoint(
@@ -433,6 +457,7 @@ class MLPValueCache(SingleTensorCache):
             linear_only=self.linear_only,
             early_stopping_tol=self.early_stopping_tol,
             freeze_W_linear=self.freeze_W_linear,
+            target_cr=self.target_cr,
         )
 
     def _run_global_compression(self):
@@ -443,8 +468,11 @@ class MLPValueCache(SingleTensorCache):
 
         for layer in self.layers:
             mask = layer.errors > thresh
-            layer.indices = mask.nonzero(as_tuple=True)
-            b, h, t = layer.indices
+            b, h, t = mask.nonzero(as_tuple=True)
+            B, H, T = layer.errors.shape
+            max_index = B * H * T - 1
+            idx_dtype = torch.int32 if max_index < torch.iinfo(torch.int32).max else torch.int64
+            layer.indices = (b * (H * T) + h * T + t).to(idx_dtype)
             layer.value_residuals = layer.value_residuals[b, h, t]
             layer.is_compressed = True
 
@@ -479,8 +507,12 @@ class MLPValueCache(SingleTensorCache):
         for layer in self.layers:
             h, d = self.target_model_num_heads, layer.head_dim
             t = layer.compressed_len + layer.tensor.shape[2] if layer.tensor.numel() else layer.compressed_len
+            delta_dtype = layer.tensor.dtype
+            value_dtype_size = torch.finfo(layer.tensor.dtype).bits / 8
+            delta_dtype_size = torch.finfo(delta_dtype).bits / 8
+            index_dtype_size = torch.iinfo(layer.indices.dtype).bits / 8
 
-            original = h * t * d
+            original = h * t * d * value_dtype_size
 
             if not layer.is_compressed:
                 original_total += original
@@ -488,11 +520,15 @@ class MLPValueCache(SingleTensorCache):
                 continue
 
             if layer.linear_only:
-                compressed = layer.W_linear_init.numel()
+                compressed = layer.W_linear_init.numel() * value_dtype_size
             else:
-                num_params = sum(p.numel() for p in layer.mlp.parameters()) if layer.mlp is not None else 0
-                num_stored = layer.indices[0].numel()
-                compressed = num_params + num_stored * d + num_stored * 3
+                num_params = layer._num_params
+                num_stored = layer.indices.numel() if layer.is_compressed else 0
+                compressed = (
+                    num_params * value_dtype_size
+                    + num_stored * d * delta_dtype_size
+                    + num_stored * index_dtype_size
+                )
 
             original_total += original
             compressed_total += compressed
