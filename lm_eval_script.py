@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import time
+from statistics import mean
 from omegaconf import OmegaConf
 import torch
 
@@ -40,19 +41,33 @@ def get_tasks(tasks, print_tasks=True):
 
 
 
-def make_hooks(logger, uncompressed_window=0, measure_latency=False):
+def make_hooks(
+    logger,
+    uncompressed_window=0,
+    measure_latency=False,
+    measure_gpu_memory=False,
+    model_baseline_mem=0,
+):
     """
     When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
     """
     _start_evt = [None]
+    _prefill_mem_start = [None]
 
     _cuda = measure_latency and torch.cuda.is_available()
+    _cuda_mem = measure_gpu_memory and torch.cuda.is_available()
 
     def pre_hook(module, args, kwargs):
+        input_ids = kwargs.get("input_ids", args[0] if args else None)
+        is_prefill = input_ids is not None and input_ids.size(-1) > 1
         if _cuda:
             evt = torch.cuda.Event(enable_timing=True)
             evt.record()
             _start_evt[0] = evt
+        if _cuda_mem and is_prefill:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            _prefill_mem_start[0] = torch.cuda.memory_allocated()
 
     def post_hook(module, args, kwargs, output):
         if _cuda:
@@ -77,6 +92,15 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                     )
             if _cuda:
                 logger.prefill_events.append((_start_evt[0], end_evt))
+            if _cuda_mem:
+                torch.cuda.synchronize()
+                mem_allocated = torch.cuda.memory_allocated()
+                mem_start = _prefill_mem_start[0]
+                if mem_start is not None:
+                    logger.add_log("prefill_gpu_mem_delta_bytes", mem_allocated - mem_start)
+                logger.add_log("prefill_gpu_mem_allocated_bytes", mem_allocated)
+                logger.add_log("prefill_gpu_mem_overhead_bytes", mem_allocated - model_baseline_mem)
+                _prefill_mem_start[0] = None
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
@@ -225,7 +249,12 @@ def main(args):
         # model-weights-only footprint
         model_baseline_mem = torch.cuda.memory_allocated()
 
-    pre_hook, post_hook = make_hooks(logger, measure_latency=args.log_efficiency_metrics)
+    pre_hook, post_hook = make_hooks(
+        logger,
+        measure_latency=args.log_efficiency_metrics,
+        measure_gpu_memory=args.log_efficiency_metrics,
+        model_baseline_mem=model_baseline_mem,
+    )
     model.register_forward_pre_hook(pre_hook, with_kwargs=True)
     model.register_forward_hook(post_hook, with_kwargs=True)
 
@@ -285,12 +314,30 @@ def main(args):
             peak_mem = 0
             prefill_ms = []
             decode_ms  = []
+        prefill_mem_allocated = logger.get_log_list("prefill_gpu_mem_allocated_bytes")
+        prefill_mem_overhead = logger.get_log_list("prefill_gpu_mem_overhead_bytes")
 
         efficiency_metrics = {
             "eval_wall_time_seconds": wall_time_sec,
             "eval_wall_time_minutes": wall_time_sec / 60.0,
             "gpu_peak_mem_gib": peak_mem / (1024**3), # (weights + kv cache + activations)
             "gpu_kv_cache_overhead_gib": (peak_mem - model_baseline_mem) / (1024**3), # (kv cache + activations)
+            "prefill_gpu_mem_allocated_gib_mean": (
+                mean(prefill_mem_allocated) / (1024**3)
+                if prefill_mem_allocated else 0.0
+            ),
+            "prefill_gpu_mem_allocated_gib_max": (
+                max(prefill_mem_allocated) / (1024**3)
+                if prefill_mem_allocated else 0.0
+            ),
+            "prefill_gpu_mem_overhead_gib_mean": (
+                mean(prefill_mem_overhead) / (1024**3)
+                if prefill_mem_overhead else 0.0
+            ),
+            "prefill_gpu_mem_overhead_gib_max": (
+                max(prefill_mem_overhead) / (1024**3)
+                if prefill_mem_overhead else 0.0
+            ),
             "prefill_latency_ms_mean": sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0,
             "decode_latency_ms_mean": sum(decode_ms) / len(decode_ms) if decode_ms else 0.0, # per-token
             "decode_tokens_per_sec":  1000.0 / (sum(decode_ms) / len(decode_ms)) if decode_ms else 0.0,
