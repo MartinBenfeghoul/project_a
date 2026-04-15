@@ -3,8 +3,11 @@ import json
 import os
 import torch
 
+from dotenv import load_dotenv
 from omegaconf import OmegaConf
 import wandb
+
+load_dotenv()
 
 
 class Logger:
@@ -70,7 +73,19 @@ def generate_run_name(config):
     """Generate a run name based on config parameters."""
     t = config.training
 
-    run_name = (
+    if t.get("run_type") == "attention_predictor":
+        return (
+            f"seq{t.seq_len}_"
+            f"maxb{t.max_batches}_"
+            f"sps{t.samples_per_sequence}_"
+            f"hist{t.history_step}_"
+            f"blk{t.block_size}_"
+            f"topk{t.topk_blocks}_"
+            f"layers{_format_run_value(t.layers)}_"
+            f"bce{t.bce_weight}"
+        )
+
+    return (
         f"seq{t.seq_len}_"
         f"steps{t.inner_steps}_"
         f"mlr{t.meta_lr}_"
@@ -79,7 +94,6 @@ def generate_run_name(config):
         f"learnperc{t.get('learn_target_perc', False)}_"
         f"gradaccum{t.grad_accum_steps}"
     )
-    return run_name
 
 
 def init_wandb(config):
@@ -94,8 +108,7 @@ def init_wandb(config):
         )
 
     wandb.login(key=wandb_key)
-    run_name = generate_run_name(config)
-
+    run_name = wandb_config.get("run_name") or generate_run_name(config)
     wandb.init(
         project=wandb_config.get("project", "gist_vs_details"),
         entity=wandb_config.get("entity", "mixture_of_titans"),
@@ -151,6 +164,50 @@ def save_results(
             )
             + "\n"
         )
+
+
+def save_attention_predictor_checkpoint(
+    args,
+    predictor,
+    optimizer: torch.optim.Optimizer,
+    layers: list[int],
+    step: int,
+    running: dict[str, float],
+    num_updates: int,
+) -> None:
+    metrics = {
+        key: value / max(1, num_updates)
+        for key, value in running.items()
+    }
+    payload = {
+        "model_state_dict": predictor.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "step": step,
+        "metrics": metrics,
+        "config": {
+            "model_name": args.model_name,
+            "dataset_path": args.dataset_path,
+            "subset_name": args.subset_name,
+            "seq_len": args.seq_len,
+            "history_step": args.history_step,
+            "block_size": args.block_size,
+            "topk_blocks": args.topk_blocks,
+            "layers": layers,
+            "bce_weight": args.bce_weight,
+            "attn_importance_weight": args.attn_importance_weight,
+        },
+    }
+
+    ckpt_path = os.path.join(args.checkpoint_dir, f"attention_predictor_step_{step}.pt")
+    torch.save(payload, ckpt_path)
+    torch.save(
+        payload,
+        os.path.join(args.checkpoint_dir, "attention_predictor_latest.pt"),
+    )
+
+    metrics_path = os.path.join(args.checkpoint_dir, "metrics.json")
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
 
 
 def log_batch(
@@ -248,3 +305,53 @@ def get_output_path(output_path):
         if not os.path.exists(output_path.format(i)):
             return output_path.format(i)
         i+=1
+
+def _format_run_value(value: object) -> str:
+    return str(value).replace("/", "-").replace(",", "-").replace(" ", "")
+
+
+def save_run_config(
+    args,
+    layers: list[int],
+    run_name: str,
+    checkpoint_dir: str,
+) -> None:
+    config = {
+        **vars(args),
+        "run_name": run_name,
+        "checkpoint_dir": checkpoint_dir,
+        "resolved_layers": layers,
+    }
+    OmegaConf.save(OmegaConf.create(config), os.path.join(checkpoint_dir, "config.yaml"))
+
+
+def attention_predictor_config(args, layers: list[int] | None = None):
+    training = {
+        **vars(args),
+        "run_type": "attention_predictor",
+    }
+    if layers is not None:
+        training["resolved_layers"] = layers
+
+    return OmegaConf.create(
+        {
+            "training": training,
+            "wandb": {
+                "enabled": args.use_wandb,
+                "project": args.wandb_project,
+                "entity": args.wandb_entity,
+                "run_name": args.wandb_run_name,
+            },
+        }
+    )
+
+
+def prepare_run_directory(
+    args,
+    layers: list[int],
+) -> str:
+    run_name = generate_run_name(attention_predictor_config(args, layers))
+    args.checkpoint_dir = os.path.join(args.output_dir, run_name)
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    save_run_config(args, layers, run_name, args.checkpoint_dir)
+    return run_name
