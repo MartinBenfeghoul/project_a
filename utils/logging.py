@@ -198,11 +198,9 @@ def save_attention_predictor_checkpoint(
         },
     }
 
-    ckpt_path = os.path.join(args.checkpoint_dir, f"attention_predictor_step_{step}.pt")
-    torch.save(payload, ckpt_path)
     torch.save(
         payload,
-        os.path.join(args.checkpoint_dir, "attention_predictor_latest.pt"),
+        os.path.join(args.checkpoint_dir, "model_ckpt.pt"),
     )
 
     metrics_path = os.path.join(args.checkpoint_dir, "metrics.json")

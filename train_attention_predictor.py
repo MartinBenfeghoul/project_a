@@ -323,11 +323,6 @@ def train(args: argparse.Namespace) -> None:
                     }
                 )
 
-        if batch_idx % args.save_every == 0:
-            save_attention_predictor_checkpoint(
-                args, predictor, optimizer, layers, batch_idx, running, num_updates
-            )
-
     save_attention_predictor_checkpoint(
         args,
         predictor,
@@ -395,7 +390,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=["float16", "bfloat16", "float32"],
     )
     parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--save_every", type=int, default=25)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="gist_vs_details")
     parser.add_argument("--wandb_entity", type=str, default="mixture_of_titans")
