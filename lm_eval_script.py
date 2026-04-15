@@ -13,6 +13,10 @@ from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils_hf import stop_sequences_criteria
 
 from cache import CompressedCache
+from model.attention_predictor import (
+    get_attn_predictor_hook_handles,
+    apply_attn_predictor_config
+)
 from utils import (
     Logger,
     get_model_and_tokenizer,
@@ -189,6 +193,8 @@ def main(args):
     logger.prefill_events = []
     logger.decode_events = []
 
+    attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
+
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
@@ -231,6 +237,8 @@ def main(args):
         "early_stopping_tol": args.early_stopping_tol,
         "freeze_W_linear": args.freeze_W_linear,
         "target_cr": args.target_cr,
+        "use_attn_importance": args.use_attn_predictor,
+        "attn_importance_weight": args.attn_importance_weight,
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model, per_head=args.per_head_kv_linear)
@@ -360,6 +368,8 @@ def main(args):
     with open(output_path, "w") as f:
         json.dump(results["results"], f, ensure_ascii=False, indent=4)
     print(f"Results saved to {output_path}")
+    for handle in attn_predictor_hook_handles:
+        handle.remove()
     return results
 
 
@@ -408,10 +418,13 @@ def parse_args():
     parser.add_argument("--per_head_kv_linear", action="store_true", help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.")
     parser.add_argument("--freeze_W_linear", action="store_true", default=False, help="Freeze W_linear during MLP training.")
     parser.add_argument("--early_stopping_tol", type=float, default=None, help="Stop MLP training early when relative loss improvement falls below this threshold.")
+    parser.add_argument("--use_attn_predictor", action="store_true", help="Use a shared CNN attention predictor to guide value residual selection.")
+    parser.add_argument("--attn_predictor_path", type=str, default=None, help="Path to a checkpoint from train_attention_predictor.py.")
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:
         args = override_args_from_meta_weights(args)
+    args = apply_attn_predictor_config(args)
 
     print("Config for lm-eval: ", vars(args))
 

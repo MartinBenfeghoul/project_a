@@ -47,6 +47,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         early_stopping_tol: float | None = None,
         freeze_W_linear: bool = True,
         target_cr: float | None = None,
+        use_attn_importance: bool = False,
+        attn_importance_weight: float = 1.0,
     ):
         super().__init__()
 
@@ -86,6 +88,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.key_std: torch.Tensor | None = None
         self.target_cr = target_cr
         self._num_params = None
+        self.use_attn_importance = use_attn_importance
+        self.attn_importance_weight = attn_importance_weight
 
     def _normalise_keys(self, keys: torch.Tensor) -> torch.Tensor:
         if not self.normalise_keys:
@@ -188,7 +192,23 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         n_deltas = max(0, min(n_deltas, b * h * t))
         self.target_perc = 100 * (1 - (n_deltas / (b * h * t)))
 
-    def compress(self, keys: torch.Tensor) -> None:
+    def _score_errors(
+        self,
+        errors: torch.Tensor,
+        importance: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if importance is None:
+            return errors
+
+        importance = importance.to(device=errors.device, dtype=errors.dtype)
+
+        err_scale = errors.mean(dim=(1, 2), keepdim=True)
+        imp_scale = importance.mean(dim=(1, 2), keepdim=True)
+        return (errors / err_scale) + self.attn_importance_weight * (
+            importance / imp_scale
+        )
+
+    def compress(self, keys: torch.Tensor, value_importance=None) -> None:
         self._B, self._H, self._T, _ = keys.shape
 
         if self.linear_only:
@@ -208,6 +228,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
             return
 
+        errors = self._score_errors(errors, value_importance)
         if self.threshold is None and self.target_perc is None:
             raise ValueError("MLPValueLayer requires either a threshold or target_perc to compress values")
         
@@ -303,7 +324,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             if self.target_cr and not self.linear_only:
                 self.compute_new_perc(keys_for_mlp)
             self.train_mlp(keys_for_mlp)
-            self.compress(keys_for_mlp)
+            self.compress(
+                keys_for_mlp,
+                value_importance=cache_kwargs.get("value_importance"),
+            )
             self.prefill = False
             return values
         elif self.is_compressed:
@@ -372,6 +396,8 @@ class MLPValueCache(SingleTensorCache):
         early_stopping_tol: float | None = None,
         freeze_W_linear: bool = True,
         target_cr: float | None = None,
+        use_attn_importance: bool = False,
+        attn_importance_weight: float = 1.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -424,6 +450,8 @@ class MLPValueCache(SingleTensorCache):
         self._global_compression_done = False
         self.comp_ratio = 0
         self.target_cr = target_cr
+        self.use_attn_importance = use_attn_importance
+        self.attn_importance_weight = attn_importance_weight
 
         self.meta_init = (
             MetaLearningInit.from_checkpoint(
@@ -459,6 +487,8 @@ class MLPValueCache(SingleTensorCache):
             early_stopping_tol=self.early_stopping_tol,
             freeze_W_linear=self.freeze_W_linear,
             target_cr=self.target_cr,
+            use_attn_importance=self.use_attn_importance,
+            attn_importance_weight=self.attn_importance_weight,
         )
 
     def _run_global_compression(self):
