@@ -9,7 +9,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model.attention_predictor import (
-    AttentionPredictorCNN,
+    AttentionPredictor,
     attention_targets_to_distribution,
     max_pool_attention,
     topk_block_mask,
@@ -132,7 +132,7 @@ def recovery_metrics(
 
 
 def train_layer_examples(
-    predictor: AttentionPredictorCNN,
+    predictor: AttentionPredictor,
     histories: torch.Tensor,
     targets: torch.Tensor,
     topk_blocks: int,
@@ -182,12 +182,12 @@ def train(args: argparse.Namespace) -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    dtype = getattr(torch, args.torch_dtype)
+    dtype = getattr(torch, "bfloat16")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        attn_implementation=args.attn_implementation,
+        attn_implementation="eager",
         torch_dtype=dtype,
-        device_map=args.device_map,
+        device_map="auto",
     )
     model.eval()
     model.config.output_attentions = True
@@ -195,17 +195,16 @@ def train(args: argparse.Namespace) -> None:
 
     device = next(model.parameters()).device
     layers = parse_layers(args.layers, model.config.num_hidden_layers)
-    run_name = prepare_run_directory(args, layers)
     wandb_config = attention_predictor_config(args, layers)
-    wandb_config.wandb.run_name = args.wandb_run_name or run_name
+    wandb_config.wandb.run_name = prepare_run_directory(args, layers)
     if init_wandb(wandb_config):
         wandb.define_metric("train/step")
         wandb.define_metric("train/*", step_metric="train/step")
 
     hf_dataset = load_data(
-        dataset_path=args.dataset_path,
-        subset_name=args.subset_name,
-        shuffle_buffer_size=args.shuffle_buffer_size,
+        dataset_path="HuggingFaceFW/fineweb-edu",
+        subset_name="sample-100BT",
+        shuffle_buffer_size=10000,
     )
     token_dataset = Dataset(
         hf_dataset,
@@ -219,7 +218,7 @@ def train(args: argparse.Namespace) -> None:
         collate_fn=collate,
     )
 
-    predictor = AttentionPredictorCNN().to(device)
+    predictor = AttentionPredictor().to(device)
     optimizer = torch.optim.AdamW(
         predictor.parameters(),
         lr=args.lr,
@@ -254,9 +253,7 @@ def train(args: argparse.Namespace) -> None:
             )
 
         if outputs.attentions is None:
-            raise RuntimeError(
-                "Model did not return attentions. Try --attn_implementation eager."
-            )
+            raise RuntimeError("Model did not return attentions.")
 
         positions = sample_positions(
             seq_len=input_ids.shape[-1],
@@ -338,19 +335,13 @@ def train(args: argparse.Namespace) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train a CNN to predict pooled next-token attention."
+        description="Train Attention Predictor."
     )
     parser.add_argument(
         "--model_name",
         type=str,
-        default="meta-llama/Llama-3.2-1B-Instruct",
+        default="meta-llama/Llama-3.1-8B-Instruct",
     )
-    parser.add_argument(
-        "--dataset_path",
-        type=str,
-        default="HuggingFaceFW/fineweb-edu",
-    )
-    parser.add_argument("--subset_name", type=str, default="sample-100BT")
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -373,27 +364,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--bce_weight", type=float, default=0.1)
-    parser.add_argument(
-        "--attn_importance_weight",
-        type=float,
-        default=1.0,
-        help="Eval-time importance weight saved with the attention predictor config.",
-    )
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
-    parser.add_argument("--shuffle_buffer_size", type=int, default=10_000)
-    parser.add_argument("--attn_implementation", type=str, default="eager")
-    parser.add_argument("--device_map", type=str, default="auto")
-    parser.add_argument(
-        "--torch_dtype",
-        type=str,
-        default="bfloat16",
-        choices=["float16", "bfloat16", "float32"],
-    )
     parser.add_argument("--log_every", type=int, default=1)
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--wandb_project", type=str, default="gist_vs_details")
     parser.add_argument("--wandb_entity", type=str, default="mixture_of_titans")
-    parser.add_argument("--wandb_run_name", type=str, default=None)
     return parser
 
 

@@ -238,7 +238,7 @@ def main(args):
         "freeze_W_linear": args.freeze_W_linear,
         "target_cr": args.target_cr,
         "use_attn_importance": args.use_attn_predictor,
-        "attn_importance_weight": args.attn_importance_weight,
+        
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model, per_head=args.per_head_kv_linear)

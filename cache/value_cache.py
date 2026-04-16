@@ -48,7 +48,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         freeze_W_linear: bool = True,
         target_cr: float | None = None,
         use_attn_importance: bool = False,
-        attn_importance_weight: float = 1.0,
+        
     ):
         super().__init__()
 
@@ -89,7 +89,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.target_cr = target_cr
         self._num_params = None
         self.use_attn_importance = use_attn_importance
-        self.attn_importance_weight = attn_importance_weight
+        
 
     def _normalise_keys(self, keys: torch.Tensor) -> torch.Tensor:
         if not self.normalise_keys:
@@ -204,7 +204,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
         err_scale = errors.mean(dim=(1, 2), keepdim=True)
         imp_scale = importance.mean(dim=(1, 2), keepdim=True)
-        return (errors / err_scale) + self.attn_importance_weight * (
+        return (errors / err_scale) + (
             importance / imp_scale
         )
 
@@ -397,7 +397,7 @@ class MLPValueCache(SingleTensorCache):
         freeze_W_linear: bool = True,
         target_cr: float | None = None,
         use_attn_importance: bool = False,
-        attn_importance_weight: float = 1.0,
+        
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -451,7 +451,7 @@ class MLPValueCache(SingleTensorCache):
         self.comp_ratio = 0
         self.target_cr = target_cr
         self.use_attn_importance = use_attn_importance
-        self.attn_importance_weight = attn_importance_weight
+        
 
         self.meta_init = (
             MetaLearningInit.from_checkpoint(
@@ -488,7 +488,7 @@ class MLPValueCache(SingleTensorCache):
             freeze_W_linear=self.freeze_W_linear,
             target_cr=self.target_cr,
             use_attn_importance=self.use_attn_importance,
-            attn_importance_weight=self.attn_importance_weight,
+            
         )
 
     def _run_global_compression(self):

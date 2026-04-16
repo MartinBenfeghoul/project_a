@@ -194,7 +194,6 @@ def save_attention_predictor_checkpoint(
             "topk_blocks": args.topk_blocks,
             "layers": layers,
             "bce_weight": args.bce_weight,
-            "attn_importance_weight": args.attn_importance_weight,
         },
     }
 

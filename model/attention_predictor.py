@@ -66,9 +66,9 @@ def _repeat_kv(hidden_states: torch.Tensor, num_key_value_groups: int) -> torch.
     )
 
 
-class AttentionPredictorCNN(nn.Module):
+class AttentionPredictor(nn.Module):
     """
-    Lightweight CNN used to predict the next pooled attention row from a short
+    Rredicts the next pooled attention row from a short
     history of pooled attention rows.
 
     Input shape: [N, history_step, num_blocks]
@@ -98,19 +98,8 @@ class AttentionPredictorCNN(nn.Module):
 
 def max_pool_attention(attn: torch.Tensor, block_size: int) -> torch.Tensor:
     """
-    Pool attention probabilities over the KV-token axis.
-
-    Args:
-        attn: Tensor of shape [..., key_length].
-        block_size: Number of KV tokens per pooled block.
-
-    Returns:
-        Tensor with the same leading dimensions and
-        ceil(key_length / block_size) blocks on the last dimension.
+    Max pool attention probabilities over the KV-token axis.
     """
-    if block_size <= 0:
-        raise ValueError("block_size must be positive")
-
     padding_size = (block_size - attn.shape[-1] % block_size) % block_size
     if padding_size:
         attn = F.pad(attn, (0, padding_size), value=0.0)
@@ -121,16 +110,13 @@ def attention_targets_to_distribution(
     target: torch.Tensor,
     eps: float = 1e-8,
 ) -> torch.Tensor:
-    """Normalize pooled attention targets into a probability distribution."""
+    """Normalise pooled attention targets into probability distribution."""
     target = target.float().clamp_min(0)
     return target / target.sum(dim=-1, keepdim=True).clamp_min(eps)
 
 
 def topk_block_mask(target_dist: torch.Tensor, topk_blocks: int) -> torch.Tensor:
-    """Create a binary mask for the top-k target blocks."""
-    if topk_blocks <= 0:
-        raise ValueError("topk_blocks must be positive")
-
+    """Create binary mask for top-k target blocks."""
     k = min(topk_blocks, target_dist.shape[-1])
     indices = target_dist.topk(k, dim=-1).indices
     mask = torch.zeros_like(target_dist)
@@ -142,11 +128,11 @@ def load_attention_predictor(
     checkpoint_path: str,
     device: torch.device | str,
     dtype: torch.dtype | None = None,
-) -> AttentionPredictorCNN:
-    """Load a shared attention predictor CNN from a training checkpoint."""
+) -> AttentionPredictor:
+    """Load attention predictor from checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
-    model = AttentionPredictorCNN().to(device=device)
+    model = AttentionPredictor().to(device=device)
     model.load_state_dict(state_dict)
     if dtype is not None:
         model = model.to(dtype=dtype)
@@ -155,18 +141,29 @@ def load_attention_predictor(
 
 
 def _extract_attention_forward_args(args, kwargs):
-    names = [
-        "hidden_states",
-        "attention_mask",
-        "position_ids",
-        "past_key_value",
-        "output_attentions",
-        "use_cache",
-        "cache_position",
-        "position_embeddings",
-    ]
+    if len(args) > 1 and isinstance(args[1], tuple):
+        names = [
+            "hidden_states",
+            "position_embeddings",
+            "attention_mask",
+            "past_key_values",
+            "cache_position",
+        ]
+    else:
+        names = [
+            "hidden_states",
+            "attention_mask",
+            "position_ids",
+            "past_key_value",
+            "output_attentions",
+            "use_cache",
+            "cache_position",
+            "position_embeddings",
+        ]
     values = dict(zip(names, args))
     values.update(kwargs)
+    if values.get("past_key_value") is None:
+        values["past_key_value"] = values.get("past_key_values")
     return values
 
 
@@ -217,7 +214,7 @@ def _predict_importance_from_qk(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
     attention_mask: torch.Tensor | None,
-    predictor: AttentionPredictorCNN,
+    predictor: AttentionPredictor,
     history_step: int,
     block_size: int,
     num_key_value_heads: int,
@@ -272,13 +269,13 @@ def _predict_importance_from_qk(
 
 def install_attention_predictor_hooks(
     model: nn.Module,
-    predictor: AttentionPredictorCNN,
+    predictor: AttentionPredictor,
     history_step: int = 64,
     block_size: int = 16,
 ) -> list:
     """
-    Install attention pre-hooks that compute a small attention-history
-    slice for the shared CNN, then let the original attention module continue.
+    Install attention pre-hooks that compute small attention-history
+    slice for Attention Predictor, then let the original attention module continue.
 
     The hook stores only value-importance tensors on the active cache via
     cache.set_value_importance(layer_idx, importance).
@@ -305,12 +302,16 @@ def install_attention_predictor_hooks(
         query_states = module.q_proj(hidden_states)
         key_states = module.k_proj(hidden_states)
 
-        query_states = query_states.view(
-            batch, q_len, module.num_heads, module.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            batch, q_len, module.num_key_value_heads, module.head_dim
-        ).transpose(1, 2)
+        head_dim = module.head_dim
+        query_states = query_states.view(batch, q_len, -1, head_dim).transpose(1, 2)
+        key_states = key_states.view(batch, q_len, -1, head_dim).transpose(1, 2)
+        num_query_heads = query_states.shape[1]
+        num_key_value_heads = key_states.shape[1]
+        if num_query_heads % num_key_value_heads != 0:
+            raise ValueError(
+                "query heads must be divisible by key-value heads"
+            )
+        num_key_value_groups = num_query_heads // num_key_value_heads
 
         position_embeddings = values.get("position_embeddings")
         if position_embeddings is None:
@@ -331,8 +332,8 @@ def install_attention_predictor_hooks(
             predictor=predictor,
             history_step=history_step,
             block_size=block_size,
-            num_key_value_heads=module.num_key_value_heads,
-            num_key_value_groups=module.num_key_value_groups,
+            num_key_value_heads=num_key_value_heads,
+            num_key_value_groups=num_key_value_groups,
             sliding_window=getattr(module.config, "sliding_window", None),
         )
         past_key_value.set_value_importance(module.layer_idx, importance)
@@ -383,7 +384,7 @@ def _load_attn_predictor_config(attn_predictor_path: str) -> dict:
 
     raise ValueError(
         "Could not find attention predictor config. Expected config.yaml next to "
-        f"{attn_predictor_path}, or a 'config' entry inside the checkpoint."
+        f"{attn_predictor_path}."
     )
 
 
@@ -391,13 +392,12 @@ def apply_attn_predictor_config(args):
     if not args.use_attn_predictor:
         args.attn_predictor_history_step = None
         args.attn_predictor_block_size = None
-        args.attn_importance_weight = 1.0
         return args
     if args.attn_predictor_path is None:
         raise ValueError("--use_attn_predictor requires --attn_predictor_path")
 
     config = _load_attn_predictor_config(args.attn_predictor_path)
-    required_keys = ("history_step", "block_size", "attn_importance_weight")
+    required_keys = ("history_step", "block_size")
     missing = [key for key in required_keys if key not in config or config[key] is None]
     if missing:
         raise ValueError(
@@ -407,12 +407,10 @@ def apply_attn_predictor_config(args):
 
     args.attn_predictor_history_step = int(config["history_step"])
     args.attn_predictor_block_size = int(config["block_size"])
-    args.attn_importance_weight = float(config["attn_importance_weight"])
 
     print(
         "[attn_predictor] Loaded config: "
         f"history_step={args.attn_predictor_history_step}, "
-        f"block_size={args.attn_predictor_block_size}, "
-        f"attn_importance_weight={args.attn_importance_weight}"
+        f"block_size={args.attn_predictor_block_size}"
     )
     return args
