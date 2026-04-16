@@ -149,12 +149,12 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         return self.compressor.encode(residuals)
 
     def _decode_residuals(self):
-        if self.compressor is None:
+        if self.compressor is not None:
             return self.compressor.decode(self.value_residuals)
         return self.value_residuals
 
     def _empty_residuals(self):
-        if self.compressor is None:
+        if self.compressor is not None:
             return torch.empty(
                 0,
                 dtype=self.value_residuals.dtype,
@@ -163,7 +163,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         return self.value_residuals.new_empty(0)
 
     def residual_storage_nbytes(self, num_stored, head_dim, dtype):
-        if self.compressor is None:
+        if self.compressor is not None:
             return self.compressor.memory_nbytes(self.value_residuals)
         dtype_size = torch.finfo(dtype).bits / 8
         return num_stored * head_dim * dtype_size
