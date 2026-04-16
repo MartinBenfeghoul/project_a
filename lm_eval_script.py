@@ -238,7 +238,8 @@ def main(args):
         "freeze_W_linear": args.freeze_W_linear,
         "target_cr": args.target_cr,
         "use_attn_importance": args.use_attn_predictor,
-        
+        "turboquant_residuals": args.v_turboquant_residuals,
+        "compressor_bits": args.v_compressor_bits,
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model, per_head=args.per_head_kv_linear)
@@ -420,6 +421,8 @@ def parse_args():
     parser.add_argument("--early_stopping_tol", type=float, default=None, help="Stop MLP training early when relative loss improvement falls below this threshold.")
     parser.add_argument("--use_attn_predictor", action="store_true", help="Use a shared CNN attention predictor to guide value residual selection.")
     parser.add_argument("--attn_predictor_path", type=str, default=None, help="Path to a checkpoint from train_attention_predictor.py.")
+    parser.add_argument("--v_turboquant_residuals", action="store_true", help="Quantise stored MLP value residuals with TurboQuant.")
+    parser.add_argument("--v_compressor_bits", type=int, default=3, help="Bits per rotated residual coordinate for TurboQuant residual coding.")
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:

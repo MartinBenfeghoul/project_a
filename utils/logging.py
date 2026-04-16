@@ -179,7 +179,7 @@ def save_attention_predictor_checkpoint(
         key: value / max(1, num_updates)
         for key, value in running.items()
     }
-    payload = {
+    params = {
         "model_state_dict": predictor.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "step": step,
@@ -198,7 +198,7 @@ def save_attention_predictor_checkpoint(
     }
 
     torch.save(
-        payload,
+        params,
         os.path.join(args.checkpoint_dir, "model_ckpt.pt"),
     )
 
