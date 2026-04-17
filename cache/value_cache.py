@@ -215,12 +215,18 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         num_params = sum(p.numel() for p in self.mlp.parameters())
         delta_dtype = self.tensor.dtype
         value_dtype_size = torch.finfo(self.tensor.dtype).bits / 8
-        delta_dtype_size = torch.finfo(delta_dtype).bits / 8
         index_dtype_size = torch.iinfo(torch.int32).bits / 8
+        if self.compressor is not None:
+            import math
+            indices_per_byte = 8 // self.compressor.bits
+            per_delta_bytes = math.ceil(d / indices_per_byte) + 2 + index_dtype_size  # packed indices + fp16 norm + sparse index
+        else:
+            delta_dtype_size = torch.finfo(delta_dtype).bits / 8
+            per_delta_bytes = d * delta_dtype_size + index_dtype_size
         orig = b * h * t * d * value_dtype_size
         target_compressed = orig / self.target_cr
         allowed_delta_storage = target_compressed - (num_params * value_dtype_size)
-        n_deltas = int(allowed_delta_storage / (d * delta_dtype_size + index_dtype_size))
+        n_deltas = int(allowed_delta_storage / per_delta_bytes)
         n_deltas = max(0, min(n_deltas, b * h * t))
         self.target_perc = 100 * (1 - (n_deltas / (b * h * t)))
 
