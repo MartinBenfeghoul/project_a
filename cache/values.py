@@ -69,7 +69,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.meta_init = meta_init or MetaLearningLayerInit()
 
         self.un_rope = un_rope
-        self.rope_theta = rope_theta
         self.normalise_keys = normalise_keys
         self.use_residual = use_residual
         self.W_linear_init = W_linear_init
