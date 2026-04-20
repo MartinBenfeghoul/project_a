@@ -221,7 +221,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         if self.compressor is not None:
             import math
             indices_per_byte = 8 // self.compressor.bits
-            per_delta_bytes = math.ceil(d / indices_per_byte) + 2 + index_dtype_size  # packed indices + fp16 norm + sparse index
+            per_delta_bytes = math.ceil(d / indices_per_byte) + value_dtype_size + index_dtype_size  # packed indices + norm + sparse index
         else:
             delta_dtype_size = torch.finfo(delta_dtype).bits / 8
             per_delta_bytes = d * delta_dtype_size + index_dtype_size
