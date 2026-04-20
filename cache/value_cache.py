@@ -10,7 +10,9 @@ from utils import (
     MetaLearningInit,
     MetaLearningLayerInit,
     adapt_mlp_with_meta_lrs,
-    init_compressor
+    init_compressor,
+    MSECompressor,
+    CompressorParams,
     )
 
 LOSS_FUNC = {
@@ -609,7 +611,72 @@ class MLPValueCache(SingleTensorCache):
 
         return original_total / compressed_total
 
+class TurboQuantValueLayer(SingleTensorDynamicLayer):
+    def __init__(self, bits: int = 3):
+        super().__init__()
+        self.bits = bits
+        self.compressor: MSECompressor | None = None
+        self.compressed_params: CompressorParams | None = None
+        self.prefill = True
+        self.compressed_len = 0
+
+    def lazy_initialization(self, value_states: torch.Tensor) -> None:
+        super().lazy_initialization(value_states)
+        self.compressor = MSECompressor(
+            dim=value_states.shape[-1], bits=self.bits, device=value_states.device
+        )
+
+    def update(self, value_states: torch.Tensor, cache_kwargs=None) -> torch.Tensor:
+        values = super().update(value_states)
+
+        if self.prefill:
+            self.compressed_len = self.tensor.shape[2]
+            self.compressed_params = self.compressor.encode(self.tensor)
+            self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
+            self.prefill = False
+            return values
+
+        prefix = self.compressor.decode(self.compressed_params)
+        return torch.cat([prefix, self.tensor], dim=-2)
+
+
+class TurboQuantValueCache(SingleTensorCache):
+    def __init__(self, compressor_bits: int = 3, **kwargs):
+        super().__init__(**{k: v for k, v in kwargs.items() if k == "ddp_cache_data"})
+        self.compressor_bits = compressor_bits
+
+    def update(
+        self,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs=None,
+    ) -> torch.Tensor:
+        while len(self.layers) <= layer_idx:
+            self.layers.append(TurboQuantValueLayer(bits=self.compressor_bits))
+        return self.layers[layer_idx].update(value_states, cache_kwargs)
+
+    def calc_compression_ratio(self) -> float:
+        original_total = 0.0
+        compressed_total = 0.0
+        for layer in self.layers:
+            if layer.compressed_params is None:
+                continue
+            dtype_size = torch.finfo(layer.compressed_params.dtype).bits / 8
+            b, h, t_compressed, d = layer.compressed_params.shape
+            t_suffix = layer.tensor.shape[2]
+            t = t_compressed + t_suffix
+            original_total += b * h * t * d * dtype_size
+            compressed_total += (
+                layer.compressor.memory_nbytes(layer.compressed_params)
+                + b * h * t_suffix * d * dtype_size
+            )
+        if compressed_total == 0:
+            return 1.0
+        return original_total / compressed_total
+
+
 VALUE_CACHE_CLASSES = {
     "baseline": SingleTensorCache,
     "mlp": MLPValueCache,
+    "turboquant": TurboQuantValueCache,
 }
