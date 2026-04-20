@@ -5,6 +5,7 @@ Each MLP learns to predict value vectors from key vectors. The inner loop adapts
 MLP weights to a support set of KV pairs; the outer (meta) loop optimises the
 initial weights so that adapted MLPs generalise to the query set.
 """
+
 import itertools
 import os
 import time
@@ -73,7 +74,7 @@ def _support_loss(layer_mlps, cached_kvs, phi, loss_fn):
 def _phi_from_flat(flat, layer_param_counts):
     phi, idx = [], 0
     for n_w, n_b in layer_param_counts:
-        phi.append((flat[idx:idx + n_w], flat[idx + n_w:idx + n_w + n_b]))
+        phi.append((flat[idx : idx + n_w], flat[idx + n_w : idx + n_w + n_b]))
         idx += n_w + n_b
     return phi
 
@@ -83,8 +84,14 @@ def _sgd_update(phi, grads, inner_lr):
     lr_iter = iter(inner_lr) if isinstance(inner_lr, list) else None
     return [
         (
-            [p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter) for p in w],
-            [p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter) for p in b],
+            [
+                p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter)
+                for p in w
+            ],
+            [
+                p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter)
+                for p in b
+            ],
         )
         for w, b in phi
     ]
@@ -96,8 +103,8 @@ def _adam_update(phi_flat, grads, inner_lr, step, m1, m2, beta1, beta2, eps):
     for i, (p, g) in enumerate(zip(phi_flat, grads)):
         m1[i] = beta1 * m1[i] + (1 - beta1) * g.detach()
         m2[i] = beta2 * m2[i] + (1 - beta2) * g.detach().pow(2)
-        m_hat = m1[i] / (1 - beta1 ** t)
-        v_hat = m2[i] / (1 - beta2 ** t)
+        m_hat = m1[i] / (1 - beta1**t)
+        v_hat = m2[i] / (1 - beta2**t)
         lr = inner_lr[i] if isinstance(inner_lr, list) else inner_lr
         updated.append(p - lr * m_hat / (v_hat.sqrt() + eps))
     return updated
@@ -111,13 +118,15 @@ def inner_loop_functional(
     loss_fn=F.mse_loss,
     track_losses=False,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
     inner_optimizer="sgd",
     inner_adam_beta1=0.9,
     inner_adam_beta2=0.999,
     inner_adam_eps=1e-8,
 ):
-    theta = [p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)]
+    theta = [
+        p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)
+    ]
     phi = [
         (
             [p.detach().clone().requires_grad_(True) for p in mlp.weights],
@@ -125,7 +134,9 @@ def inner_loop_functional(
         )
         for mlp in layer_mlps
     ]
-    layer_param_counts = [(len(mlp.weights), len(mlp.biases)) for mlp in layer_mlps]
+    layer_param_counts = [
+        (len(mlp.weights), len(mlp.biases)) for mlp in layer_mlps
+    ]
 
     adam_state = None
     if inner_optimizer == "adam":
@@ -145,11 +156,23 @@ def inner_loop_functional(
             inner_losses.append(float(total_loss.detach().cpu()))
 
         phi_flat = [p for w, b in phi for p in w + b]
-        grads = torch.autograd.grad(total_loss, phi_flat, create_graph=False, retain_graph=False)
+        grads = torch.autograd.grad(
+            total_loss, phi_flat, create_graph=False, retain_graph=False
+        )
 
         if inner_optimizer == "adam":
             m1, m2 = adam_state
-            updated_flat = _adam_update(phi_flat, grads, inner_lr, step, m1, m2, inner_adam_beta1, inner_adam_beta2, inner_adam_eps)
+            updated_flat = _adam_update(
+                phi_flat,
+                grads,
+                inner_lr,
+                step,
+                m1,
+                m2,
+                inner_adam_beta1,
+                inner_adam_beta2,
+                inner_adam_eps,
+            )
             phi = _phi_from_flat(updated_flat, layer_param_counts)
         else:
             phi = _sgd_update(phi, grads, inner_lr)
@@ -159,7 +182,14 @@ def inner_loop_functional(
         with torch.no_grad():
             final_support_loss = _support_loss(layer_mlps, cached_kvs, phi, loss_fn).item()
 
-    return theta, phi, {"inner_losses": inner_losses, "final_support_loss": final_support_loss}
+    return (
+        theta,
+        phi,
+        {
+            "inner_losses": inner_losses,
+            "final_support_loss": final_support_loss,
+        },
+    )
 
 
 def functional_mlp_forward(mlp, x, weights, biases):
@@ -176,7 +206,7 @@ def compute_loss_functional(
     loss_fn=F.mse_loss,
     track_per_layer=False,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
 ):
     total_loss = 0
     per_layer_losses = [] if track_per_layer else None
@@ -210,25 +240,39 @@ def compute_query_loss(
     lambda_compression=0.0,
     track_per_layer=False,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
 ):
     if target_perc_params is not None:
         return compute_compressed_loss(
-            layer_mlps, kv_cache, phi, target_perc_params,
-            tau=tau, lambda_compression=lambda_compression,
-            track_per_layer=track_per_layer, un_rope=un_rope, rope_theta=rope_theta,
+            layer_mlps,
+            kv_cache,
+            phi,
+            target_perc_params,
+            tau=tau,
+            lambda_compression=lambda_compression,
+            track_per_layer=track_per_layer,
+            un_rope=un_rope,
+            rope_theta=rope_theta,
         )
     return compute_loss_functional(
-        layer_mlps, kv_cache, phi, loss_fn,
-        track_per_layer=track_per_layer, un_rope=un_rope, rope_theta=rope_theta,
+        layer_mlps,
+        kv_cache,
+        phi,
+        loss_fn,
+        track_per_layer=track_per_layer,
+        un_rope=un_rope,
+        rope_theta=rope_theta,
     )
+
 
 def get_differentiable_thresh(mse_per_token, index_perc):
     B, H, T = mse_per_token.shape
     sorted_errors, _ = torch.sort(mse_per_token.detach().view(B, -1), dim=1)
     k_lo = index_perc.detach().long().clamp(0, H * T - 2)
     frac = index_perc - k_lo.float()
-    thresh = torch.lerp(sorted_errors[:, k_lo], sorted_errors[:, k_lo + 1], frac).view(B, 1, 1)
+    thresh = torch.lerp(
+        sorted_errors[:, k_lo], sorted_errors[:, k_lo + 1], frac
+    ).view(B, 1, 1)
     return thresh
 
 
@@ -241,7 +285,7 @@ def compute_compressed_loss(
     lambda_compression=0.0,
     track_per_layer=False,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
 ):
     total_loss = 0
     per_layer_losses = [] if track_per_layer else None
@@ -290,7 +334,9 @@ def setup_optimizer(layer_mlps, target_perc_params, config, device):
     if learn_target_perc and target_perc_params is not None:
         meta_params = meta_params + list(target_perc_params)
 
-    if learn_inner_lr:  # TODO: maybe try doing this per head or per layer rather than per parameter
+    if (
+        learn_inner_lr
+    ):  # TODO: maybe try doing this per head or per layer rather than per parameter
         inner_lr_params = [
             nn.Parameter(
                 torch.tensor(
@@ -325,7 +371,7 @@ def meta_step(
     should_log,
     device,
     un_rope=False,
-    rope_theta=500_000.0,
+    rope_theta=None,
     inner_optimizer="sgd",
     inner_adam_beta1=0.9,
     inner_adam_beta2=0.999,
@@ -397,7 +443,11 @@ def accumulate_gradients(
 ):
     phi_flat = [p for w, b in phi for p in w + b]
 
-    learnable_perc = [p for p in target_perc_params if p.requires_grad] if target_perc_params else []
+    learnable_perc = (
+        [p for p in target_perc_params if p.requires_grad]
+        if target_perc_params
+        else []
+    )
 
     extra_params = []
     if inner_lr_params is not None:
@@ -411,7 +461,7 @@ def accumulate_gradients(
         retain_graph=False,
     )
     g_phi = all_grads[: len(phi_flat)]
-    g_extra = all_grads[len(phi_flat):]
+    g_extra = all_grads[len(phi_flat) :]
 
     for p_theta, g in zip(theta_list, g_phi):
         if g is None:
@@ -423,7 +473,9 @@ def accumulate_gradients(
 
     offset = 0
     if inner_lr_params is not None:
-        for lr_param, g in zip(inner_lr_params, g_extra[: len(inner_lr_params)]):
+        for lr_param, g in zip(
+            inner_lr_params, g_extra[: len(inner_lr_params)]
+        ):
             if lr_param.grad is None:
                 lr_param.grad = g.detach() * scale
             else:
@@ -474,7 +526,9 @@ def run_epoch(
     meta_optimizer.zero_grad()
 
     batch_iter = itertools.islice(data_iter, batches_per_epoch)
-    for batch_idx, batch in enumerate(tqdm(batch_iter, total=batches_per_epoch)):
+    for batch_idx, batch in enumerate(
+        tqdm(batch_iter, total=batches_per_epoch)
+    ):
         should_log = batch_idx % log_interval == 0
 
         (
@@ -515,7 +569,7 @@ def run_epoch(
         )
 
         accum_count += 1
-        if accum_count >= grad_accum_steps: # gradient update every 32 batches
+        if accum_count >= grad_accum_steps:  # gradient update every 32 batches
             meta_optimizer.step()
             if target_perc_params is not None:
                 for p in target_perc_params:
@@ -571,7 +625,12 @@ def evaluate_ruler(
     """Run RULER benchmark with current MLP weights and log average score to wandb."""
     from lm_eval import evaluator
     from lm_eval.tasks import TaskManager
-    from lm_eval_script import CompressedCacheHFLM, get_tasks, get_device, GEN_KWARGS
+    from lm_eval_script import (
+        CompressedCacheHFLM,
+        get_tasks,
+        get_device,
+        GEN_KWARGS,
+    )
 
     print(f"Running RULER evaluation (epoch {epoch}, {num_samples} samples)...")
 
@@ -579,7 +638,9 @@ def evaluate_ruler(
     num_kv_heads = model.config.num_key_value_heads
 
     if target_perc_params is not None:
-        target_perc = [p.clamp(0.0, 1.0).item() * 100 for p in target_perc_params]
+        target_perc = [
+            p.clamp(0.0, 1.0).item() * 100 for p in target_perc_params
+        ]
     else:
         default_perc = training_config.get("target_perc", 50.0)
         target_perc = [default_perc] * num_layers
@@ -595,15 +656,18 @@ def evaluate_ruler(
         "energy_threshold": 1.0,
         "rank_selection": "comp_ratio",
         "lr": 1e-2,
-        "n_iter": 3,
+        "decomp_n_iter": 3,
         "gamma": 3.0,
         "min_size": 8.0,
+        "unrope_keys": training_config.get("un_rope", False),
+        "rope_theta": training_config.get("rope_theta", 500_000.0),
     }
 
     value_cache_kwargs = {
         "cache_type": "mlp",
         "num_layers_per_mlp": [training_config.mlp_num_layers] * num_layers,
-        "hidden_factors_per_mlp": [training_config.mlp_hidden_factor] * num_layers,
+        "hidden_factors_per_mlp": [training_config.mlp_hidden_factor]
+        * num_layers,
         "num_heads_per_mlp": [num_kv_heads] * num_layers,
         "per_sequence": False,
         "target_perc": target_perc,
@@ -646,12 +710,20 @@ def evaluate_ruler(
     task_scores = {}
     for task_name, task_results in results["results"].items():
         for key, val in task_results.items():
-            if isinstance(val, (int, float)) and "stderr" not in key and key not in ("alias", "samples"):
+            if (
+                isinstance(val, (int, float))
+                and "stderr" not in key
+                and key not in ("alias", "samples")
+            ):
                 task_scores[task_name] = val
                 break
 
-    avg_score = sum(task_scores.values()) / len(task_scores) if task_scores else 0.0
-    print(f"RULER eval epoch {epoch}: avg={avg_score:.4f}, per-task={task_scores}")
+    avg_score = (
+        sum(task_scores.values()) / len(task_scores) if task_scores else 0.0
+    )
+    print(
+        f"RULER eval epoch {epoch}: avg={avg_score:.4f}, per-task={task_scores}"
+    )
 
     if use_wandb:
         log_data = {"benchmark/ruler_avg": avg_score, "epoch/epoch": epoch}
@@ -720,7 +792,13 @@ def meta_train(
                 step=global_step,
             )
 
-        save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params)
+        save_checkpoint(
+            layer_mlps,
+            inner_lr_params,
+            checkpoint_path,
+            epoch,
+            target_perc_params,
+        )
 
         eval_ruler = config.get("eval_ruler", True)
         if eval_ruler and tokenizer is not None:
@@ -821,7 +899,9 @@ def main():
     default_perc = training_config.get("target_perc", 75.0) / 100.0
     if learn_target_perc:
         target_perc_params = [
-            nn.Parameter(torch.tensor(default_perc, dtype=torch.float32, device=device))
+            nn.Parameter(
+                torch.tensor(default_perc, dtype=torch.float32, device=device)
+            )
             for _ in range(num_layers)
         ]
         print(
@@ -833,7 +913,9 @@ def main():
             torch.tensor(default_perc, dtype=torch.float32, device=device)
             for _ in range(num_layers)
         ]
-        print(f"Fixed target_perc: {default_perc * 100:.1f}% (not meta-learned)")
+        print(
+            f"Fixed target_perc: {default_perc * 100:.1f}% (not meta-learned)"
+        )
 
     print("Loading dataset...")
     hf_dataset = load_data()

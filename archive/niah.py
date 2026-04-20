@@ -7,6 +7,7 @@ from utils import (
     get_model_and_tokenizer,
 )
 
+
 def make_hook(logger, uncompressed_window=0):
     """
     :param logger: persistent logger object to record metrics
@@ -39,10 +40,13 @@ def make_hook(logger, uncompressed_window=0):
                     label_ed = -uncompressed_window
                 else:
                     label_ed = None
-                pkv.update_events(
+                n_events = pkv.update_events(
                     logits[..., : -1 - uncompressed_window, :],
                     input_ids[..., 1:label_ed],
                 )
+                if n_events is not None and n_events > 0:
+                    logger.add_log("n_events", n_events)
+                    logger.add_log("avg_event_size", seq_len / n_events)
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
@@ -54,9 +58,12 @@ def make_hook(logger, uncompressed_window=0):
     return hook
 
 
-def register_hooks(model):
+def register_hooks(model, uncompressed_window=0):
     logger = Logger()
-    model.register_forward_hook(make_hook(logger), with_kwargs=True)
+    model.register_forward_hook(
+        make_hook(logger, uncompressed_window=uncompressed_window),
+        with_kwargs=True,
+    )
     return model, logger
 
 
@@ -83,7 +90,7 @@ def main(
         Tuple of `(success_rate, (compression_ratio_mean, compression_ratio_std))`.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     model, tokenizer = get_model_and_tokenizer(model_name, device)
     model, logger = register_hooks(model)
 
@@ -122,7 +129,8 @@ def main(
         output = output[0]
         correct = answer in output
         n_correct += 1 if correct else 0
-        print(f"Output: {output}", f"{'\u2705' if correct else '\u274C'}")
+        status = "\u2705" if correct else "\u274c"
+        print(f"Output: {output}", status)
         if i >= n_samples - 1:
             print(f"Finished testing on {n_samples}. Stopping.")
             break
@@ -130,6 +138,13 @@ def main(
     print(f"Success rate: {success_rate * 100:.1f}%")
     cr_avg, cr_std = logger.get_log_mean("crs", std=True)
     print(f"Compression ratio: {cr_avg:.2f}+-{cr_std:.2f}")
+    n_events = logger.get_log_mean("n_events")
+    avg_event_size = logger.get_log_mean("avg_event_size")
+    if n_events is not None and avg_event_size is not None:
+        print(
+            f"Average events per sample: {float(n_events):.2f}, "
+            f"average event size: {float(avg_event_size):.2f} tokens"
+        )
     return success_rate, (cr_avg, cr_std)
 
 
@@ -150,20 +165,59 @@ def get_parser():
 
     # key cache
     parser.add_argument("--k_cache_type", type=str, default="surprise_lr")
-    parser.add_argument("--decomposition_method", type=str, default="svd", choices=["svd", "lora"])
+    parser.add_argument(
+        "--decomposition_method",
+        type=str,
+        default="svd",
+        choices=["svd", "lora"],
+    )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
-    parser.add_argument("--rank_selection", type=str, default="comp_ratio", choices=["comp_ratio", "energy"])
+    parser.add_argument(
+        "--rank_selection",
+        type=str,
+        default="comp_ratio",
+        choices=["comp_ratio", "energy"],
+    )
     parser.add_argument("--k_lr", type=float, default=1e-2)
-    parser.add_argument("--n_iter", type=int, default=3)
+    parser.add_argument("--decomp_n_iter", type=int, default=3)
+    parser.add_argument("--local_window", type=int, default=0)
+    parser.add_argument(
+        "--kmeans_cluster_size",
+        type=float,
+        default=None,
+    )
+    parser.add_argument("--kmeans_n_iter", type=int, default=3)
+    parser.add_argument(
+        "--kmeans_init",
+        type=str,
+        default="infllm",
+        choices=["infllm", "random", "kmeans++"],
+    )
+    parser.add_argument(
+        "--kmeans_dtype",
+        type=str,
+        default="float32",
+        choices=["float16", "float32", "bfloat16"],
+    )
+    parser.add_argument("--kmeans_avg_heads", action="store_true")
+    parser.add_argument("--kmeans_per_head", action="store_true")
 
     # value cache
     parser.add_argument("--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--num_layers_per_mlp", type=int, nargs="+", default=[2]*16)
-    parser.add_argument("--hidden_factors_per_mlp", type=int, nargs="+", default=[1]*16)
-    parser.add_argument("--num_heads_per_mlp", type=int, nargs="+", default=[1]*16)
+    parser.add_argument(
+        "--num_layers_per_mlp", type=int, nargs="+", default=[2] * 16
+    )
+    parser.add_argument(
+        "--hidden_factors_per_mlp", type=int, nargs="+", default=[1] * 16
+    )
+    parser.add_argument(
+        "--num_heads_per_mlp", type=int, nargs="+", default=[1] * 16
+    )
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument("--target_perc", type=int, nargs="+", default=[100]*8+[85]*8)
+    parser.add_argument(
+        "--target_perc", type=int, nargs="+", default=[100] * 8 + [85] * 8
+    )
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument("--optimizer", type=str, default="adam")
@@ -179,13 +233,20 @@ if __name__ == "__main__":
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
+        "local_window": args.local_window,
         "comp_ratio": args.comp_ratio,
         "energy_threshold": args.energy_threshold,
         "rank_selection": args.rank_selection,
         "lr": args.k_lr,
-        "n_iter": args.n_iter,
+        "decomp_n_iter": args.decomp_n_iter,
         "gamma": 3.0,
         "min_size": 8.0,
+        "kmeans_cluster_size": args.kmeans_cluster_size,
+        "kmeans_n_iter": args.kmeans_n_iter,
+        "kmeans_init": args.kmeans_init,
+        "kmeans_dtype": args.kmeans_dtype,
+        "kmeans_avg_heads": args.kmeans_avg_heads,
+        "kmeans_per_head": args.kmeans_per_head,
     }
 
     value_cache_kwargs = {

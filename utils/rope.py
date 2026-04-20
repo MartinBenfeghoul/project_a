@@ -1,5 +1,6 @@
 import torch
 
+
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
@@ -7,11 +8,16 @@ def rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def inverse_rope(
-    keys: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 ) -> torch.Tensor:
-    """Undo RoPE: k = k_rotated * cos - rotate_half(k_rotated) * sin"""
-    return keys * cos - rotate_half(keys) * sin
+    """Undo RoPE: x = x_rotated * cos - rotate_half(x_rotated) * sin"""
+    return x * cos - rotate_half(x) * sin
 
+def apply_rope(
+    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> torch.Tensor:
+    """Apply RoPE: x_rotated = x * cos + rotate_half(x) * sin"""
+    return x * cos + rotate_half(x) * sin
 
 def compute_rope_cos_sin(
     seq_len: int,
@@ -22,9 +28,10 @@ def compute_rope_cos_sin(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Standard RoPE cos/sin."""
     inv_freq = 1.0 / (
-        rope_theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim)
+        rope_theta
+        ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim)
     )
-    t     = torch.arange(seq_len, device=device).float()
+    t = torch.arange(seq_len, device=device).float()
     freqs = torch.outer(t, inv_freq)
-    emb   = torch.cat([freqs, freqs], dim=-1)
+    emb = torch.cat([freqs, freqs], dim=-1)
     return emb.cos()[None, None].to(dtype), emb.sin()[None, None].to(dtype)

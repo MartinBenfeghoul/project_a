@@ -1,7 +1,7 @@
 from .metrics import eval_model, avg_nll, clean, cosine_loss, get_loss_func
 from .model import get_model_and_tokenizer, clone_mlp_params, extract_kv_linear_init
 from .kv_generator import generate_kv_batched
-from .matrix_decomposition import truncated_svd, full_svd, learn_lora_matrix
+from .matrix_decomposition import learn_lora_matrix
 from .dataloader import (
     PackedTokens,
     load_data,
@@ -20,12 +20,14 @@ from .logging import (
     init_wandb,
     save_checkpoint,
     log_batch,
+    extract_and_save_stats,
+    extract_and_save_efficiency_stats,
     get_output_path,
     save_attention_predictor_checkpoint,
     prepare_run_directory,
     attention_predictor_config,
 )
-from .rope import inverse_rope, compute_rope_cos_sin
+from .rope import inverse_rope, apply_rope, compute_rope_cos_sin
 from .device import get_device, get_device_type
 from .meta_learning import MetaLearningInit, MetaLearningLayerInit, adapt_mlp_with_meta_lrs
 from .lloyd_max import LloydMaxCodebook

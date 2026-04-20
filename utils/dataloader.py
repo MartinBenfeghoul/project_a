@@ -31,7 +31,11 @@ def collate(batch):
     input_ids = torch.stack([b["input_ids"] for b in batch], dim=0)
     labels = torch.stack([b["labels"] for b in batch], dim=0)
     attn_mask = torch.stack([b["attention_mask"] for b in batch], dim=0)
-    return {"input_ids": input_ids, "labels": labels, "attention_mask": attn_mask}
+    return {
+        "input_ids": input_ids,
+        "labels": labels,
+        "attention_mask": attn_mask,
+    }
 
 
 class PackedTokens(IterableDataset):
@@ -129,8 +133,16 @@ class PairedDataset(IterableDataset):
 
 def collate_pairs(batch):
     return {
-        "support_input_ids":      torch.stack([b["support"]["input_ids"]      for b in batch]),
-        "support_attention_mask": torch.stack([b["support"]["attention_mask"] for b in batch]),
-        "query_input_ids":        torch.stack([b["query"]["input_ids"]        for b in batch]),
-        "query_attention_mask":   torch.stack([b["query"]["attention_mask"]   for b in batch]),
+        "support_input_ids": torch.stack(
+            [b["support"]["input_ids"] for b in batch]
+        ),
+        "support_attention_mask": torch.stack(
+            [b["support"]["attention_mask"] for b in batch]
+        ),
+        "query_input_ids": torch.stack(
+            [b["query"]["input_ids"] for b in batch]
+        ),
+        "query_attention_mask": torch.stack(
+            [b["query"]["attention_mask"] for b in batch]
+        ),
     }

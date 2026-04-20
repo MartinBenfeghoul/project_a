@@ -1,12 +1,10 @@
-from .cache import SingleTensorCache, SingleTensorDynamicLayer
+from .base import SingleTensorCache, SingleTensorDynamicLayer
 from torch.optim import Adam, AdamW, SGD
 from torch.nn.functional import mse_loss
 import torch
 from model.mlp import MLP
 from typing import Any
 from utils import (
-    inverse_rope,
-    compute_rope_cos_sin,
     MetaLearningInit,
     MetaLearningLayerInit,
     adapt_mlp_with_meta_lrs,
@@ -36,11 +34,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         threshold: float | None = None,
         optimizer_cls: str = "adam",
         num_epochs: int = 5,
-        lr: float = 1.e-3,
+        lr: float = 1.0e-3,
         loss_func: str = "mse",
         meta_init: MetaLearningLayerInit | None = None,
         un_rope: bool = False,
-        rope_theta: float = 500_000.0,
         global_compression: bool = False,
         normalise_keys: bool = False,
         use_residual: bool = False,
@@ -53,8 +50,9 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         use_attn_importance: bool = False,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
+        **kwargs,
     ):
-        super().__init__()
+        super().__init__(**kwargs)
 
         self.mlp_num_layers = mlp_num_layers
         self.mlp_hidden_factor = mlp_hidden_factor
@@ -107,17 +105,21 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
 
     def lazy_initialization(self, value_states: torch.Tensor) -> None:
-        
+
         super().lazy_initialization(value_states)
-        
+
         _, self.num_heads, _, self.head_dim = value_states.shape
         self.compressor = init_compressor(
             self.turboquant_residuals, self.compressor_bits, value_states.shape[-1], value_states.device
             )
 
-        self.indices = torch.tensor([], dtype=torch.long, device=value_states.device)
+        self.indices = torch.tensor(
+            [], dtype=torch.long, device=value_states.device
+        )
 
-        self.value_residuals = torch.tensor([], dtype=value_states.dtype, device=value_states.device)
+        self.value_residuals = torch.tensor(
+            [], dtype=value_states.dtype, device=value_states.device
+        )
 
         if not self.linear_only:
             per_head_residual = self.W_linear_init is not None and self.W_linear_init.ndim == 3
@@ -259,19 +261,25 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             return
 
         v_approx = self.mlp(keys)
-        errors = self.loss_func(self.tensor, v_approx, reduction='none').mean(dim=-1)
+        errors = self.loss_func(self.tensor, v_approx, reduction="none").mean(
+            dim=-1
+        )
         self.compressed_len = self.tensor.shape[2]
 
         if self.global_compression:
             self.errors = errors
             self.value_residuals = (self.tensor - v_approx).detach()
-            self.tensor = self.tensor.new_empty((*self.tensor.shape[:2], 0, self.tensor.shape[3]))
+            self.tensor = self.tensor.new_empty(
+                (*self.tensor.shape[:2], 0, self.tensor.shape[3])
+            )
             return
 
         errors = self._score_errors(errors, value_importance)
         if self.threshold is None and self.target_perc is None:
-            raise ValueError("MLPValueLayer requires either a threshold or target_perc to compress values")
-        
+            raise ValueError(
+                "MLPValueLayer requires either a threshold or target_perc to compress values"
+            )
+
         if self.target_perc is not None:
             B = errors.shape[0]
             errors_b = errors.view(B, -1)
@@ -301,62 +309,29 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             self.tensor = values
             self._reset_residuals()
         return values
-    
+
     def _reset_residuals(self):
         self.is_compressed = False
         self.value_residuals = self._empty_residuals()
         self.indices = self.indices.new_empty(0)     
 
-    def _unrope(
+    def update(
         self,
-        keys: torch.Tensor,
-        cache_kwargs: dict | None = None,
+        value_states: torch.Tensor,
+        cache_kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
-        if not self.un_rope:
-            return keys
 
-        T = keys.shape[2]
-
-        if self.prefill:
-            if cache_kwargs is not None and "cos" in cache_kwargs and "sin" in cache_kwargs:
-                cos, sin = cache_kwargs["cos"], cache_kwargs["sin"]
-                # TODO: check that this is compatible with other architectures
-                if cos.dim() == 3:
-                    cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-                cos = cos[:, :, :T].to(device=keys.device, dtype=keys.dtype)
-                sin = sin[:, :, :T].to(device=keys.device, dtype=keys.dtype)
-            else:
-                cos, sin = compute_rope_cos_sin(
-                    T, self.head_dim, self.rope_theta, keys.device, keys.dtype
-                )
-            self.rope_cos = cos
-            self.rope_sin = sin
-            return inverse_rope(keys, cos, sin)
-
-        # Decode: un-rope only the compressed prefix; suffix is never fed to MLP
-        prefix_len = min(self.compressed_len, T)
-        if self.rope_cos is not None:
-            cos = self.rope_cos[:, :, :prefix_len].to(device=keys.device, dtype=keys.dtype)
-            sin = self.rope_sin[:, :, :prefix_len].to(device=keys.device, dtype=keys.dtype)
-        else:
-            cos, sin = compute_rope_cos_sin(
-                prefix_len, self.head_dim, self.rope_theta, keys.device, keys.dtype
-            )
-        prefix = inverse_rope(keys[:, :, :prefix_len], cos, sin)
-        if prefix_len < T:
-            return torch.cat([prefix, keys[:, :, prefix_len:]], dim=2)
-        return prefix
-
-    def update(self,
-               value_states: torch.Tensor,
-               cache_kwargs: dict[str, Any] | None = None
-               ) -> torch.Tensor:
-        
         if cache_kwargs is None or "keys" not in cache_kwargs:
             raise ValueError("MLPValueLayer requires keys in cache_kwargs")
-        
+
         keys = cache_kwargs["keys"]
-        keys_for_mlp = self._unrope(keys, cache_kwargs)
+        if self.un_rope:
+            keys_for_mlp = self._undo_rope(
+                keys, cache_kwargs,
+                prefill=self.prefill, compressed_len=self.compressed_len,
+            )
+        else:
+            keys_for_mlp = keys
         keys_for_mlp = self._normalise_keys(keys_for_mlp)
         values = super().update(value_states)
 
@@ -443,7 +418,12 @@ class MLPValueCache(SingleTensorCache):
     ):
         super().__init__(*args, **kwargs)
 
-        assert len(num_layers_per_mlp) == len(hidden_factors_per_mlp) == len(num_heads_per_mlp) == len(target_perc)
+        assert (
+            len(num_layers_per_mlp)
+            == len(hidden_factors_per_mlp)
+            == len(num_heads_per_mlp)
+            == len(target_perc)
+        )
 
         self.num_layers_per_mlp = num_layers_per_mlp
         self.hidden_factors_per_mlp = hidden_factors_per_mlp
@@ -511,7 +491,9 @@ class MLPValueCache(SingleTensorCache):
             mlp_num_layers=self.num_layers_per_mlp[layer_idx],
             mlp_hidden_factor=self.hidden_factors_per_mlp[layer_idx],
             mlp_num_heads=self.num_heads_per_mlp[layer_idx],
-            target_perc=None if self.global_compression else self.target_perc[layer_idx],
+            target_perc=(
+                None if self.global_compression else self.target_perc[layer_idx]
+            ),
             per_sequence=self.per_sequence,
             loss_func=self.loss_func,
             num_epochs=self.num_epochs,
@@ -535,7 +517,9 @@ class MLPValueCache(SingleTensorCache):
         )
 
     def _run_global_compression(self):
-        all_errors = torch.cat([layer.errors.reshape(-1) for layer in self.layers])
+        all_errors = torch.cat(
+            [layer.errors.reshape(-1) for layer in self.layers]
+        )
         global_perc = sum(self.target_perc) / len(self.target_perc)
         k = int(all_errors.numel() * (global_perc / 100))
         thresh = torch.topk(all_errors, k, largest=False).values[-1]

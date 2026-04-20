@@ -9,10 +9,8 @@ import torch
 from lm_eval import evaluator
 from lm_eval.utils import make_table
 from lm_eval.tasks import TaskManager
-from lm_eval.models.huggingface import HFLM
-from lm_eval.models.utils_hf import stop_sequences_criteria
 
-from cache import CompressedCache
+from cache import CompressedCacheHFLM
 from model.attention_predictor import (
     get_attn_predictor_hook_handles,
     apply_attn_predictor_config
@@ -24,9 +22,10 @@ from utils import (
     get_device,
     get_device_type,
     list_of_strings,
-    get_output_path
-    )
-
+    get_output_path,
+    extract_and_save_stats,
+    extract_and_save_efficiency_stats,
+)
 
 GEN_KWARGS = {
     "do_sample": False,
@@ -34,15 +33,15 @@ GEN_KWARGS = {
     "logits_to_keep": 0,
 }
 
+
 def get_tasks(tasks, print_tasks=True):
     if len(tasks) == 1:
-        task_conf = OmegaConf.load('config/tasks.yaml')
+        task_conf = OmegaConf.load("config/tasks.yaml")
         if tasks[0] in task_conf:
             tasks = OmegaConf.to_container(task_conf[tasks[0]], resolve=True)
     if print_tasks:
         print(f"Evaluating tasks: {tasks}")
     return tasks
-
 
 
 def make_hooks(
@@ -60,6 +59,13 @@ def make_hooks(
 
     _cuda = measure_latency and torch.cuda.is_available()
     _cuda_mem = measure_gpu_memory and torch.cuda.is_available()
+
+    def has_complete_key_cache_timings(timing_stats):
+        return (
+            timing_stats is not None
+            and timing_stats.get("decompose_calls", 0) > 0
+            and timing_stats.get("reconstruct_calls", 0) > 0
+        )
 
     def pre_hook(module, args, kwargs):
         input_ids = kwargs.get("input_ids", args[0] if args else None)
@@ -90,10 +96,14 @@ def make_hooks(
                 else:
                     label_ed = None
                 logits = output.logits
-                pkv.update_events(
-                    logits[..., :-1 - uncompressed_window, :],
-                    input_ids[..., 1:label_ed]
-                    )
+                n_events = pkv.update_events(
+                    logits[..., : -1 - uncompressed_window, :],
+                    input_ids[..., 1:label_ed],
+                )
+                if n_events is not None and n_events > 0:
+                    avg_event_size = seq_len / n_events
+                    logger.add_log("n_events", n_events)
+                    logger.add_log("avg_event_size", avg_event_size)
             if _cuda:
                 logger.prefill_events.append((_start_evt[0], end_evt))
             if _cuda_mem:
@@ -112,75 +122,30 @@ def make_hooks(
                     print(f"Compression ratio: {cr:.2f}")
                     logger.add_log("crs", cr)
                     logger.recorded_cr = True
+            if hasattr(pkv, "timing_stats") and not logger.recorded_k_timing:
+                timing_stats = pkv.timing_stats
+                if has_complete_key_cache_timings(timing_stats):
+                    logger.add_log(
+                        "key_cache_decompose_time",
+                        timing_stats["decompose_time"],
+                    )
+                    logger.add_log(
+                        "key_cache_reconstruct_time",
+                        timing_stats["reconstruct_time"],
+                    )
+                    logger.add_log(
+                        "key_cache_decompose_relative",
+                        timing_stats["decompose_relative"],
+                    )
+                    logger.add_log(
+                        "key_cache_reconstruct_relative",
+                        timing_stats["reconstruct_relative"],
+                    )
+                    logger.recorded_k_timing = True
             if _cuda:
                 logger.decode_events.append((_start_evt[0], end_evt))
 
     return pre_hook, post_hook
-
-
-class CompressedCacheHFLM(HFLM):
-    """
-    HFLM subclass that injects a new CompressedCache into every model call.
-    Note: once CompressiveCache is implemented in transformers, subclassing won't be needed
-    simply pass "cache_implementation": "compressive_cache" in generation kwargs
-    """
-
-    def __init__(self, key_cache_kwargs, value_cache_kwargs, logger, **kwargs):
-        super().__init__(**kwargs)
-        self._key_cache_kwargs = key_cache_kwargs
-        self._value_cache_kwargs = value_cache_kwargs
-        self._logger = logger
-
-    def _make_cache(self):
-        return CompressedCache(
-            config=self.model.config,
-            key_cache_kwargs=self._key_cache_kwargs,
-            value_cache_kwargs=self._value_cache_kwargs,
-            verbose=False
-        )
-
-    def _model_call(self, inps, attn_mask=None, labels=None):
-        with (
-            torch.no_grad(),
-            torch.autocast(
-                device_type=self.device.type,
-                dtype=self.mixed_precision_dtype,
-                enabled=self.mixed_precision_dtype is not None,
-            ),
-        ):
-            if attn_mask is not None or labels is not None:
-                assert attn_mask is not None and labels is not None
-                return self.model(
-                    input_ids=inps, attention_mask=attn_mask, labels=labels
-                ).logits
-            return self.model(inps, past_key_values=self._make_cache()).logits
-
-    def _model_generate(self, context, max_length, stop, **generation_kwargs):
-        self._logger.recorded_cr = False
-        generation_kwargs["past_key_values"] = self._make_cache()
-        generation_kwargs["temperature"] = generation_kwargs.get("temperature", 0.0)
-        do_sample = generation_kwargs.get("do_sample")
-
-        if (temp := generation_kwargs.get("temperature")) == 0.0 and do_sample is None:
-            generation_kwargs["do_sample"] = do_sample = False
-
-        if do_sample is False and temp == 0.0:
-            generation_kwargs.pop("temperature", None)
-        stopping_criteria = stop_sequences_criteria(
-            self.tokenizer, stop, context.shape[1], context.shape[0]
-        )
-        with torch.autocast(
-            device_type=self.device.type,
-            dtype=self.mixed_precision_dtype,
-            enabled=self.mixed_precision_dtype is not None,
-        ):
-            return self.model.generate(
-                input_ids=context,
-                max_length=max_length,
-                stopping_criteria=stopping_criteria,
-                pad_token_id=self.tokenizer.pad_token_id,
-                **generation_kwargs,
-            )
 
 
 @torch.no_grad()
@@ -192,19 +157,32 @@ def main(args):
     logger = Logger()
     logger.prefill_events = []
     logger.decode_events = []
+    logger.recorded_k_timing = False
+
+    rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
 
     attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
 
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
+        "local_window": args.local_window,
+        "log_timing_stats": args.log_key_cache_timing,
         "comp_ratio": args.comp_ratio,
         "energy_threshold": args.energy_threshold,
         "rank_selection": args.rank_selection,
         "lr": args.k_lr,
-        "n_iter": args.n_iter,
-        "gamma": 3.0,
-        "min_size": 8.0,
+        "decomp_n_iter": args.decomp_n_iter,
+        "gamma": args.gamma,
+        "min_size": 8,
+        "kmeans_cluster_size": args.kmeans_cluster_size,
+        "kmeans_n_iter": args.kmeans_n_iter,
+        "kmeans_init": args.kmeans_init,
+        "kmeans_dtype": args.kmeans_dtype,
+        "kmeans_avg_heads": args.kmeans_avg_heads,
+        "kmeans_per_head": args.kmeans_per_head,
+        "unrope_keys": args.un_rope,
+        "rope_theta": rope_theta,
     }
 
     num_layers = model.config.num_hidden_layers
@@ -228,7 +206,7 @@ def main(args):
         "num_epochs": args.num_epochs,
         "meta_weights_path": args.meta_weights_path,
         "un_rope": args.un_rope,
-        "rope_theta": args.rope_theta,
+        "rope_theta": rope_theta,
         "global_compression": args.global_compression,
         "normalise_keys": args.normalise_keys,
         "use_residual": args.use_residual,
@@ -358,13 +336,26 @@ def main(args):
 
     print(make_table(results))
 
+    results = extract_and_save_stats(logger, results)
+    if args.log_efficiency_metrics:
+        results = extract_and_save_efficiency_stats(
+            logger, results, model_baseline_mem, start_time
+        )
+    results["results"]["config"] = vars(args)
+
     if args.debug:
         print("Debug mode — not saving results.")
         return results
 
-    output_dir = os.path.join(args.output_dir, args.model_name.replace("/", "_"))
+    output_dir = os.path.join(
+        args.output_dir, args.model_name.replace("/", "_")
+    )
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, f"lm_eval_kc_{args.k_cache_type}_vc_{args.v_cache_type}_ml_{bool(args.meta_weights_path)}" + "_{}.json")
+    output_path = os.path.join(
+        output_dir,
+        f"lm_eval_kc_{args.k_cache_type}_vc_{args.v_cache_type}_ml_{bool(args.meta_weights_path)}"
+        + "_{}.json",
+    )
     output_path = get_output_path(output_path)
     with open(output_path, "w") as f:
         json.dump(results["results"], f, ensure_ascii=False, indent=4)
@@ -376,30 +367,85 @@ def main(args):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="LM eval harness script")
-    parser.add_argument("-m", "--model_name", type=str, default="meta-llama/Llama-3.1-8B-Instruct")
+    parser.add_argument(
+        "-m",
+        "--model_name",
+        type=str,
+        default="meta-llama/Llama-3.1-8B-Instruct",
+    )
     parser.add_argument("-o", "--output_dir", type=str, default="./results")
-    parser.add_argument("-t", "--tasks", type=list_of_strings, default=["lm_eval"])
-    parser.add_argument("--limit", type=int, default=None, help="Max number of samples per task.")
-    parser.add_argument("--max_seq_lengths", type=int, nargs="+", default=None, help="Sequence lengths for RULER tasks.")
+    parser.add_argument(
+        "-t", "--tasks", type=list_of_strings, default=["lm_eval"]
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Max number of samples per task.",
+    )
+    parser.add_argument(
+        "--max_seq_lengths",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Sequence lengths for RULER tasks.",
+    )
     parser.add_argument("--log_efficiency_metrics", action="store_true")
     parser.add_argument("--debug", action="store_true")
 
     # key cache
-    parser.add_argument("-kc", "--k_cache_type", type=str, default="surprise_lr")
-    parser.add_argument("--decomposition_method", type=str, default="svd", choices=["svd", "lora"])
+    parser.add_argument(
+        "-kc", "--k_cache_type", type=str, default="surprise_lr"
+    )
+    parser.add_argument(
+        "--decomposition_method",
+        type=str,
+        default="svd",
+        choices=["svd", "lora"],
+    )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
-    parser.add_argument("--rank_selection", type=str, default="comp_ratio", choices=["comp_ratio", "energy"])
+    parser.add_argument(
+        "--rank_selection",
+        type=str,
+        default="comp_ratio",
+        choices=["comp_ratio", "energy"],
+    )
     parser.add_argument("--k_lr", type=float, default=1e-2)
-    parser.add_argument("--n_iter", type=int, default=3)
+    parser.add_argument("--decomp_n_iter", type=int, default=3)
+    parser.add_argument("--gamma", type=float, default=3.0)
+    parser.add_argument("--local_window", type=int, default=0)
+    parser.add_argument(
+        "--kmeans_cluster_size",
+        type=float,
+        default=None,
+    )
+    parser.add_argument("--kmeans_n_iter", type=int, default=3)
+    parser.add_argument(
+        "--kmeans_init",
+        type=str,
+        default="infllm",
+        choices=["infllm", "random", "kmeans++"],
+    )
+    parser.add_argument(
+        "--kmeans_dtype",
+        type=str,
+        default="float32",
+        choices=["float16", "float32", "bfloat16"],
+    )
+    parser.add_argument("--kmeans_avg_heads", action="store_true")
+    parser.add_argument("--kmeans_per_head", action="store_true")
+    parser.add_argument("--log_key_cache_timing", action="store_true")
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
     parser.add_argument("--num_layers_per_mlp", type=int, default=4)
     parser.add_argument("--hidden_factors_per_mlp", type=int, default=2)
-    parser.add_argument("--num_heads_per_mlp", type=int, default=8) 
+    parser.add_argument("--num_heads_per_mlp", type=int, default=8)
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument("--target_perc", type=int, default=85)
+    parser.add_argument(
+        "--target_perc", type=int, default=85
+    ) 
     parser.add_argument("--target_cr", type=float, default=None)
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
@@ -407,11 +453,32 @@ def parse_args():
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
-    parser.add_argument("--override_target_perc", action="store_true", help="Use --target_perc instead of the per-layer values stored in the meta-weights checkpoint.")
-    parser.add_argument("--override_num_epochs", action="store_true", help="Use --num_epochs instead of the inner_steps value stored in the meta-weights checkpoint.")
-    parser.add_argument("--global_compression", action="store_true", help="Pool errors across all layers and apply a single global threshold instead of per-layer thresholds.")
-    parser.add_argument("--un_rope", action="store_true", help="Undo RoPE on keys before MLP training and inference.")
-    parser.add_argument("--rope_theta", type=float, default=500_000.0, help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).")
+    parser.add_argument(
+        "--override_target_perc",
+        action="store_true",
+        help="Use --target_perc instead of the per-layer values stored in the meta-weights checkpoint.",
+    )
+    parser.add_argument(
+        "--override_num_epochs",
+        action="store_true",
+        help="Use --num_epochs instead of the inner_steps value stored in the meta-weights checkpoint.",
+    )
+    parser.add_argument(
+        "--global_compression",
+        action="store_true",
+        help="Pool errors across all layers and apply a single global threshold instead of per-layer thresholds.",
+    )
+    parser.add_argument(
+        "--un_rope",
+        action="store_true",
+        help="Undo RoPE on keys before MLP training and inference.",
+    )
+    parser.add_argument(
+        "--rope_theta",
+        type=float,
+        default=None,  # TODO: set default based on model config if not passed
+        help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).",
+    )
     parser.add_argument("--normalise_keys", action="store_true", help="Normalise keys (z-score over token dim, per head) before passing to the MLP.")
     parser.add_argument("--use_residual", action="store_true", help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.")
     parser.add_argument("--intermediate_activation", type=str, default='gelu', help="The activation function for the MLP in the value cache.")
@@ -439,14 +506,18 @@ def override_args_from_meta_weights(args):
     # TODO: this super ugly. In the future, save MLP config in meta learning config file
     ckpt = torch.load(args.meta_weights_path, map_location="cpu")
 
-    config_path = os.path.join(os.path.dirname(args.meta_weights_path), "config.yaml")
+    config_path = os.path.join(
+        os.path.dirname(args.meta_weights_path), "config.yaml"
+    )
     if os.path.exists(config_path):
         train_cfg = OmegaConf.load(config_path).training
         if args.override_num_epochs:
-            print(f"[meta_weights] Ignoring num_epochs from checkpoint ({train_cfg.inner_steps}); using --num_epochs={args.num_epochs}.")
+            print(
+                f"[meta_weights] Ignoring num_epochs from checkpoint ({train_cfg.inner_steps}); using --num_epochs={args.num_epochs}."
+            )
         else:
             args.num_epochs = train_cfg.inner_steps
-        args.loss_func  = train_cfg.loss_func
+        args.loss_func = train_cfg.loss_func
         args.un_rope = train_cfg.un_rope
         args.optimizer = getattr(train_cfg, "inner_optimizer", "sgd")
 
@@ -455,7 +526,9 @@ def override_args_from_meta_weights(args):
     w0, wlast = layer0[weight_keys[0]], layer0[weight_keys[-1]]
 
     n_layers = len(weight_keys)
-    n_heads = w0.shape[1] if w0.dim() == 4 else w0.shape[0] # in case batch dim not present
+    n_heads = (
+        w0.shape[1] if w0.dim() == 4 else w0.shape[0]
+    )  # in case batch dim not present
     head_dim = wlast.shape[-1]
     hidden_factor = (w0.shape[-1] // head_dim) if n_layers > 1 else 1
 
@@ -466,7 +539,9 @@ def override_args_from_meta_weights(args):
     ]:
         cli_val = getattr(args, attr)
         if cli_val != ckpt_val:
-            print(f"Warning: overriding --{attr} {cli_val} → {ckpt_val} to match checkpoint.")
+            print(
+                f"Warning: overriding --{attr} {cli_val} → {ckpt_val} to match checkpoint."
+            )
         setattr(args, attr, ckpt_val)
 
     if "target_perc_params" in ckpt:
@@ -478,7 +553,9 @@ def override_args_from_meta_weights(args):
                 "[meta_weights] WARNING: checkpoint has no target_perc_format key — "
                 "assuming old logit-space format. Applying sigmoid to convert to percentages."
             )
-            raw_percs = [torch.sigmoid(t).item() for t in ckpt["target_perc_params"]]
+            raw_percs = [
+                torch.sigmoid(t).item() for t in ckpt["target_perc_params"]
+            ]
         meta_percs = [v * 100 for v in raw_percs]
         if args.override_target_perc:
             print(

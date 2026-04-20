@@ -15,7 +15,7 @@ def generate_kv_batched(ds, model, batch_size, tokenizer, device):
             out = model(input_ids=batch_ids[:, :1], use_cache=True)
             cache = out.past_key_values
 
-        for token_idx in range(1, seq_len -1):
+        for token_idx in range(1, seq_len - 1):
             with torch.no_grad():
                 out = model(
                     input_ids=batch_ids[:, token_idx : token_idx + 1],
@@ -25,4 +25,3 @@ def generate_kv_batched(ds, model, batch_size, tokenizer, device):
                 cache = out.past_key_values
 
     return cache, batch_ids[:, token_idx : token_idx + 1]
-
