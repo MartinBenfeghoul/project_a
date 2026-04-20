@@ -45,13 +45,27 @@ LONGBENCH_TASKS = {
     "longbench_triviaqa": "qa_f1_score,none",
 }
 
+LONGBENCH_E_TASKS = {
+    "longbench_2wikimqa_e": "qa_f1_score,none",
+    "longbench_hotpotqa_e": "qa_f1_score,none",
+    "longbench_lcc_e": "code_sim_score,none",
+    "longbench_multifieldqa_en_e": "qa_f1_score,none",
+    "longbench_qasper_e": "qa_f1_score,none",
+    "longbench_repobench-p_e": "code_sim_score,none",
+    "longbench_samsum_e": "rouge_score,none",
+    "longbench_trec_e": "classification_score,none",
+    "longbench_triviaqa_e": "qa_f1_score,none",
+}
 
-ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS}
+
+ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS, **LONGBENCH_E_TASKS}
 
 
 def get_task_dict(benchmark_name):
     if benchmark_name == 'longbench':
         task_dict = LONGBENCH_TASKS
+    elif benchmark_name == 'longbench_e':
+        task_dict = LONGBENCH_E_TASKS
     elif benchmark_name == 'lm_eval':
         task_dict = LM_EVAL_TASKS
     elif benchmark_name == 'ruler':
@@ -80,7 +94,7 @@ def parse_args():
     )
     parser.add_argument(
         "-b", "--benchmark", type=str, default='lm_eval',
-        choices=['lm_eval', 'ruler', 'longbench'],
+        choices=['lm_eval', 'ruler', 'longbench', 'longbench_e'],
         help="Benchmark to use for evaluation. Default is 'lm_eval'."
     )
     return parser.parse_args()

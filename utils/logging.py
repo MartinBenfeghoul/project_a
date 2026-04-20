@@ -186,8 +186,6 @@ def save_attention_predictor_checkpoint(
         "metrics": metrics,
         "config": {
             "model_name": args.model_name,
-            "dataset_path": args.dataset_path,
-            "subset_name": args.subset_name,
             "seq_len": args.seq_len,
             "history_step": args.history_step,
             "block_size": args.block_size,
@@ -337,7 +335,7 @@ def attention_predictor_config(args, layers: list[int] | None = None):
                 "enabled": args.use_wandb,
                 "project": args.wandb_project,
                 "entity": args.wandb_entity,
-                "run_name": args.wandb_run_name,
+                "run_name": getattr(args, "wandb_run_name", None),
             },
         }
     )
