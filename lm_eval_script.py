@@ -183,6 +183,7 @@ def main(args):
         "kmeans_per_head": args.kmeans_per_head,
         "unrope_keys": args.un_rope,
         "rope_theta": rope_theta,
+        "compressor_bits": args.k_compressor_bits,
     }
 
     num_layers = model.config.num_hidden_layers
@@ -436,6 +437,8 @@ def parse_args():
     parser.add_argument("--kmeans_avg_heads", action="store_true")
     parser.add_argument("--kmeans_per_head", action="store_true")
     parser.add_argument("--log_key_cache_timing", action="store_true")
+    parser.add_argument("--k_compressor_bits", type=int, default=4, help="Bits per rotated coordinate for TurboQuant key cache quantization.")
+
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
