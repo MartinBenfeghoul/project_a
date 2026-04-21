@@ -194,7 +194,7 @@ class SingleTensorDynamicLayer(RopeLayerMixin):
                 if reset_seq_len:
                     self.seq_len = 0
             else:
-                self.tensor = self.tensor[..., end_idx:, :]
+                self.tensor = self.tensor[..., end_idx:, :].clone()
                 if reset_seq_len:
                     self.seq_len = self.tensor.shape[-2]
 
