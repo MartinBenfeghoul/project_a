@@ -64,6 +64,9 @@ class DecomposedKeysCache(SingleTensorCache):
         decomp_n_iter: int = 3,
         lr: float = 1e-2,
         unrope_keys: bool = False,
+        quantise_a: bool = False,
+        quantise_b: bool = False,
+        compressor_bits: int = 4,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -83,6 +86,9 @@ class DecomposedKeysCache(SingleTensorCache):
         self.decomp_n = decomp_n_iter
         self.lr = lr
         self.unrope_keys = unrope_keys
+        self.quantise_a = quantise_a
+        self.quantise_b = quantise_b
+        self.compressor_bits = compressor_bits
 
         self.prefill = True
         self.lr_keys = {}
@@ -94,7 +100,13 @@ class DecomposedKeysCache(SingleTensorCache):
         )
 
     def calc_compression_ratio(self):
-        default_ratio = self.r if self.rank_selection == "comp_ratio" else None
+        default_ratio = (
+            self.r
+            if self.rank_selection == "comp_ratio"
+            and not self.quantise_a
+            and not self.quantise_b
+            else None
+        )
         return calc_segment_store_compression_ratio(
             self.lr_keys, default_ratio=default_ratio
         )
@@ -109,6 +121,9 @@ class DecomposedKeysCache(SingleTensorCache):
             "energy_threshold": self.e,
             "n_iter": self.decomp_n,
             "lr": self.lr,
+            "quantise_a": self.quantise_a,
+            "quantise_b": self.quantise_b,
+            "compressor_bits": self.compressor_bits,
         }
 
     def _store_layer_segments(self, layer_idx, layer_segments):

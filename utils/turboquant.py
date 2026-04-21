@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from utils import LloydMaxCodebook
+from utils.lloyd_max import LloydMaxCodebook
 
 
 @dataclass
@@ -14,6 +14,72 @@ class CompressorParams:
     dtype: torch.dtype
     bits: int
     idx_pad: int = 0
+
+
+@dataclass
+class TurboQuantFactor:
+    params: CompressorParams
+    bits: int
+
+
+_TURBOQUANT_COMPRESSORS = {}
+
+
+def get_turboquant_compressor(dim: int, bits: int, device: torch.device):
+    compressor = _TURBOQUANT_COMPRESSORS.get(dim)
+    if compressor is None:
+        compressor = MSECompressor(dim=dim, bits=bits, device=device)
+        _TURBOQUANT_COMPRESSORS[dim] = compressor
+    return compressor
+
+
+def quantise_factor(
+    factor: torch.Tensor,
+    bits: int,
+) -> TurboQuantFactor:
+    compressor = get_turboquant_compressor(
+        dim=factor.shape[-1],
+        bits=bits,
+        device=factor.device,
+    )
+    return TurboQuantFactor(params=compressor.encode(factor), bits=bits)
+
+
+def dequantise_factor(factor):
+    if isinstance(factor, TurboQuantFactor):
+        compressor = get_turboquant_compressor(
+            dim=factor.params.shape[-1],
+            bits=factor.bits,
+            device=factor.params.indices.device,
+        )
+        return compressor.decode(factor.params)
+    return factor
+
+
+def factor_shape(factor) -> tuple[int, ...]:
+    if isinstance(factor, TurboQuantFactor):
+        return factor.params.shape
+    return tuple(factor.shape)
+
+
+def factor_dtype(factor) -> torch.dtype:
+    if isinstance(factor, TurboQuantFactor):
+        return factor.params.dtype
+    return factor.dtype
+
+
+def factor_nbytes(factor) -> float:
+    if isinstance(factor, TurboQuantFactor):
+        params = factor.params
+        index_bytes = params.indices.numel()
+        norm_bytes = params.norms.numel() * params.norms.element_size()
+        return index_bytes + norm_bytes
+    return factor.numel() * factor.element_size()
+
+
+def is_quantised_factor(factor) -> bool:
+    return isinstance(factor, TurboQuantFactor)
+
 
 def generate_rotation_matrix(dim, seed, device):
     generator = torch.Generator(device="cpu")

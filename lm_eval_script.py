@@ -183,6 +183,8 @@ def main(args):
         "kmeans_per_head": args.kmeans_per_head,
         "unrope_keys": args.un_rope,
         "rope_theta": rope_theta,
+        "quantise_a": args.k_quantise_a,
+        "quantise_b": args.k_quantise_b,
         "compressor_bits": args.k_compressor_bits,
     }
 
@@ -437,7 +439,9 @@ def parse_args():
     parser.add_argument("--kmeans_avg_heads", action="store_true")
     parser.add_argument("--kmeans_per_head", action="store_true")
     parser.add_argument("--log_key_cache_timing", action="store_true")
-    parser.add_argument("--k_compressor_bits", type=int, default=4, help="Bits per rotated coordinate for TurboQuant key cache quantization.")
+    parser.add_argument("--k_quantise_a", action="store_true", help="Quantise low-rank key-cache A factors with TurboQuant.")
+    parser.add_argument("--k_quantise_b", action="store_true", help="Quantise low-rank key-cache B factors with TurboQuant.")
+    parser.add_argument("--k_compressor_bits", type=int, default=4, help="Bits per rotated coordinate for TurboQuant key cache or low-rank factor quantisation.")
 
 
     # value cache

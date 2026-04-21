@@ -5,6 +5,19 @@ from typing import Callable
 
 import torch
 
+from utils.turboquant import (
+    dequantise_factor,
+    factor_dtype,
+    factor_nbytes,
+    factor_shape,
+    is_quantised_factor,
+    quantise_factor,
+)
+
+
+def _dtype_nbytes(dtype: torch.dtype) -> int:
+    return torch.empty((), dtype=dtype).element_size()
+
 
 def _full_svd_single(M: torch.Tensor, dtype: torch.dtype):
     """Compute a full SVD for one matrix after moving it to CPU."""
@@ -193,6 +206,9 @@ def decompose_to_segment_store(
     tensor: torch.Tensor,
     decompose_fn: Callable[..., tuple[torch.Tensor, torch.Tensor]],
     segment_ranges: list[list[tuple[int, int]]] | None = None,
+    quantise_a: bool = False,
+    quantise_b: bool = False,
+    compressor_bits: int = 4,
     **decompose_kwargs,
 ):
     """Package decomposed factors into the cache segment-store format.
@@ -205,7 +221,15 @@ def decompose_to_segment_store(
         A, B = decompose_fn(tensor, **decompose_kwargs)
         seq_len = tensor.size(-2)
         layer_segments = [
-            [{"range": (0, seq_len), "factors": (A[b], B[b])}]
+            [
+                {
+                    "range": (0, seq_len),
+                    "factors": (
+                        quantise_factor(A[b], compressor_bits) if quantise_a else A[b],
+                        quantise_factor(B[b], compressor_bits) if quantise_b else B[b]
+                    )
+                }
+            ]
             for b in range(tensor.size(0))
         ]
         return layer_segments
@@ -234,6 +258,10 @@ def decompose_to_segment_store(
 
     layer_segments = [[] for _ in range(tensor.size(0))]
     for (batch_idx, start_idx, end_idx), (A, B) in zip(specs, factor_pairs):
+        if quantise_a:
+            A = quantise_factor(A, compressor_bits)
+        if quantise_b:
+            B = quantise_factor(B, compressor_bits)
         layer_segments[batch_idx].append(
             {"range": (start_idx, end_idx), "factors": (A, B)}
         )
@@ -254,7 +282,8 @@ def reconstruct_segments(
     for batch_idx, batch_segments in enumerate(layer_segments):
         # TODO: batch same-length segments together to avoid many small matmuls.
         recon_pieces = [
-            A @ B for A, B in (segment["factors"] for segment in batch_segments)
+            dequantise_factor(A) @ dequantise_factor(B)
+            for A, B in (segment["factors"] for segment in batch_segments)
         ]
         if suffix_tensor[batch_idx].size(-2) > 0:
             recon_pieces.append(suffix_tensor[batch_idx])
@@ -282,9 +311,17 @@ def calc_segment_store_compression_ratio(
         for batch_segments in layer_segments:
             for segment in batch_segments:
                 A, B = segment["factors"]
-                m, k = A.shape[-2:]
-                n = B.size(-1)
-                crs += (m * n) / (k * (m + n))
+                if is_quantised_factor(A) or is_quantised_factor(B):
+                    a_shape, b_shape = factor_shape(A), factor_shape(B)
+                    leading = math.prod(a_shape[:-2])
+                    m, n = a_shape[-2], b_shape[-1]
+                    original = leading * m * n * _dtype_nbytes(factor_dtype(A))
+                    compressed = factor_nbytes(A) + factor_nbytes(B)
+                    crs += original / compressed
+                else:
+                    m, k = A.shape[-2:]
+                    n = B.size(-1)
+                    crs += (m * n) / (k * (m + n))
                 num_segments += 1
     return crs / num_segments if num_segments > 0 else 0.0
 

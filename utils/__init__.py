@@ -31,4 +31,13 @@ from .rope import inverse_rope, apply_rope, compute_rope_cos_sin
 from .device import get_device, get_device_type
 from .meta_learning import MetaLearningInit, MetaLearningLayerInit, adapt_mlp_with_meta_lrs
 from .lloyd_max import LloydMaxCodebook
-from .turboquant import init_compressor, MSECompressor, CompressorParams
+from .turboquant import (
+    init_compressor, 
+    MSECompressor, 
+    CompressorParams,
+    dequantise_factor,
+    factor_dtype,
+    factor_nbytes,
+    factor_shape,
+    quantise_factor
+    )
