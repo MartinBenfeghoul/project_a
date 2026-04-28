@@ -157,6 +157,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         return self.value_residuals
 
     def _empty_residuals(self):
+        # TODO: if quantisation of residual is enabled, this will break since
+        # value_residuals are CompressorParams, not tensors
         if self.compressor is not None:
             return torch.empty(
                 0,

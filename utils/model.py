@@ -44,6 +44,7 @@ def extract_kv_linear_init(model, per_head=False) -> list[torch.Tensor]:
     head_dim = cfg.hidden_size // cfg.num_attention_heads
     layers = model.model.layers
 
+    # TODO: Batched pinv across all layers may need per-layer looping to cap RAM for larger models
     W_k_raw = torch.stack([lay.self_attn.k_proj.weight.detach().cpu() for lay in layers])
     W_v_raw = torch.stack([lay.self_attn.v_proj.weight.detach().cpu() for lay in layers])
 
