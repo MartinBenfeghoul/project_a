@@ -6,10 +6,13 @@ from typing import Callable
 import torch
 
 from utils.turboquant import (
+    CompressorParams,
+    TurboQuantFactor,
     dequantise_factor,
     factor_dtype,
     factor_nbytes,
     factor_shape,
+    get_turboquant_compressor,
     is_quantised_factor,
     quantise_factor,
 )
@@ -202,6 +205,55 @@ def svd(
     return US, Vh
 
 
+def _batch_quantise_factors(
+    factors: list[torch.Tensor],
+    compressor_bits: int,
+) -> list[TurboQuantFactor]:
+    """Quantise factors in groups with the same compressor dimension."""
+    if not factors:
+        return []
+
+    groups: dict[int, list[tuple[int, torch.Tensor]]] = {}
+    for idx, factor in enumerate(factors):
+        groups.setdefault(factor.shape[-1], []).append((idx, factor))
+
+    quantised: list[TurboQuantFactor | None] = [None] * len(factors)
+    for dim, entries in groups.items():
+        row_counts = [math.prod(factor.shape[:-1]) for _, factor in entries]
+        flat = torch.cat(
+            [
+                factor.reshape(row_count, dim)
+                for (_, factor), row_count in zip(entries, row_counts)
+            ],
+            dim=0,
+        )
+        batched = quantise_factor(flat, compressor_bits)
+        params = batched.params
+        offset = 0
+        for (idx, factor), row_count in zip(entries, row_counts):
+            shape = tuple(factor.shape)
+            next_offset = offset + row_count
+            quantised[idx] = TurboQuantFactor(
+                params=CompressorParams(
+                    indices=params.indices[offset:next_offset].reshape(
+                        *shape[:-1],
+                        params.indices.shape[-1],
+                    ),
+                    norms=params.norms[offset:next_offset].reshape(
+                        *shape[:-1]
+                    ),
+                    shape=shape,
+                    dtype=params.dtype,
+                    bits=params.bits,
+                    idx_pad=params.idx_pad,
+                ),
+                bits=compressor_bits,
+            )
+            offset = next_offset
+
+    return quantised
+
+
 def decompose_to_segment_store(
     tensor: torch.Tensor,
     decompose_fn: Callable[..., tuple[torch.Tensor, torch.Tensor]],
@@ -220,13 +272,19 @@ def decompose_to_segment_store(
     if segment_ranges is None:
         A, B = decompose_fn(tensor, **decompose_kwargs)
         seq_len = tensor.size(-2)
+        a_factors = [A[b] for b in range(tensor.size(0))]
+        b_factors = [B[b] for b in range(tensor.size(0))]
+        if quantise_a:
+            a_factors = _batch_quantise_factors(a_factors, compressor_bits)
+        if quantise_b:
+            b_factors = _batch_quantise_factors(b_factors, compressor_bits)
         layer_segments = [
             [
                 {
                     "range": (0, seq_len),
                     "factors": (
-                        quantise_factor(A[b], compressor_bits) if quantise_a else A[b],
-                        quantise_factor(B[b], compressor_bits) if quantise_b else B[b]
+                        a_factors[b],
+                        b_factors[b],
                     )
                 }
             ]
@@ -256,16 +314,57 @@ def decompose_to_segment_store(
             decompose_fn(segment, **decompose_kwargs) for segment in segments
         ]
 
+    a_factors = [A for A, _ in factor_pairs]
+    b_factors = [B for _, B in factor_pairs]
+    if quantise_a:
+        a_factors = _batch_quantise_factors(a_factors, compressor_bits)
+    if quantise_b:
+        b_factors = _batch_quantise_factors(b_factors, compressor_bits)
+
     layer_segments = [[] for _ in range(tensor.size(0))]
-    for (batch_idx, start_idx, end_idx), (A, B) in zip(specs, factor_pairs):
-        if quantise_a:
-            A = quantise_factor(A, compressor_bits)
-        if quantise_b:
-            B = quantise_factor(B, compressor_bits)
+    for (batch_idx, start_idx, end_idx), A, B in zip(
+        specs, a_factors, b_factors
+    ):
         layer_segments[batch_idx].append(
             {"range": (start_idx, end_idx), "factors": (A, B)}
         )
     return layer_segments
+
+
+def _batch_decode_quant_factors(layer_segments):
+    """Decode all TurboQuantFactor instances across all segments in one call."""
+    groups: dict[int, list] = {}
+    for b_idx, batch_segs in enumerate(layer_segments):
+        for s_idx, seg in enumerate(batch_segs):
+            for f_idx, factor in enumerate(seg["factors"]):
+                if not is_quantised_factor(factor):
+                    continue
+                p = factor.params
+                groups.setdefault(p.shape[-1], []).append(
+                    (b_idx, s_idx, f_idx, factor)
+                )
+
+    decoded: dict[tuple[int, int, int], torch.Tensor] = {}
+    for dim, entries in groups.items():
+        bits = entries[0][3].bits
+        device = entries[0][3].params.indices.device
+        compressor = get_turboquant_compressor(dim, bits, device)
+        params_list = [e[3].params for e in entries]
+        n_each = [math.prod(p.shape[:-1]) for p in params_list]
+        batched = CompressorParams(
+            indices=torch.cat([p.indices.reshape(n, -1) for p, n in zip(params_list, n_each)]),
+            norms=torch.cat([p.norms.reshape(n) for p, n in zip(params_list, n_each)]),
+            shape=(sum(n_each), dim),
+            dtype=params_list[0].dtype,
+            bits=bits,
+            idx_pad=params_list[0].idx_pad,
+        )
+        flat = compressor.decode(batched)
+        offset = 0
+        for (b_idx, s_idx, f_idx, factor), n in zip(entries, n_each):
+            decoded[(b_idx, s_idx, f_idx)] = flat[offset:offset + n].reshape(factor.params.shape)
+            offset += n
+    return decoded
 
 
 def reconstruct_segments(
@@ -278,13 +377,26 @@ def reconstruct_segments(
     `decompose_to_segment_store`, and `suffix_tensor` provides any
     uncompressed tail that should be appended back on.
     """
+    pre_decoded = _batch_decode_quant_factors(layer_segments)
+
     recon_batches = []
     for batch_idx, batch_segments in enumerate(layer_segments):
-        # TODO: batch same-length segments together to avoid many small matmuls.
-        recon_pieces = [
-            dequantise_factor(A) @ dequantise_factor(B)
-            for A, B in (segment["factors"] for segment in batch_segments)
-        ]
+        recon_pieces = []
+        for seg_idx, segment in enumerate(batch_segments):
+            A_raw, B_raw = segment["factors"]
+            A_key = (batch_idx, seg_idx, 0)
+            B_key = (batch_idx, seg_idx, 1)
+            A = (
+                pre_decoded[A_key]
+                if A_key in pre_decoded
+                else dequantise_factor(A_raw)
+            )
+            B = (
+                pre_decoded[B_key]
+                if B_key in pre_decoded
+                else dequantise_factor(B_raw)
+            )
+            recon_pieces.append(A @ B)
         if suffix_tensor[batch_idx].size(-2) > 0:
             recon_pieces.append(suffix_tensor[batch_idx])
         if not recon_pieces:

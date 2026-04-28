@@ -113,6 +113,20 @@ class MSECompressor:
         self.rotation = generate_rotation_matrix(dim, seed + dim, device)
         self.centroids = LloydMaxCodebook(dim, bits).centroids.to(device)
 
+        self.indices_per_byte = 8 // bits
+        self.mask = (1 << bits) - 1
+        idx_pad = (self.indices_per_byte - dim % self.indices_per_byte) % self.indices_per_byte
+        self.idx_pad = idx_pad
+        self.n_groups = (dim + idx_pad) // self.indices_per_byte
+        self.idx_powers = torch.tensor(
+            [2 ** (bits * i) for i in range(self.indices_per_byte - 1, -1, -1)],
+            dtype=torch.long, device=device,
+        )
+        self.idx_shifts = torch.tensor(
+            [bits * i for i in range(self.indices_per_byte - 1, -1, -1)],
+            dtype=torch.long, device=device,
+        )
+
     @torch.no_grad()
     def encode(self, tensor: torch.Tensor) -> CompressorParams:
         shape = tuple(tensor.shape)
@@ -131,24 +145,17 @@ class MSECompressor:
         indices = diffs.abs().argmin(dim=-1).long()
 
         # Bit-pack indices: pack indices_per_byte indices into each byte
-        indices_per_byte = 8 // self.bits
-        idx_pad = (indices_per_byte - self.dim % indices_per_byte) % indices_per_byte
-        if idx_pad:
-            indices = F.pad(indices, (0, idx_pad))
-        n_groups = indices.shape[-1] // indices_per_byte
-        idx_powers = torch.tensor(
-            [2 ** (self.bits * i) for i in range(indices_per_byte - 1, -1, -1)],
-            dtype=torch.long, device=indices.device,
-        )
-        idx_bytes = (indices.reshape(N, n_groups, indices_per_byte) * idx_powers).sum(-1).to(torch.uint8)
+        if self.idx_pad:
+            indices = F.pad(indices, (0, self.idx_pad))
+        idx_bytes = (indices.reshape(N, self.n_groups, self.indices_per_byte) * self.idx_powers).sum(-1).to(torch.uint8)
 
         return CompressorParams(
-            indices=idx_bytes.reshape(*shape[:-1], n_groups),
+            indices=idx_bytes.reshape(*shape[:-1], self.n_groups),
             norms=norms.reshape(shape[:-1]).to(dtype=dtype),
             shape=shape,
             dtype=dtype,
             bits=self.bits,
-            idx_pad=idx_pad,
+            idx_pad=self.idx_pad,
         )
 
     @torch.no_grad()
@@ -157,13 +164,7 @@ class MSECompressor:
         idx_bytes = params.indices.reshape(N, -1)
 
         # Unpack indices
-        indices_per_byte = 8 // self.bits
-        mask = (1 << self.bits) - 1
-        idx_shifts = torch.tensor(
-            [self.bits * i for i in range(indices_per_byte - 1, -1, -1)],
-            dtype=torch.long, device=idx_bytes.device,
-        )
-        indices = ((idx_bytes.long().unsqueeze(-1) >> idx_shifts) & mask).reshape(N, -1)
+        indices = ((idx_bytes.long().unsqueeze(-1) >> self.idx_shifts) & self.mask).reshape(N, -1)
         if params.idx_pad:
             indices = indices[:, :self.dim]
 

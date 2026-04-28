@@ -202,7 +202,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     optimizer.step()
                     loss_val = loss.item()
                     improvement = (prev_loss - loss_val) / (prev_loss + 1e-8)
-                    if self.early_stopping_tol is not None and improvement < self.early_stopping_tol:
+                    if self.early_stopping_tol is not None and 0 <= improvement < self.early_stopping_tol:
                         break
                     prev_loss = loss_val
                 optimizer.zero_grad(set_to_none=True)
