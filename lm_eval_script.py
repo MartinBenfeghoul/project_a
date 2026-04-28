@@ -316,16 +316,8 @@ def main(args):
                 mean(prefill_mem_allocated) / (1024**3)
                 if prefill_mem_allocated else 0.0
             ),
-            "prefill_gpu_mem_allocated_gib_max": (
-                max(prefill_mem_allocated) / (1024**3)
-                if prefill_mem_allocated else 0.0
-            ),
             "prefill_gpu_mem_overhead_gib_mean": (
                 mean(prefill_mem_overhead) / (1024**3)
-                if prefill_mem_overhead else 0.0
-            ),
-            "prefill_gpu_mem_overhead_gib_max": (
-                max(prefill_mem_overhead) / (1024**3)
                 if prefill_mem_overhead else 0.0
             ),
             "prefill_latency_ms_mean": sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0,

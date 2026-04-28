@@ -344,7 +344,7 @@ def _batch_decode_quant_factors(layer_segments):
                     (b_idx, s_idx, f_idx, factor)
                 )
 
-    decoded: dict[tuple[int, int, int], torch.Tensor] = {}
+    decoded = {}
     for dim, entries in groups.items():
         bits = entries[0][3].bits
         device = entries[0][3].params.indices.device
