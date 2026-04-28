@@ -48,24 +48,25 @@ LONGBENCH_TASKS = {
 ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS}
 
 KEY_CONFIGS = [
-    'model_name',
-    'tasks',
-    'k_cache_type',
-    'decomposition_method',
-    'comp_ratio',
-    'energy_threshold',
-    'rank_selection',
-    'decomp_n_iter',
-    'gamma',
-    'local_window',
-    'kmeans_cluster_size',
-    'kmeans_n_iter',
-    'kmeans_init',
-    'kmeans_dtype',
-    'kmeans_avg_heads',
-    'kmeans_per_head',
-    'un_rope',
+    "model_name",
+    "tasks",
+    "k_cache_type",
+    "decomposition_method",
+    "comp_ratio",
+    "energy_threshold",
+    "rank_selection",
+    "decomp_n_iter",
+    "gamma",
+    "local_window",
+    "kmeans_cluster_size",
+    "kmeans_n_iter",
+    "kmeans_init",
+    "kmeans_dtype",
+    "kmeans_avg_heads",
+    "kmeans_per_head",
+    "un_rope",
 ]
+
 
 def get_task_dict(benchmark_name):
     if benchmark_name == "longbench":
@@ -97,13 +98,14 @@ def process_rouge(task_results, metric):
 
 
 def get_nested_value(config, key_path):
-    keys = key_path.split('.')
+    keys = key_path.split(".")
     value = config
     for k in keys:
         value = value.get(k, None)
         if value is None:
             return None
     return value
+
 
 def print_configs(config):
     key_configs = deepcopy(KEY_CONFIGS)
@@ -135,8 +137,8 @@ def parse_args():
     parser.add_argument(
         "-s",
         "--show_key_configs",
-        action='store_true',
-        help="Whether to show key arguments."
+        action="store_true",
+        help="Whether to show key arguments.",
     )
     return parser.parse_args()
 
@@ -146,14 +148,13 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
     # Load the evaluation results from the JSON file
     with open(file_path, "r") as f:
         results = json.load(f)
-    
+
     if show_key_configs:
-        if 'config' in results:
-            print_configs(results['config'])
+        if "config" in results:
+            print_configs(results["config"])
         else:
             print("No config found in results.\n")
 
-       
     for task, metric in task_dict.items():
         if task in results:
             if isinstance(metric, list):
@@ -174,15 +175,35 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
     if eff:
         print("\nEfficiency metrics:\n")
         eval_wall_time = eff.get("eval_wall_time_minutes", "N/A")
-        print(round(eval_wall_time, decimal_points) if isinstance(eval_wall_time, (int, float)) else eval_wall_time)
+        print(
+            round(eval_wall_time, decimal_points)
+            if isinstance(eval_wall_time, (int, float))
+            else eval_wall_time
+        )
         gpu_peak_mem = eff.get("gpu_peak_mem_gib", "N/A")
-        print(round(gpu_peak_mem, decimal_points) if isinstance(gpu_peak_mem, (int, float)) else gpu_peak_mem)
+        print(
+            round(gpu_peak_mem, decimal_points)
+            if isinstance(gpu_peak_mem, (int, float))
+            else gpu_peak_mem
+        )
         gpu_kv_cache_overhead = eff.get("gpu_kv_cache_overhead_gib", "N/A")
-        print(round(gpu_kv_cache_overhead, decimal_points) if isinstance(gpu_kv_cache_overhead, (int, float)) else gpu_kv_cache_overhead)
+        print(
+            round(gpu_kv_cache_overhead, decimal_points)
+            if isinstance(gpu_kv_cache_overhead, (int, float))
+            else gpu_kv_cache_overhead
+        )
         prefill_latency = eff.get("prefill_latency_ms_mean", "N/A")
-        print(round(prefill_latency, decimal_points) if isinstance(prefill_latency, (int, float)) else prefill_latency)
+        print(
+            round(prefill_latency, decimal_points)
+            if isinstance(prefill_latency, (int, float))
+            else prefill_latency
+        )
         decode_latency = eff.get("decode_latency_ms_mean", "N/A")
-        print(round(decode_latency, decimal_points) if isinstance(decode_latency, (int, float)) else decode_latency)
+        print(
+            round(decode_latency, decimal_points)
+            if isinstance(decode_latency, (int, float))
+            else decode_latency
+        )
 
     events_stats = results.get("event_stats", {})
     if events_stats:

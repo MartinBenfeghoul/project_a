@@ -68,7 +68,7 @@ def _repeat_kv(hidden_states: torch.Tensor, num_key_value_groups: int) -> torch.
 
 class AttentionPredictor(nn.Module):
     """
-    Rredicts the next pooled attention row from a short
+    Predicts the next pooled attention row from a short
     history of pooled attention rows.
 
     Input shape: [N, history_step, num_blocks]

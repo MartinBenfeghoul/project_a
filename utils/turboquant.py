@@ -26,10 +26,11 @@ _TURBOQUANT_COMPRESSORS = {}
 
 
 def get_turboquant_compressor(dim: int, bits: int, device: torch.device):
-    compressor = _TURBOQUANT_COMPRESSORS.get(dim)
+    key = (dim, bits)
+    compressor = _TURBOQUANT_COMPRESSORS.get(key)
     if compressor is None:
         compressor = MSECompressor(dim=dim, bits=bits, device=device)
-        _TURBOQUANT_COMPRESSORS[dim] = compressor
+        _TURBOQUANT_COMPRESSORS[key] = compressor
     return compressor
 
 

@@ -102,9 +102,11 @@ def adapt_mlp_with_meta_lrs(
             w_linear_lr=w_linear_lr,
         )
         loss_val = loss.item()
-        improvement = (prev_loss - loss_val) / (prev_loss + 1e-8)
-        if improvement < early_stopping_tol:
-            break
+        if early_stopping_tol is not None and prev_loss != float("inf"):
+            improvement = (prev_loss - loss_val) / (prev_loss + 1e-8)
+            if improvement < early_stopping_tol:
+                break
+        prev_loss = loss_val
 
     _load_functional_params(mlp, weights, biases, w_linear)
 
