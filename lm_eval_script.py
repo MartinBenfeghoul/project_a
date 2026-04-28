@@ -480,7 +480,7 @@ def parse_args():
     )
     parser.add_argument("--normalise_keys", action="store_true", help="Normalise keys (z-score over token dim, per head) before passing to the MLP.")
     parser.add_argument("--use_residual", action="store_true", help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.")
-    parser.add_argument("--intermediate_activation", type=str, default='gelu', help="The activation function for the MLP in the value cache.")
+    parser.add_argument("--intermediate_activation", type=str, default='relu', help="The activation function for the MLP in the value cache.")
     parser.add_argument("--linear_only", action="store_true", help="Recover values directly from W_linear_init (keys @ pinv(W_k) @ W_v), skipping MLP training entirely. Requires --un_rope.")
     parser.add_argument("--per_head_kv_linear", action="store_true", help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.")
     parser.add_argument("--freeze_W_linear", action="store_true", default=False, help="Freeze W_linear during MLP training.")
