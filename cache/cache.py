@@ -100,9 +100,9 @@ class CompressedCache:
             cache_kwargs["value_importance"] = self._temp_value_importance.pop(
                 layer_idx
             )
-        fn = getattr(self.key_cache, "_reconstruct_keys", None)
+        fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
         if callable(fn) and not getattr(self.key_cache, "prefill", False):
-            recon_keys = self.key_cache._reconstruct_keys(key_states[:, :, :0, :], layer_idx, cache_kwargs)
+            recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
             cache_kwargs["keys"] = recon_keys
         else:
             cache_kwargs["keys"] = keys

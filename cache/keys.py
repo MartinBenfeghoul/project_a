@@ -237,7 +237,7 @@ class DecomposedKeysCache(SingleTensorCache):
         self._store_layer_segments(layer_idx, layer_segments)
         return suffix_start
 
-    def _reconstruct_keys(self, keys, layer_idx, cache_kwargs=None):
+    def _reconstruct_keys(self, keys, layer_idx):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
@@ -253,6 +253,13 @@ class DecomposedKeysCache(SingleTensorCache):
                 type(self), "reconstruct", time.perf_counter() - start_time
             )
         return recon_keys
+
+    def get_reconstructed_keys_only(self, layer_idx):
+        """Utility method to get reconstructed keys without adding suffix keys."""
+        return self._reconstruct_keys(
+            keys=self.layers[layer_idx].tensor[..., :0, :],
+            layer_idx=layer_idx,
+        )
 
 
 class LowRankKeysCache(DecomposedKeysCache):
@@ -271,9 +278,7 @@ class LowRankKeysCache(DecomposedKeysCache):
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
             return keys
         elif self.lr_keys.get(layer_idx, False):
-            recon_keys = self._reconstruct_keys(
-                keys, layer_idx, cache_kwargs=cache_kwargs
-            )
+            recon_keys = self._reconstruct_keys(keys, layer_idx)
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
         else:
@@ -351,9 +356,7 @@ class SurpriseLRKCache(DecomposedKeysCache):
             keys = keys[..., suffix_start:, :]
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
 
-        recon_keys = self._reconstruct_keys(
-            keys, layer_idx, cache_kwargs=cache_kwargs
-        )
+        recon_keys = self._reconstruct_keys(keys, layer_idx)
         check_recon_length(recon_keys, cache_kwargs)
         return recon_keys
 
@@ -474,7 +477,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         )
         return grouped_prefix, assignments, inverse_permutation, segment_ranges
 
-    def _decompose_clustered_keys(
+    def _decompose_keys(
         self,
         keys,
         prefix_end,
@@ -691,7 +694,7 @@ class KMeansLRKCache(DecomposedKeysCache):
     ) -> torch.Tensor:
         keys = super().update(key_states, layer_idx, cache_kwargs)
         if self.prefill:
-            suffix_start = self._decompose_clustered_keys(
+            suffix_start = self._decompose_keys(
                 keys,
                 keys.size(-2),
                 layer_idx,
