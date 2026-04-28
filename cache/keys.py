@@ -547,7 +547,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         self._store_layer_segments(layer_idx, layer_segments)
         return suffix_start
 
-    def _reconstruct_keys(self, keys, layer_idx):
+    def _reconstruct_keys(self, keys, layer_idx, cache_kwargs=None):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
