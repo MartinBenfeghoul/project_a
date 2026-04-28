@@ -81,3 +81,39 @@ def test_kmeans_per_head_metadata_tracks_batch_ops():
         atol=1e-4,
         rtol=1e-4,
     )
+
+
+def test_kmeans_update_events_averages_across_layers():
+    cache = build_cache()
+    cache.cluster_metadata = {
+        0: {
+            "mode": cache.kmeans_mode,
+            "assignments": torch.tensor([[0, 0, 1], [1, 1, 1]]),
+            "inverse_permutation": torch.empty(2, 3, dtype=torch.long),
+        },
+        1: {
+            "mode": cache.kmeans_mode,
+            "assignments": torch.tensor([[0, 0, 0], [0, 1, 2]]),
+            "inverse_permutation": torch.empty(2, 3, dtype=torch.long),
+        },
+    }
+
+    assert cache.update_events() == 1.75
+
+
+def test_kmeans_update_events_per_head_treats_each_head_independently():
+    cache = build_cache(kmeans_per_head=True)
+    cache.cluster_metadata = {
+        0: {
+            "mode": cache.kmeans_mode,
+            "assignments": torch.tensor([[[0, 0, 1], [1, 1, 1]]]),
+            "inverse_permutation": torch.empty(1, 2, 3, dtype=torch.long),
+        },
+        1: {
+            "mode": cache.kmeans_mode,
+            "assignments": torch.tensor([[[0, 1, 2], [0, 0, 1]]]),
+            "inverse_permutation": torch.empty(1, 2, 3, dtype=torch.long),
+        },
+    }
+
+    assert cache.update_events() == 2.0

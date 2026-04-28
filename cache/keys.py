@@ -587,16 +587,23 @@ class KMeansLRKCache(DecomposedKeysCache):
         if not self.cluster_metadata:
             return None
 
-        layer_idx = min(self.cluster_metadata)
-        assignments = self.cluster_metadata[layer_idx]["assignments"]
-        if assignments.numel() == 0:
-            return 0.0
+        layer_counts = []
+        for metadata in self.cluster_metadata.values():
+            assignments = metadata["assignments"]
+            if assignments.numel() == 0:
+                layer_counts.append(0.0)
+                continue
 
-        counts = []
-        flat_assignments = assignments.reshape(-1, assignments.size(-1))
-        for sequence_assignments in flat_assignments:
-            counts.append(torch.unique(sequence_assignments).numel())
-        return sum(counts) / len(counts)
+            # In per-head mode, assignments has shape [B, H, T], so reshaping
+            # to [-1, T] treats each (batch, head) sequence independently.
+            counts = []
+            flat_assignments = assignments.reshape(
+                -1, assignments.size(-1)
+            )
+            for sequence_assignments in flat_assignments:
+                counts.append(torch.unique(sequence_assignments).numel())
+            layer_counts.append(sum(counts) / len(counts))
+        return sum(layer_counts) / len(layer_counts)
 
     def _apply_cluster_metadata_batch_op(self, op):
         for metadata in self.cluster_metadata.values():
