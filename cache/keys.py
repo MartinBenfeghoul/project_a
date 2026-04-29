@@ -1,4 +1,5 @@
 import time
+import warnings
 from typing import Any
 
 import torch
@@ -255,11 +256,29 @@ class DecomposedKeysCache(SingleTensorCache):
         return recon_keys
 
     def get_reconstructed_keys_only(self, layer_idx):
-        """Utility method to get reconstructed keys without adding suffix keys."""
-        return self._reconstruct_keys(
-            keys=self.layers[layer_idx].tensor[..., :0, :],
-            layer_idx=layer_idx,
-        )
+        """Utility method to get reconstructed keys without adding suffix keys.
+        If local_window > 0, the returned reconstructed keys will still be concatenated
+        with the local window of suffix keys for consistency of output sequence length.
+        Furthermore, it returns None if no compressed keys are found for the layer.
+        """
+        if not self.lr_keys.get(layer_idx):
+            warnings.warn(
+                f"No compressed keys found for layer {layer_idx}. "
+                "get_reconstructed_keys_only will return None."
+            )
+            return None
+        suffix_keys = self.layers[layer_idx].tensor
+        if self.local_window > 0:
+            assert suffix_keys.size(-2) > 0, f"Suffix keys are required for local_window > 0 but got shape {suffix_keys.shape}."
+            return self._reconstruct_keys(
+                keys=suffix_keys[..., :self.local_window, :],
+                layer_idx=layer_idx,
+            )
+        else:
+            return self._reconstruct_keys(
+                keys=suffix_keys[..., :0, :],
+                layer_idx=layer_idx,
+            )
 
 
 class LowRankKeysCache(DecomposedKeysCache):

@@ -101,9 +101,9 @@ class CompressedCache:
                 layer_idx
             )
         fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
-        if callable(fn) and not getattr(self.key_cache, "prefill", False):
+        if callable(fn) and getattr(self.key_cache, "prefill", False):
             recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
-            cache_kwargs["keys"] = recon_keys
+            cache_kwargs["keys"] = keys if recon_keys is None else recon_keys
         else:
             cache_kwargs["keys"] = keys
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
