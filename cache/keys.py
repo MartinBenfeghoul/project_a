@@ -26,7 +26,7 @@ from utils.logging import (
     sync_cuda,
 )
 from .base import SingleTensorCache
-from utils.turboquant import MSECompressor, CompressorParams
+from .turboquant import TurboQuantCache
 
 
 def get_expected_seq_len(cache_kwargs):
@@ -733,111 +733,10 @@ class KMeansLRKCache(DecomposedKeysCache):
             )
 
 
-class TurboQuantKeysCache(SingleTensorCache):
-    def __init__(self, *args, compressor_bits: int = 4, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.compressor_bits = compressor_bits
-        self.prefill = True
-        self.compressors: dict[int, MSECompressor] = {}
-        self.compressed_params: dict[int, CompressorParams] = {}
-
-    def update_events(self, *args, **kwargs):
-        self.prefill = False
-
-    @property
-    def comp_ratio(self) -> float:
-        return self.calc_compression_ratio()
-
-    def _apply_compressed_params_batch_op(self, op) -> None:
-        for layer_idx, params in self.compressed_params.items():
-            indices = op(params.indices)
-            norms = op(params.norms)
-            self.compressed_params[layer_idx] = CompressorParams(
-                indices=indices,
-                norms=norms,
-                shape=tuple(indices.shape[:-1]) + (params.shape[-1],),
-                dtype=params.dtype,
-                bits=params.bits,
-                idx_pad=params.idx_pad,
-            )
-
-    def _apply_suffix_batch_op(self, op) -> None:
-        for layer in self.layers:
-            if layer.is_initialized and layer.tensor is not None:
-                layer.tensor = op(layer.tensor)
-
-    def reorder_cache(self, beam_idx: torch.LongTensor):
-        def op(tensor):
-            return tensor.index_select(0, beam_idx.to(tensor.device))
-
-        self._apply_suffix_batch_op(op)
-        self._apply_compressed_params_batch_op(op)
-
-    def batch_repeat_interleave(self, repeats: int):
-        def op(tensor):
-            return tensor.repeat_interleave(repeats, dim=0)
-
-        self._apply_suffix_batch_op(op)
-        self._apply_compressed_params_batch_op(op)
-
-    def batch_select_indices(self, indices: torch.Tensor):
-        def op(tensor):
-            return tensor[indices.to(tensor.device)]
-
-        self._apply_suffix_batch_op(op)
-        self._apply_compressed_params_batch_op(op)
-
-    def update(
-        self,
-        key_states: torch.Tensor,
-        layer_idx: int,
-        cache_kwargs: dict[str, Any] | None = None,
-    ) -> torch.Tensor:
-        keys = super().update(key_states, layer_idx, cache_kwargs)
-
-        if self.prefill:
-            if layer_idx not in self.compressors:
-                self.compressors[layer_idx] = MSECompressor(
-                    dim=key_states.shape[-1],
-                    bits=self.compressor_bits,
-                    device=key_states.device,
-                )
-            self.compressed_params[layer_idx] = self.compressors[layer_idx].encode(keys)
-            self._evict(layer_idx=layer_idx, end_idx=keys.shape[-2])
-            return keys
-
-        if layer_idx not in self.compressed_params:
-            raise Exception("Prefill is False but no compressed keys found.")
-
-        prefix = self.compressors[layer_idx].decode(self.compressed_params[layer_idx])
-        suffix = self.layers[layer_idx].tensor
-        if suffix.shape[-2] > 0:
-            return torch.cat([prefix, suffix], dim=-2)
-        return prefix
-
-    def calc_compression_ratio(self) -> float:
-        original_total = 0.0
-        compressed_total = 0.0
-        for layer_idx, params in self.compressed_params.items():
-            layer = self.layers[layer_idx]
-            dtype_size = torch.finfo(params.dtype).bits / 8
-            b, h, t_compressed, d = params.shape
-            t_suffix = layer.tensor.shape[-2] if layer.tensor.dim() == 4 else 0
-            t = t_compressed + t_suffix
-            original_total += b * h * t * d * dtype_size
-            compressed_total += (
-                self.compressors[layer_idx].memory_nbytes(params)
-                + b * h * t_suffix * d * dtype_size
-            )
-        if compressed_total == 0:
-            return 1.0
-        return original_total / compressed_total
-
-
 KEY_CACHE_CLASSES = {
     "baseline": SingleTensorCache,
     "low_rank": LowRankKeysCache,
     "surprise_lr": SurpriseLRKCache,
     "kmeans_lr": KMeansLRKCache,
-    "turboquant": TurboQuantKeysCache,
+    "turboquant": TurboQuantCache,
 }

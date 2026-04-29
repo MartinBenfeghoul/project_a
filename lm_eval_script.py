@@ -218,7 +218,6 @@ def main(args):
         "early_stopping_tol": args.early_stopping_tol,
         "freeze_W_linear": args.freeze_W_linear,
         "target_cr": args.target_cr,
-        "use_attn_importance": args.use_attn_predictor,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
     }

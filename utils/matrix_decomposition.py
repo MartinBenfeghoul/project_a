@@ -277,6 +277,7 @@ def decompose_to_segment_store(
         if quantise_a:
             a_factors = _batch_quantise_factors(a_factors, compressor_bits)
         if quantise_b:
+             # TODO: maybe B should be transposed to batch over rank
             b_factors = _batch_quantise_factors(b_factors, compressor_bits)
         layer_segments = [
             [
