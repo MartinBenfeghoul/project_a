@@ -206,12 +206,30 @@ def svd(
 
 
 def _batch_quantise_factors(
-    factors: list[torch.Tensor],
+    factors: torch.Tensor | list[torch.Tensor],
     compressor_bits: int,
 ) -> list[TurboQuantFactor]:
     """Quantise factors in groups with the same compressor dimension."""
     if not factors:
         return []
+
+    if isinstance(factors, torch.Tensor):
+        batched = quantise_factor(factors, compressor_bits)
+        params = batched.params
+        return [
+            TurboQuantFactor(
+                params=CompressorParams(
+                    indices=params.indices[b],
+                    norms=params.norms[b],
+                    shape=tuple(factors.shape[1:]),
+                    dtype=params.dtype,
+                    bits=params.bits,
+                    idx_pad=params.idx_pad,
+                ),
+                bits=compressor_bits,
+            )
+            for b in range(factors.size(0))
+        ]
 
     groups: dict[int, list[tuple[int, torch.Tensor]]] = {}
     for idx, factor in enumerate(factors):
@@ -272,13 +290,17 @@ def decompose_to_segment_store(
     if segment_ranges is None:
         A, B = decompose_fn(tensor, **decompose_kwargs)
         seq_len = tensor.size(-2)
-        a_factors = [A[b] for b in range(tensor.size(0))]
-        b_factors = [B[b] for b in range(tensor.size(0))]
-        if quantise_a:
-            a_factors = _batch_quantise_factors(a_factors, compressor_bits)
-        if quantise_b:
-             # TODO: maybe B should be transposed to batch over rank
-            b_factors = _batch_quantise_factors(b_factors, compressor_bits)
+        a_factors = (
+            _batch_quantise_factors(A, compressor_bits)
+            if quantise_a
+            else [A[b] for b in range(tensor.size(0))]
+        )
+        # TODO: maybe B should be transposed to batch over rank
+        b_factors = (
+            _batch_quantise_factors(B, compressor_bits)
+            if quantise_b
+            else [B[b] for b in range(tensor.size(0))]
+        )
         layer_segments = [
             [
                 {

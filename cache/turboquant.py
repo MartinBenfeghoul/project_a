@@ -81,9 +81,8 @@ class TurboQuantLayer(SingleTensorDynamicLayer):
             raise RuntimeError("Prefill is False but no compressed tensor found.")
 
         prefix = self.compressor.decode(self.compressed_params)
-        suffix = self.tensor
-        if suffix.shape[-2] > 0:
-            return torch.cat([prefix, suffix], dim=-2)
+        if tensor.shape[-2] > 0:
+            return torch.cat([prefix, tensor], dim=-2)
         return prefix
 
 
