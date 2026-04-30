@@ -560,10 +560,9 @@ class MLPValueCache(SingleTensorCache):
 
         for layer in self.layers:
             h, d = self.target_model_num_heads, layer.head_dim
-            t = layer.compressed_len + layer.tensor.shape[2] if layer.tensor.numel() else layer.compressed_len
+            t = layer.compressed_len
             delta_dtype = layer.tensor.dtype
             value_dtype_size = torch.finfo(layer.tensor.dtype).bits / 8
-            delta_dtype_size = torch.finfo(delta_dtype).bits / 8
             index_dtype_size = torch.iinfo(layer.indices.dtype).bits / 8
 
             original = h * t * d * value_dtype_size

@@ -364,6 +364,12 @@ def extract_and_save_efficiency_stats(
     peak_mem = torch.cuda.max_memory_allocated()
     prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
     decode_ms = [s.elapsed_time(e) for s, e in logger.decode_events]
+    prefill_mem_allocated = logger.get_log_list(
+        "prefill_gpu_mem_allocated_bytes"
+    )
+    prefill_mem_overhead = logger.get_log_list(
+        "prefill_gpu_mem_overhead_bytes"
+    )
 
     efficiency_metrics = {
         "eval_wall_time_seconds": wall_time_sec,
@@ -372,6 +378,16 @@ def extract_and_save_efficiency_stats(
         / (1024**3),  # (weights + kv cache + activations)
         "gpu_kv_cache_overhead_gib": (peak_mem - model_baseline_mem)
         / (1024**3),  # (kv cache + activations)
+        "prefill_gpu_mem_allocated_gib_mean": (
+            sum(prefill_mem_allocated) / len(prefill_mem_allocated) / (1024**3)
+            if prefill_mem_allocated
+            else 0.0
+        ),
+        "prefill_gpu_mem_overhead_gib_mean": (
+            sum(prefill_mem_overhead) / len(prefill_mem_overhead) / (1024**3)
+            if prefill_mem_overhead
+            else 0.0
+        ),
         "prefill_latency_ms_mean": (
             sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0
         ),

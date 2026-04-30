@@ -2,7 +2,6 @@ import os
 import json
 import argparse
 import time
-from statistics import mean
 from omegaconf import OmegaConf
 import torch
 
@@ -290,43 +289,6 @@ def main(args):
         }
         print("Compression metrics:", compression_metrics)
         results["results"]["compression_metrics"] = compression_metrics
-
-    if args.log_efficiency_metrics:
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        wall_time_sec = time.perf_counter() - start_time
-        if torch.cuda.is_available():
-            peak_mem = torch.cuda.max_memory_allocated()
-            prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
-            decode_ms  = [s.elapsed_time(e) for s, e in logger.decode_events]
-        else:
-            peak_mem = 0
-            prefill_ms = []
-            decode_ms  = []
-        prefill_mem_allocated = logger.get_log_list("prefill_gpu_mem_allocated_bytes")
-        prefill_mem_overhead = logger.get_log_list("prefill_gpu_mem_overhead_bytes")
-
-        efficiency_metrics = {
-            "eval_wall_time_seconds": wall_time_sec,
-            "eval_wall_time_minutes": wall_time_sec / 60.0,
-            "gpu_peak_mem_gib": peak_mem / (1024**3), # (weights + kv cache + activations)
-            "gpu_kv_cache_overhead_gib": (peak_mem - model_baseline_mem) / (1024**3), # (kv cache + activations)
-            "prefill_gpu_mem_allocated_gib_mean": (
-                mean(prefill_mem_allocated) / (1024**3)
-                if prefill_mem_allocated else 0.0
-            ),
-            "prefill_gpu_mem_overhead_gib_mean": (
-                mean(prefill_mem_overhead) / (1024**3)
-                if prefill_mem_overhead else 0.0
-            ),
-            "prefill_latency_ms_mean": sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0,
-            "decode_latency_ms_mean": sum(decode_ms) / len(decode_ms) if decode_ms else 0.0, # per-token
-            "decode_tokens_per_sec":  1000.0 / (sum(decode_ms) / len(decode_ms)) if decode_ms else 0.0,
-            "n_prefill_passes": len(prefill_ms),
-            "n_decode_steps":   len(decode_ms),
-        }
-        print("Efficiency metrics:", efficiency_metrics)
-        results["results"]["efficiency_metrics"] = efficiency_metrics
 
     print(make_table(results))
 

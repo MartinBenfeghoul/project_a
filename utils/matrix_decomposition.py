@@ -237,6 +237,7 @@ def _batch_quantise_factors(
 
     quantised: list[TurboQuantFactor | None] = [None] * len(factors)
     for dim, entries in groups.items():
+        # TODO: add path for same size segments to avoid redundant extra computation
         row_counts = [math.prod(factor.shape[:-1]) for _, factor in entries]
         flat = torch.cat(
             [
