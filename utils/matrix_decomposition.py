@@ -258,9 +258,7 @@ def _batch_quantise_factors(
                         *shape[:-1],
                         params.indices.shape[-1],
                     ),
-                    norms=params.norms[offset:next_offset].reshape(
-                        *shape[:-1]
-                    ),
+                    norms=params.norms[offset:next_offset].reshape(*shape[:-1]),
                     shape=shape,
                     dtype=params.dtype,
                     bits=params.bits,
@@ -309,7 +307,7 @@ def decompose_to_segment_store(
                     "factors": (
                         a_factors[b],
                         b_factors[b],
-                    )
+                    ),
                 }
             ]
             for b in range(tensor.size(0))
@@ -376,8 +374,12 @@ def _batch_decode_quant_factors(layer_segments):
         params_list = [e[3].params for e in entries]
         n_each = [math.prod(p.shape[:-1]) for p in params_list]
         batched = CompressorParams(
-            indices=torch.cat([p.indices.reshape(n, -1) for p, n in zip(params_list, n_each)]),
-            norms=torch.cat([p.norms.reshape(n) for p, n in zip(params_list, n_each)]),
+            indices=torch.cat(
+                [p.indices.reshape(n, -1) for p, n in zip(params_list, n_each)]
+            ),
+            norms=torch.cat(
+                [p.norms.reshape(n) for p, n in zip(params_list, n_each)]
+            ),
             shape=(sum(n_each), dim),
             dtype=params_list[0].dtype,
             bits=bits,
@@ -386,7 +388,9 @@ def _batch_decode_quant_factors(layer_segments):
         flat = compressor.decode(batched)
         offset = 0
         for (b_idx, s_idx, f_idx, factor), n in zip(entries, n_each):
-            decoded[(b_idx, s_idx, f_idx)] = flat[offset:offset + n].reshape(factor.params.shape)
+            decoded[(b_idx, s_idx, f_idx)] = flat[offset : offset + n].reshape(
+                factor.params.shape
+            )
             offset += n
     return decoded
 

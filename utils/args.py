@@ -61,4 +61,3 @@ def parse_layers(layer_spec: str | None, num_layers: int) -> list[int]:
     if bad:
         raise ValueError(f"Layer indices out of range: {bad}")
     return sorted(layers)
-

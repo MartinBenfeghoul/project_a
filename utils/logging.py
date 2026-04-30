@@ -178,8 +178,7 @@ def save_attention_predictor_checkpoint(
     num_updates: int,
 ) -> None:
     metrics = {
-        key: value / max(1, num_updates)
-        for key, value in running.items()
+        key: value / max(1, num_updates) for key, value in running.items()
     }
     params = {
         "model_state_dict": predictor.state_dict(),
@@ -367,9 +366,7 @@ def extract_and_save_efficiency_stats(
     prefill_mem_allocated = logger.get_log_list(
         "prefill_gpu_mem_allocated_bytes"
     )
-    prefill_mem_overhead = logger.get_log_list(
-        "prefill_gpu_mem_overhead_bytes"
-    )
+    prefill_mem_overhead = logger.get_log_list("prefill_gpu_mem_overhead_bytes")
 
     efficiency_metrics = {
         "eval_wall_time_seconds": wall_time_sec,
@@ -410,7 +407,8 @@ def get_output_path(output_path):
     while True:
         if not os.path.exists(output_path.format(i)):
             return output_path.format(i)
-        i+=1
+        i += 1
+
 
 def _format_run_value(value: object) -> str:
     return str(value).replace("/", "-").replace(",", "-").replace(" ", "")
@@ -428,7 +426,9 @@ def save_run_config(
         "checkpoint_dir": checkpoint_dir,
         "resolved_layers": layers,
     }
-    OmegaConf.save(OmegaConf.create(config), os.path.join(checkpoint_dir, "config.yaml"))
+    OmegaConf.save(
+        OmegaConf.create(config), os.path.join(checkpoint_dir, "config.yaml")
+    )
 
 
 def attention_predictor_config(args, layers: list[int] | None = None):
@@ -461,6 +461,7 @@ def prepare_run_directory(
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     save_run_config(args, layers, run_name, args.checkpoint_dir)
     return run_name
+
 
 def init_timing_stats():
     return {

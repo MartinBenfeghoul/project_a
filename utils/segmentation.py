@@ -27,25 +27,21 @@ def _random_init(features: torch.Tensor, n_clusters: int) -> torch.Tensor:
 
 def _kmeans_pp_init(features: torch.Tensor, n_clusters: int) -> torch.Tensor:
     batch_size, seq_len, _ = features.shape
-    first_idx = torch.randint(
-        seq_len, (batch_size,), device=features.device
-    )
+    first_idx = torch.randint(seq_len, (batch_size,), device=features.device)
     centroids = [
         features[torch.arange(batch_size, device=features.device), first_idx]
     ]
 
     for _ in range(1, n_clusters):
         current_centroids = torch.stack(centroids, dim=1)
-        min_distances = torch.cdist(
-            features, current_centroids
-        ).min(dim=-1).values
+        min_distances = (
+            torch.cdist(features, current_centroids).min(dim=-1).values
+        )
         probs = min_distances.square()
         probs = probs / probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
         next_idx = torch.multinomial(probs, 1).squeeze(-1)
         centroids.append(
-            features[
-                torch.arange(batch_size, device=features.device), next_idx
-            ]
+            features[torch.arange(batch_size, device=features.device), next_idx]
         )
 
     return torch.stack(centroids, dim=1)

@@ -23,7 +23,7 @@ def _attention_backend_specs() -> list[dict]:
             "apply_rope": llama_apply_rotary_pos_emb,
         }
     )
- 
+
     from transformers.models.mistral.modeling_mistral import (
         MistralAttention,
         apply_rotary_pos_emb as mistral_apply_rotary_pos_emb,
@@ -47,7 +47,10 @@ def _get_attention_backend(module: nn.Module, specs: list[dict]) -> dict | None:
             return spec
     return None
 
-def _repeat_kv(hidden_states: torch.Tensor, num_key_value_groups: int) -> torch.Tensor:
+
+def _repeat_kv(
+    hidden_states: torch.Tensor, num_key_value_groups: int
+) -> torch.Tensor:
     if num_key_value_groups == 1:
         return hidden_states
     batch, num_key_value_heads, seq_len, head_dim = hidden_states.shape
@@ -115,7 +118,9 @@ def attention_targets_to_distribution(
     return target / target.sum(dim=-1, keepdim=True).clamp_min(eps)
 
 
-def topk_block_mask(target_dist: torch.Tensor, topk_blocks: int) -> torch.Tensor:
+def topk_block_mask(
+    target_dist: torch.Tensor, topk_blocks: int
+) -> torch.Tensor:
     """Create binary mask for top-k target blocks."""
     k = min(topk_blocks, target_dist.shape[-1])
     indices = target_dist.topk(k, dim=-1).indices
@@ -200,11 +205,14 @@ def _causal_history_attention(
             padding_mask = (
                 attention_mask[:, None, None, : key_states.shape[-2]] == 0
             )
-            scores = scores.masked_fill(padding_mask, torch.finfo(scores.dtype).min)
+            scores = scores.masked_fill(
+                padding_mask, torch.finfo(scores.dtype).min
+            )
         elif attention_mask.dim() == 4:
-            scores = scores + attention_mask[
-                :, :, -hist_len:, : key_states.shape[-2]
-            ]
+            scores = (
+                scores
+                + attention_mask[:, :, -hist_len:, : key_states.shape[-2]]
+            )
 
     return torch.softmax(scores.float(), dim=-1).to(query_states.dtype)
 
@@ -303,14 +311,14 @@ def install_attention_predictor_hooks(
         key_states = module.k_proj(hidden_states)
 
         head_dim = module.head_dim
-        query_states = query_states.view(batch, q_len, -1, head_dim).transpose(1, 2)
+        query_states = query_states.view(batch, q_len, -1, head_dim).transpose(
+            1, 2
+        )
         key_states = key_states.view(batch, q_len, -1, head_dim).transpose(1, 2)
         num_query_heads = query_states.shape[1]
         num_key_value_heads = key_states.shape[1]
         if num_query_heads % num_key_value_heads != 0:
-            raise ValueError(
-                "query heads must be divisible by key-value heads"
-            )
+            raise ValueError("query heads must be divisible by key-value heads")
         num_key_value_groups = num_query_heads // num_key_value_heads
 
         position_embeddings = values.get("position_embeddings")
@@ -345,7 +353,6 @@ def install_attention_predictor_hooks(
         found_attention += 1
         handles.append(module.register_forward_pre_hook(hook, with_kwargs=True))
 
-
     if not handles:
         raise RuntimeError(
             f"No attention predictor hooks installed. Found {found_attention} "
@@ -354,12 +361,15 @@ def install_attention_predictor_hooks(
 
     return handles
 
+
 def get_attn_predictor_hook_handles(args, model):
     attn_predictor = None
     attn_predictor_hook_handles = []
     if args.use_attn_predictor:
         if args.attn_predictor_path is None:
-            raise ValueError("--use_attn_predictor requires --attn_predictor_path")
+            raise ValueError(
+                "--use_attn_predictor requires --attn_predictor_path"
+            )
         attn_predictor = load_attention_predictor(
             args.attn_predictor_path,
             device=next(model.parameters()).device,
@@ -369,12 +379,14 @@ def get_attn_predictor_hook_handles(args, model):
             predictor=attn_predictor,
             history_step=args.attn_predictor_history_step,
             block_size=args.attn_predictor_block_size,
-            )
+        )
     return attn_predictor_hook_handles
 
 
 def _load_attn_predictor_config(attn_predictor_path: str) -> dict:
-    config_path = os.path.join(os.path.dirname(attn_predictor_path), "config.yaml")
+    config_path = os.path.join(
+        os.path.dirname(attn_predictor_path), "config.yaml"
+    )
     if os.path.exists(config_path):
         return OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
 
@@ -398,7 +410,9 @@ def apply_attn_predictor_config(args):
 
     config = _load_attn_predictor_config(args.attn_predictor_path)
     required_keys = ("history_step", "block_size")
-    missing = [key for key in required_keys if key not in config or config[key] is None]
+    missing = [
+        key for key in required_keys if key not in config or config[key] is None
+    ]
     if missing:
         raise ValueError(
             "Attention predictor config is missing required field(s): "

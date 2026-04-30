@@ -134,9 +134,11 @@ def _split_meta_inner_lrs(
     offset = 0
     for layer_idx, n_mlp in enumerate(num_layers_per_mlp):
         layer_state = layer_weights.get(layer_idx, {})
-        has_w_linear = "W_linear" in layer_state and use_residual and not freeze_W_linear
+        has_w_linear = (
+            "W_linear" in layer_state and use_residual and not freeze_W_linear
+        )
         chunk = 2 * n_mlp + int(has_w_linear)
-        layer_inner_lrs[layer_idx] = flat_lrs[offset: offset + chunk]
+        layer_inner_lrs[layer_idx] = flat_lrs[offset : offset + chunk]
         offset += chunk
     return layer_inner_lrs
 
@@ -151,11 +153,18 @@ def _meta_lr_tensors(
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor | None]:
     n = mlp.num_layers
     inner_lrs = meta_init.inner_lrs
-    weight_lrs = [lr.to(device=keys.device, dtype=keys.dtype) for lr in inner_lrs[:n]]
-    bias_lrs = [lr.to(device=keys.device, dtype=keys.dtype) for lr in inner_lrs[n: 2 * n]]
+    weight_lrs = [
+        lr.to(device=keys.device, dtype=keys.dtype) for lr in inner_lrs[:n]
+    ]
+    bias_lrs = [
+        lr.to(device=keys.device, dtype=keys.dtype)
+        for lr in inner_lrs[n : 2 * n]
+    ]
     w_linear_lr = None
 
-    has_w_linear_lr = use_residual and not freeze_W_linear and len(inner_lrs) > 2 * n
+    has_w_linear_lr = (
+        use_residual and not freeze_W_linear and len(inner_lrs) > 2 * n
+    )
     if has_w_linear_lr:
         w_linear_lr = inner_lrs[2 * n].to(device=keys.device, dtype=keys.dtype)
 
@@ -201,11 +210,15 @@ def _meta_gradient_step(
     w_linear_lr: torch.Tensor | None,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor | None]:
     n = mlp.num_layers
-    grad_targets = weights + biases + ([w_linear] if w_linear is not None else [])
+    grad_targets = (
+        weights + biases + ([w_linear] if w_linear is not None else [])
+    )
     grads = torch.autograd.grad(loss, grad_targets, create_graph=False)
-    weight_grads, bias_grads = grads[:n], grads[n: 2 * n]
+    weight_grads, bias_grads = grads[:n], grads[n : 2 * n]
 
-    weights = [w - lr * g for w, lr, g in zip(weights, weight_lrs, weight_grads)]
+    weights = [
+        w - lr * g for w, lr, g in zip(weights, weight_lrs, weight_grads)
+    ]
     biases = [b - lr * g for b, lr, g in zip(biases, bias_lrs, bias_grads)]
     if w_linear is not None:
         w_linear = w_linear - w_linear_lr * grads[-1]
@@ -231,4 +244,3 @@ def _load_functional_params(
             p.copy_(b)
         if w_linear is not None:
             mlp.W_linear.copy_(w_linear)
-

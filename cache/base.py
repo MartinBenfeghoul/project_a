@@ -164,9 +164,7 @@ class SingleTensorDynamicLayer(RopeLayerMixin):
             return 0
         return self.seq_len  # custom changes
 
-    def get_mask_sizes(
-        self, cache_position: torch.Tensor
-    ) -> tuple[int, int]:
+    def get_mask_sizes(self, cache_position: torch.Tensor) -> tuple[int, int]:
         """
         Return the length and offset of the cache, used to generate the mask
         """
@@ -273,9 +271,7 @@ class SingleTensorCache:
         for layer in self.layers:
             layer.reset()
 
-    def _evict(
-        self, layer_idx: int | None = None, end_idx: int | None = None
-    ):
+    def _evict(self, layer_idx: int | None = None, end_idx: int | None = None):
         # custom API
         if layer_idx is not None:
             if layer_idx < len(self.layers):

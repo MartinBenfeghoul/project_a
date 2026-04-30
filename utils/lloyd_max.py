@@ -28,10 +28,18 @@ def beta_pdf(x: float, d: int) -> float:
 def gaussian_approx_pdf(x: float, d: int) -> float:
     """Gaussian approximation N(0, 1/d) -- accurate for d >= 64."""
     sigma2 = 1.0 / d
-    return (1.0 / math.sqrt(2 * math.pi * sigma2)) * math.exp(-x * x / (2 * sigma2))
+    return (1.0 / math.sqrt(2 * math.pi * sigma2)) * math.exp(
+        -x * x / (2 * sigma2)
+    )
 
 
-def solve_lloyd_max(d: int, bits: int, use_exact: bool = False, max_iter: int = 200, tol: float = 1e-10):
+def solve_lloyd_max(
+    d: int,
+    bits: int,
+    use_exact: bool = False,
+    max_iter: int = 200,
+    tol: float = 1e-10,
+):
     """
     Solve Lloyd-Max optimal quantizer for the coordinate distribution.
 
@@ -46,8 +54,12 @@ def solve_lloyd_max(d: int, bits: int, use_exact: bool = False, max_iter: int = 
         centroids: sorted tensor of 2^bits optimal centroids
         boundaries: sorted tensor of 2^bits - 1 boundaries between centroids
     """
-    n_levels = 2 ** bits
-    pdf = (lambda x: beta_pdf(x, d)) if use_exact else (lambda x: gaussian_approx_pdf(x, d))
+    n_levels = 2**bits
+    pdf = (
+        (lambda x: beta_pdf(x, d))
+        if use_exact
+        else (lambda x: gaussian_approx_pdf(x, d))
+    )
     sigma = 1.0 / math.sqrt(d)
 
     # Initialise centroids uniformly in [-3*sigma, 3*sigma]
@@ -56,7 +68,9 @@ def solve_lloyd_max(d: int, bits: int, use_exact: bool = False, max_iter: int = 
 
     for iteration in range(max_iter):
         # Step 1: Compute boundaries (midpoints between adjacent centroids)
-        boundaries = [(centroids[i] + centroids[i + 1]) / 2.0 for i in range(n_levels - 1)]
+        boundaries = [
+            (centroids[i] + centroids[i + 1]) / 2.0 for i in range(n_levels - 1)
+        ]
 
         # Step 2: Update centroids as conditional expectations E[X | X in partition_i]
         edges = [lo * 3] + boundaries + [hi * 3]
@@ -73,14 +87,18 @@ def solve_lloyd_max(d: int, bits: int, use_exact: bool = False, max_iter: int = 
                 new_centroids.append(centroids[i])
 
         # Check convergence
-        max_shift = max(abs(new_centroids[i] - centroids[i]) for i in range(n_levels))
+        max_shift = max(
+            abs(new_centroids[i] - centroids[i]) for i in range(n_levels)
+        )
         centroids = new_centroids
 
         if max_shift < tol:
             break
 
     # Final boundaries
-    boundaries = [(centroids[i] + centroids[i + 1]) / 2.0 for i in range(n_levels - 1)]
+    boundaries = [
+        (centroids[i] + centroids[i + 1]) / 2.0 for i in range(n_levels - 1)
+    ]
 
     return (
         torch.tensor(centroids, dtype=torch.float32),
@@ -88,9 +106,19 @@ def solve_lloyd_max(d: int, bits: int, use_exact: bool = False, max_iter: int = 
     )
 
 
-def compute_expected_distortion(d: int, bits: int, centroids: torch.Tensor, boundaries: torch.Tensor, use_exact: bool = False) -> float:
+def compute_expected_distortion(
+    d: int,
+    bits: int,
+    centroids: torch.Tensor,
+    boundaries: torch.Tensor,
+    use_exact: bool = False,
+) -> float:
     """Compute the expected MSE distortion per coordinate for the given quantizer."""
-    pdf = (lambda x: beta_pdf(x, d)) if use_exact else (lambda x: gaussian_approx_pdf(x, d))
+    pdf = (
+        (lambda x: beta_pdf(x, d))
+        if use_exact
+        else (lambda x: gaussian_approx_pdf(x, d))
+    )
     sigma = 1.0 / math.sqrt(d)
     n_levels = len(centroids)
 
@@ -112,14 +140,16 @@ class LloydMaxCodebook:
     def __init__(self, d: int, bits: int, use_exact: bool = False):
         self.d = d
         self.bits = bits
-        self.n_levels = 2 ** bits
+        self.n_levels = 2**bits
         self.centroids, self.boundaries = solve_lloyd_max(d, bits, use_exact)
-        self.distortion = compute_expected_distortion(d, bits, self.centroids, self.boundaries, use_exact)
+        self.distortion = compute_expected_distortion(
+            d, bits, self.centroids, self.boundaries, use_exact
+        )
 
     def quantize(self, x: torch.Tensor) -> torch.Tensor:
         """Quantize values to nearest centroid indices."""
         # x: (...,) -> indices: (...,) as uint8/int16
-        diffs = (x.unsqueeze(-1) - self.centroids.to(x.device))  # (..., n_levels)
+        diffs = x.unsqueeze(-1) - self.centroids.to(x.device)  # (..., n_levels)
         return diffs.abs().argmin(dim=-1)
 
     def dequantize(self, indices: torch.Tensor) -> torch.Tensor:

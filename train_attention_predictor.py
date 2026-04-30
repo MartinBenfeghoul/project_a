@@ -75,7 +75,7 @@ def build_training_examples(
     return histories, targets
 
 
-def predictor_loss( # TODO: the original paper uses MSE only
+def predictor_loss(  # TODO: the original paper uses MSE only
     logits: torch.Tensor,
     targets: torch.Tensor,
     topk_blocks: int,
@@ -141,7 +141,9 @@ def train_layer_examples(
     microbatch_size: int,
 ) -> dict[str, float]:
     if histories.shape[0] != targets.shape[0]:
-        raise ValueError("histories and targets must have the same first dimension")
+        raise ValueError(
+            "histories and targets must have the same first dimension"
+        )
 
     n = histories.shape[0]
     metrics_sum = {
@@ -288,7 +290,9 @@ def train(args: argparse.Namespace) -> None:
             for key, value in metrics.items():
                 batch_metrics[key] += value / len(layers)
 
-        torch.nn.utils.clip_grad_norm_(predictor.parameters(), args.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(
+            predictor.parameters(), args.max_grad_norm
+        )
         optimizer.step()
         num_updates += 1
 
@@ -296,7 +300,9 @@ def train(args: argparse.Namespace) -> None:
             running[key] += batch_metrics[key]
 
         if batch_idx % args.log_every == 0:
-            averaged = {key: value / num_updates for key, value in running.items()}
+            averaged = {
+                key: value / num_updates for key, value in running.items()
+            }
             progress.set_postfix(
                 loss=f"{averaged['loss']:.4f}",
                 mass=f"{averaged['recovered_mass']:.4f}",
@@ -334,9 +340,7 @@ def train(args: argparse.Namespace) -> None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Train Attention Predictor."
-    )
+    parser = argparse.ArgumentParser(description="Train Attention Predictor.")
     parser.add_argument(
         "--model_name",
         type=str,

@@ -47,7 +47,12 @@ class MLP(nn.Module):
         for i in range(num_layers):
             out_dim = head_dim if i == num_layers - 1 else hidden_dim
 
-            w_shape = (batch_size if per_sequence else 1, num_heads, curr_dim, out_dim)
+            w_shape = (
+                batch_size if per_sequence else 1,
+                num_heads,
+                curr_dim,
+                out_dim,
+            )
             b_shape = (batch_size if per_sequence else 1, num_heads, 1, out_dim)
             w = nn.Parameter(torch.zeros(*w_shape))
             b = nn.Parameter(torch.zeros(*b_shape))
@@ -61,9 +66,13 @@ class MLP(nn.Module):
 
         if use_residual:
             if per_head_residual:
-                self.W_linear = nn.Parameter(torch.zeros(num_heads, head_dim, head_dim))
+                self.W_linear = nn.Parameter(
+                    torch.zeros(num_heads, head_dim, head_dim)
+                )
             else:
-                self.W_linear = nn.Parameter(torch.zeros(num_heads, head_dim, num_heads, head_dim))
+                self.W_linear = nn.Parameter(
+                    torch.zeros(num_heads, head_dim, num_heads, head_dim)
+                )
 
     def forward(self, x):
         # x: [B, H, T, D]
@@ -79,12 +88,12 @@ class MLP(nn.Module):
 
         if self.use_residual:
             if self.per_head_residual:
-                x = x + torch.einsum('bhtd,hde->bhte', x_in, self.W_linear)
+                x = x + torch.einsum("bhtd,hde->bhte", x_in, self.W_linear)
             else:
-                x = x + torch.einsum('bhtd,hdqe->bqte', x_in, self.W_linear)
+                x = x + torch.einsum("bhtd,hdqe->bqte", x_in, self.W_linear)
                 # equivalent to:
                 # x_in = x_in.permute(0, 2, 1, 3)  # [B, T, H, D]
-                # x_in = x_in.reshape(x_in.shape[0], x_in.shape[1], -1)  # [B, T, H*D]            
+                # x_in = x_in.reshape(x_in.shape[0], x_in.shape[1], -1)  # [B, T, H*D]
                 # W_linear = self.W_linear.reshape(self.num_heads * self.head_dim, -1)  # [H*D, H*D]
                 # x = x + torch.matmul(x_in, W_linear)
 

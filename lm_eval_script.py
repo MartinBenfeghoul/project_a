@@ -12,7 +12,7 @@ from lm_eval.tasks import TaskManager
 from cache import CompressedCacheHFLM
 from model.attention_predictor import (
     get_attn_predictor_hook_handles,
-    apply_attn_predictor_config
+    apply_attn_predictor_config,
 )
 from utils import (
     Logger,
@@ -110,9 +110,14 @@ def make_hooks(
                 mem_allocated = torch.cuda.memory_allocated()
                 mem_start = _prefill_mem_start[0]
                 if mem_start is not None:
-                    logger.add_log("prefill_gpu_mem_delta_bytes", mem_allocated - mem_start)
+                    logger.add_log(
+                        "prefill_gpu_mem_delta_bytes", mem_allocated - mem_start
+                    )
                 logger.add_log("prefill_gpu_mem_allocated_bytes", mem_allocated)
-                logger.add_log("prefill_gpu_mem_overhead_bytes", mem_allocated - model_baseline_mem)
+                logger.add_log(
+                    "prefill_gpu_mem_overhead_bytes",
+                    mem_allocated - model_baseline_mem,
+                )
                 _prefill_mem_start[0] = None
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
@@ -221,7 +226,9 @@ def main(args):
         "compressor_bits": args.v_compressor_bits,
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
-        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model, per_head=args.per_head_kv_linear)
+        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(
+            model, per_head=args.per_head_kv_linear
+        )
 
     model.eval()
 
@@ -392,10 +399,22 @@ def parse_args():
     parser.add_argument("--kmeans_avg_heads", action="store_true")
     parser.add_argument("--kmeans_per_head", action="store_true")
     parser.add_argument("--log_key_cache_timing", action="store_true")
-    parser.add_argument("--k_quantise_a", action="store_true", help="Quantise low-rank key-cache A factors with TurboQuant.")
-    parser.add_argument("--k_quantise_b", action="store_true", help="Quantise low-rank key-cache B factors with TurboQuant.")
-    parser.add_argument("--k_compressor_bits", type=int, default=4, help="Bits per rotated coordinate for TurboQuant key cache or low-rank factor quantisation.")
-
+    parser.add_argument(
+        "--k_quantise_a",
+        action="store_true",
+        help="Quantise low-rank key-cache A factors with TurboQuant.",
+    )
+    parser.add_argument(
+        "--k_quantise_b",
+        action="store_true",
+        help="Quantise low-rank key-cache B factors with TurboQuant.",
+    )
+    parser.add_argument(
+        "--k_compressor_bits",
+        type=int,
+        default=4,
+        help="Bits per rotated coordinate for TurboQuant key cache or low-rank factor quantisation.",
+    )
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
@@ -403,13 +422,16 @@ def parse_args():
     parser.add_argument("--hidden_factors_per_mlp", type=int, default=2)
     parser.add_argument("--num_heads_per_mlp", type=int, default=8)
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument(
-        "--target_perc", type=int, default=85
-    ) 
+    parser.add_argument("--target_perc", type=int, default=85)
     parser.add_argument("--target_cr", type=float, default=None)
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
-    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "adamw", "sgd"])
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adam",
+        choices=["adam", "adamw", "sgd"],
+    )
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
@@ -439,17 +461,66 @@ def parse_args():
         default=None,  # TODO: set default based on model config if not passed
         help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).",
     )
-    parser.add_argument("--normalise_keys", action="store_true", help="Normalise keys (z-score over token dim, per head) before passing to the MLP.")
-    parser.add_argument("--use_residual", action="store_true", help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.")
-    parser.add_argument("--intermediate_activation", type=str, default='relu', help="The activation function for the MLP in the value cache.")
-    parser.add_argument("--linear_only", action="store_true", help="Recover values directly from W_linear_init (keys @ pinv(W_k) @ W_v), skipping MLP training entirely. Requires --un_rope.")
-    parser.add_argument("--per_head_kv_linear", action="store_true", help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.")
-    parser.add_argument("--freeze_W_linear", action="store_true", default=False, help="Freeze W_linear during MLP training.")
-    parser.add_argument("--early_stopping_tol", type=float, default=None, help="Stop MLP training early when relative loss improvement falls below this threshold.")
-    parser.add_argument("--use_attn_predictor", action="store_true", help="Use a shared CNN attention predictor to guide value residual selection.")
-    parser.add_argument("--attn_predictor_path", type=str, default=None, help="Path to a checkpoint from train_attention_predictor.py.")
-    parser.add_argument("--v_turboquant_residuals", action="store_true", help="Quantise stored MLP value residuals with TurboQuant.")
-    parser.add_argument("--v_compressor_bits", type=int, default=3, help="Bits per rotated residual coordinate for TurboQuant residual coding.")
+    parser.add_argument(
+        "--normalise_keys",
+        action="store_true",
+        help="Normalise keys (z-score over token dim, per head) before passing to the MLP.",
+    )
+    parser.add_argument(
+        "--use_residual",
+        action="store_true",
+        help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.",
+    )
+    parser.add_argument(
+        "--intermediate_activation",
+        type=str,
+        default="relu",
+        help="The activation function for the MLP in the value cache.",
+    )
+    parser.add_argument(
+        "--linear_only",
+        action="store_true",
+        help="Recover values directly from W_linear_init (keys @ pinv(W_k) @ W_v), skipping MLP training entirely. Requires --un_rope.",
+    )
+    parser.add_argument(
+        "--per_head_kv_linear",
+        action="store_true",
+        help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.",
+    )
+    parser.add_argument(
+        "--freeze_W_linear",
+        action="store_true",
+        default=False,
+        help="Freeze W_linear during MLP training.",
+    )
+    parser.add_argument(
+        "--early_stopping_tol",
+        type=float,
+        default=None,
+        help="Stop MLP training early when relative loss improvement falls below this threshold.",
+    )
+    parser.add_argument(
+        "--use_attn_predictor",
+        action="store_true",
+        help="Use a shared CNN attention predictor to guide value residual selection.",
+    )
+    parser.add_argument(
+        "--attn_predictor_path",
+        type=str,
+        default=None,
+        help="Path to a checkpoint from train_attention_predictor.py.",
+    )
+    parser.add_argument(
+        "--v_turboquant_residuals",
+        action="store_true",
+        help="Quantise stored MLP value residuals with TurboQuant.",
+    )
+    parser.add_argument(
+        "--v_compressor_bits",
+        type=int,
+        default=3,
+        help="Bits per rotated residual coordinate for TurboQuant residual coding.",
+    )
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:

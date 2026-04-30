@@ -99,11 +99,7 @@ class MSECompressor:
     """
 
     def __init__(
-        self,
-        dim: int,
-        bits: int = 3,
-        seed: int = 0,
-        device: str = "cpu"
+        self, dim: int, bits: int = 3, seed: int = 0, device: str = "cpu"
     ):
         if bits < 1 or bits > 8:
             raise ValueError("MSECompressor currently supports 1 <= bits <= 8.")
@@ -116,16 +112,20 @@ class MSECompressor:
 
         self.indices_per_byte = 8 // bits
         self.mask = (1 << bits) - 1
-        idx_pad = (self.indices_per_byte - dim % self.indices_per_byte) % self.indices_per_byte
+        idx_pad = (
+            self.indices_per_byte - dim % self.indices_per_byte
+        ) % self.indices_per_byte
         self.idx_pad = idx_pad
         self.n_groups = (dim + idx_pad) // self.indices_per_byte
         self.idx_powers = torch.tensor(
             [2 ** (bits * i) for i in range(self.indices_per_byte - 1, -1, -1)],
-            dtype=torch.long, device=device,
+            dtype=torch.long,
+            device=device,
         )
         self.idx_shifts = torch.tensor(
             [bits * i for i in range(self.indices_per_byte - 1, -1, -1)],
-            dtype=torch.long, device=device,
+            dtype=torch.long,
+            device=device,
         )
 
     @torch.no_grad()
@@ -148,7 +148,14 @@ class MSECompressor:
         # Bit-pack indices: pack indices_per_byte indices into each byte
         if self.idx_pad:
             indices = F.pad(indices, (0, self.idx_pad))
-        idx_bytes = (indices.reshape(N, self.n_groups, self.indices_per_byte) * self.idx_powers).sum(-1).to(torch.uint8)
+        idx_bytes = (
+            (
+                indices.reshape(N, self.n_groups, self.indices_per_byte)
+                * self.idx_powers
+            )
+            .sum(-1)
+            .to(torch.uint8)
+        )
 
         return CompressorParams(
             indices=idx_bytes.reshape(*shape[:-1], self.n_groups),
@@ -165,17 +172,23 @@ class MSECompressor:
         idx_bytes = params.indices.reshape(N, -1)
 
         # Unpack indices
-        indices = ((idx_bytes.long().unsqueeze(-1) >> self.idx_shifts) & self.mask).reshape(N, -1)
+        indices = (
+            (idx_bytes.long().unsqueeze(-1) >> self.idx_shifts) & self.mask
+        ).reshape(N, -1)
         if params.idx_pad:
-            indices = indices[:, :self.dim]
+            indices = indices[:, : self.dim]
 
-        reconstructed = (self.centroids[indices] @ self.rotation) * params.norms.reshape(-1, 1).float()
+        reconstructed = (
+            self.centroids[indices] @ self.rotation
+        ) * params.norms.reshape(-1, 1).float()
         return reconstructed.reshape(params.shape).to(dtype=params.dtype)
 
     def memory_nbytes(self, params: CompressorParams) -> float:
         # .numel can be used directly to count bytes after bit-packing
         index_bytes = params.indices.numel()
-        norm_bytes = params.norms.numel() * torch.finfo(params.norms.dtype).bits / 8
+        norm_bytes = (
+            params.norms.numel() * torch.finfo(params.norms.dtype).bits / 8
+        )
         return index_bytes + norm_bytes
 
 

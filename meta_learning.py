@@ -66,7 +66,9 @@ def _support_loss(layer_mlps, cached_kvs, phi, loss_fn):
     total = 0.0
     for layer_idx, (k, v) in enumerate(cached_kvs):
         weights, biases = phi[layer_idx]
-        v_hat = functional_mlp_forward(layer_mlps[layer_idx], k, weights, biases)
+        v_hat = functional_mlp_forward(
+            layer_mlps[layer_idx], k, weights, biases
+        )
         total = total + loss_fn(v_hat, v)
     return total
 
@@ -180,7 +182,9 @@ def inner_loop_functional(
     final_support_loss = None
     if track_losses:
         with torch.no_grad():
-            final_support_loss = _support_loss(layer_mlps, cached_kvs, phi, loss_fn).item()
+            final_support_loss = _support_loss(
+                layer_mlps, cached_kvs, phi, loss_fn
+            ).item()
 
     return (
         theta,

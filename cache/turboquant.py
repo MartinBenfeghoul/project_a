@@ -78,7 +78,9 @@ class TurboQuantLayer(SingleTensorDynamicLayer):
             return tensor
 
         if self.compressed_params is None:
-            raise RuntimeError("Prefill is False but no compressed tensor found.")
+            raise RuntimeError(
+                "Prefill is False but no compressed tensor found."
+            )
 
         prefix = self.compressor.decode(self.compressed_params)
         if tensor.shape[-2] > 0:
@@ -100,9 +102,6 @@ class TurboQuantCache(SingleTensorCache):
         if ddp_cache_data is not None:
             for layer_idx, tensor_states in enumerate(ddp_cache_data):
                 self.update(tensor_states, layer_idx)
-
-    def update_events(self, *args, **kwargs) -> None:
-        pass
 
     @property
     def comp_ratio(self) -> float:
