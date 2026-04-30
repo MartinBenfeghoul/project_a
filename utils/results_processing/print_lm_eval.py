@@ -181,18 +181,6 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
             if isinstance(eval_wall_time, (int, float))
             else eval_wall_time
         )
-        prefill_latency = eff.get("prefill_latency_ms_mean", "N/A")
-        print(
-            round(prefill_latency, decimal_points)
-            if isinstance(prefill_latency, (int, float))
-            else prefill_latency
-        )
-        decode_latency = eff.get("decode_latency_ms_mean", "N/A")
-        print(
-            round(decode_latency, decimal_points)
-            if isinstance(decode_latency, (int, float))
-            else decode_latency
-        )
         gpu_peak_mem = eff.get("gpu_peak_mem_gib", "N/A")
         print(
             round(gpu_peak_mem, decimal_points)
@@ -204,6 +192,18 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
             round(gpu_kv_cache_overhead, decimal_points)
             if isinstance(gpu_kv_cache_overhead, (int, float))
             else gpu_kv_cache_overhead
+        )
+        prefill_latency = eff.get("prefill_latency_ms_mean", "N/A")
+        print(
+            round(prefill_latency, decimal_points)
+            if isinstance(prefill_latency, (int, float))
+            else prefill_latency
+        )
+        decode_latency = eff.get("decode_latency_ms_mean", "N/A")
+        print(
+            round(decode_latency, decimal_points)
+            if isinstance(decode_latency, (int, float))
+            else decode_latency
         )
 
     events_stats = results.get("event_stats", {})
