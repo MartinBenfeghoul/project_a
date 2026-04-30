@@ -5,8 +5,11 @@ import json
 import os
 import torch
 
+from dotenv import load_dotenv
 from omegaconf import OmegaConf
 import wandb
+
+load_dotenv()
 
 
 class Logger:
@@ -72,7 +75,19 @@ def generate_run_name(config):
     """Generate a run name based on config parameters."""
     t = config.training
 
-    run_name = (
+    if t.get("run_type") == "attention_predictor":
+        return (
+            f"seq{t.seq_len}_"
+            f"maxb{t.max_batches}_"
+            f"sps{t.samples_per_sequence}_"
+            f"hist{t.history_step}_"
+            f"blk{t.block_size}_"
+            f"topk{t.topk_blocks}_"
+            f"layers{_format_run_value(t.layers)}_"
+            f"bce{t.bce_weight}"
+        )
+
+    return (
         f"seq{t.seq_len}_"
         f"steps{t.inner_steps}_"
         f"mlr{t.meta_lr}_"
@@ -81,7 +96,6 @@ def generate_run_name(config):
         f"learnperc{t.get('learn_target_perc', False)}_"
         f"gradaccum{t.grad_accum_steps}"
     )
-    return run_name
 
 
 def init_wandb(config):
@@ -96,8 +110,7 @@ def init_wandb(config):
         )
 
     wandb.login(key=wandb_key)
-    run_name = generate_run_name(config)
-
+    run_name = wandb_config.get("run_name") or generate_run_name(config)
     wandb.init(
         project=wandb_config.get("project", "gist_vs_details"),
         entity=wandb_config.get("entity", "mixture_of_titans"),
@@ -153,6 +166,45 @@ def save_results(
             )
             + "\n"
         )
+
+
+def save_attention_predictor_checkpoint(
+    args,
+    predictor,
+    optimizer: torch.optim.Optimizer,
+    layers: list[int],
+    step: int,
+    running: dict[str, float],
+    num_updates: int,
+) -> None:
+    metrics = {
+        key: value / max(1, num_updates)
+        for key, value in running.items()
+    }
+    params = {
+        "model_state_dict": predictor.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "step": step,
+        "metrics": metrics,
+        "config": {
+            "model_name": args.model_name,
+            "seq_len": args.seq_len,
+            "history_step": args.history_step,
+            "block_size": args.block_size,
+            "topk_blocks": args.topk_blocks,
+            "layers": layers,
+            "bce_weight": args.bce_weight,
+        },
+    }
+
+    torch.save(
+        params,
+        os.path.join(args.checkpoint_dir, "model_ckpt.pt"),
+    )
+
+    metrics_path = os.path.join(args.checkpoint_dir, "metrics.json")
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2)
 
 
 def log_batch(
@@ -312,6 +364,12 @@ def extract_and_save_efficiency_stats(
     peak_mem = torch.cuda.max_memory_allocated()
     prefill_ms = [s.elapsed_time(e) for s, e in logger.prefill_events]
     decode_ms = [s.elapsed_time(e) for s, e in logger.decode_events]
+    prefill_mem_allocated = logger.get_log_list(
+        "prefill_gpu_mem_allocated_bytes"
+    )
+    prefill_mem_overhead = logger.get_log_list(
+        "prefill_gpu_mem_overhead_bytes"
+    )
 
     efficiency_metrics = {
         "eval_wall_time_seconds": wall_time_sec,
@@ -320,6 +378,16 @@ def extract_and_save_efficiency_stats(
         / (1024**3),  # (weights + kv cache + activations)
         "gpu_kv_cache_overhead_gib": (peak_mem - model_baseline_mem)
         / (1024**3),  # (kv cache + activations)
+        "prefill_gpu_mem_allocated_gib_mean": (
+            sum(prefill_mem_allocated) / len(prefill_mem_allocated) / (1024**3)
+            if prefill_mem_allocated
+            else 0.0
+        ),
+        "prefill_gpu_mem_overhead_gib_mean": (
+            sum(prefill_mem_overhead) / len(prefill_mem_overhead) / (1024**3)
+            if prefill_mem_overhead
+            else 0.0
+        ),
         "prefill_latency_ms_mean": (
             sum(prefill_ms) / len(prefill_ms) if prefill_ms else 0.0
         ),
@@ -342,8 +410,57 @@ def get_output_path(output_path):
     while True:
         if not os.path.exists(output_path.format(i)):
             return output_path.format(i)
-        i += 1
+        i+=1
 
+def _format_run_value(value: object) -> str:
+    return str(value).replace("/", "-").replace(",", "-").replace(" ", "")
+
+
+def save_run_config(
+    args,
+    layers: list[int],
+    run_name: str,
+    checkpoint_dir: str,
+) -> None:
+    config = {
+        **vars(args),
+        "run_name": run_name,
+        "checkpoint_dir": checkpoint_dir,
+        "resolved_layers": layers,
+    }
+    OmegaConf.save(OmegaConf.create(config), os.path.join(checkpoint_dir, "config.yaml"))
+
+
+def attention_predictor_config(args, layers: list[int] | None = None):
+    training = {
+        **vars(args),
+        "run_type": "attention_predictor",
+    }
+    if layers is not None:
+        training["resolved_layers"] = layers
+
+    return OmegaConf.create(
+        {
+            "training": training,
+            "wandb": {
+                "enabled": args.use_wandb,
+                "project": args.wandb_project,
+                "entity": args.wandb_entity,
+                "run_name": getattr(args, "wandb_run_name", None),
+            },
+        }
+    )
+
+
+def prepare_run_directory(
+    args,
+    layers: list[int],
+) -> str:
+    run_name = generate_run_name(attention_predictor_config(args, layers))
+    args.checkpoint_dir = os.path.join(args.output_dir, run_name)
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+    save_run_config(args, layers, run_name, args.checkpoint_dir)
+    return run_name
 
 def init_timing_stats():
     return {

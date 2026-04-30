@@ -10,9 +10,14 @@ from lm_eval.utils import make_table
 from lm_eval.tasks import TaskManager
 
 from cache import CompressedCacheHFLM
+from model.attention_predictor import (
+    get_attn_predictor_hook_handles,
+    apply_attn_predictor_config
+)
 from utils import (
     Logger,
     get_model_and_tokenizer,
+    extract_kv_linear_init,
     get_device,
     get_device_type,
     list_of_strings,
@@ -38,13 +43,21 @@ def get_tasks(tasks, print_tasks=True):
     return tasks
 
 
-def make_hooks(logger, uncompressed_window=0, measure_latency=False):
+def make_hooks(
+    logger,
+    uncompressed_window=0,
+    measure_latency=False,
+    measure_gpu_memory=False,
+    model_baseline_mem=0,
+):
     """
     When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
     """
     _start_evt = [None]
+    _prefill_mem_start = [None]
 
     _cuda = measure_latency and torch.cuda.is_available()
+    _cuda_mem = measure_gpu_memory and torch.cuda.is_available()
 
     def has_complete_key_cache_timings(timing_stats):
         return (
@@ -54,10 +67,16 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
         )
 
     def pre_hook(module, args, kwargs):
+        input_ids = kwargs.get("input_ids", args[0] if args else None)
+        is_prefill = input_ids is not None and input_ids.size(-1) > 1
         if _cuda:
             evt = torch.cuda.Event(enable_timing=True)
             evt.record()
             _start_evt[0] = evt
+        if _cuda_mem and is_prefill:
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            _prefill_mem_start[0] = torch.cuda.memory_allocated()
 
     def post_hook(module, args, kwargs, output):
         if _cuda:
@@ -86,6 +105,15 @@ def make_hooks(logger, uncompressed_window=0, measure_latency=False):
                     logger.add_log("avg_event_size", avg_event_size)
             if _cuda:
                 logger.prefill_events.append((_start_evt[0], end_evt))
+            if _cuda_mem:
+                torch.cuda.synchronize()
+                mem_allocated = torch.cuda.memory_allocated()
+                mem_start = _prefill_mem_start[0]
+                if mem_start is not None:
+                    logger.add_log("prefill_gpu_mem_delta_bytes", mem_allocated - mem_start)
+                logger.add_log("prefill_gpu_mem_allocated_bytes", mem_allocated)
+                logger.add_log("prefill_gpu_mem_overhead_bytes", mem_allocated - model_baseline_mem)
+                _prefill_mem_start[0] = None
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
@@ -132,6 +160,8 @@ def main(args):
 
     rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
 
+    attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
+
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
@@ -152,6 +182,9 @@ def main(args):
         "kmeans_per_head": args.kmeans_per_head,
         "unrope_keys": args.un_rope,
         "rope_theta": rope_theta,
+        "quantise_a": args.k_quantise_a,
+        "quantise_b": args.k_quantise_b,
+        "compressor_bits": args.k_compressor_bits,
     }
 
     num_layers = model.config.num_hidden_layers
@@ -177,7 +210,18 @@ def main(args):
         "un_rope": args.un_rope,
         "rope_theta": rope_theta,
         "global_compression": args.global_compression,
+        "normalise_keys": args.normalise_keys,
+        "use_residual": args.use_residual,
+        "intermediate_activation": args.intermediate_activation,
+        "linear_only": args.linear_only,
+        "early_stopping_tol": args.early_stopping_tol,
+        "freeze_W_linear": args.freeze_W_linear,
+        "target_cr": args.target_cr,
+        "turboquant_residuals": args.v_turboquant_residuals,
+        "compressor_bits": args.v_compressor_bits,
     }
+    if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
+        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model, per_head=args.per_head_kv_linear)
 
     model.eval()
 
@@ -196,6 +240,8 @@ def main(args):
     pre_hook, post_hook = make_hooks(
         logger,
         measure_latency=args.log_efficiency_metrics,
+        measure_gpu_memory=args.log_efficiency_metrics,
+        model_baseline_mem=model_baseline_mem,
     )
     model.register_forward_pre_hook(pre_hook, with_kwargs=True)
     model.register_forward_hook(post_hook, with_kwargs=True)
@@ -233,6 +279,17 @@ def main(args):
         limit=args.limit,
     )
 
+    cr_values = logger.get_log_list("crs")
+    if cr_values:
+        cr_mean, cr_std = logger.get_log_mean("crs", std=True)
+        compression_metrics = {
+            "compression_ratio_mean": float(cr_mean),
+            "compression_ratio_std": float(cr_std),
+            "n_compression_ratio_samples": len(cr_values),
+        }
+        print("Compression metrics:", compression_metrics)
+        results["results"]["compression_metrics"] = compression_metrics
+
     print(make_table(results))
 
     results = extract_and_save_stats(logger, results)
@@ -259,6 +316,8 @@ def main(args):
     with open(output_path, "w") as f:
         json.dump(results["results"], f, ensure_ascii=False, indent=4)
     print(f"Results saved to {output_path}")
+    for handle in attn_predictor_hook_handles:
+        handle.remove()
     return results
 
 
@@ -333,6 +392,10 @@ def parse_args():
     parser.add_argument("--kmeans_avg_heads", action="store_true")
     parser.add_argument("--kmeans_per_head", action="store_true")
     parser.add_argument("--log_key_cache_timing", action="store_true")
+    parser.add_argument("--k_quantise_a", action="store_true", help="Quantise low-rank key-cache A factors with TurboQuant.")
+    parser.add_argument("--k_quantise_b", action="store_true", help="Quantise low-rank key-cache B factors with TurboQuant.")
+    parser.add_argument("--k_compressor_bits", type=int, default=4, help="Bits per rotated coordinate for TurboQuant key cache or low-rank factor quantisation.")
+
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
@@ -342,10 +405,11 @@ def parse_args():
     parser.add_argument("--per_sequence", action="store_true")
     parser.add_argument(
         "--target_perc", type=int, default=85
-    )  # TODO: I think this would be better as a dictionary with number of layers for each target perc
+    ) 
+    parser.add_argument("--target_cr", type=float, default=None)
     parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
-    parser.add_argument("--optimizer", type=str, default="adam")
+    parser.add_argument("--optimizer", type=str, default="adam", choices=["adam", "adamw", "sgd"])
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
@@ -375,10 +439,22 @@ def parse_args():
         default=None,  # TODO: set default based on model config if not passed
         help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).",
     )
+    parser.add_argument("--normalise_keys", action="store_true", help="Normalise keys (z-score over token dim, per head) before passing to the MLP.")
+    parser.add_argument("--use_residual", action="store_true", help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.")
+    parser.add_argument("--intermediate_activation", type=str, default='relu', help="The activation function for the MLP in the value cache.")
+    parser.add_argument("--linear_only", action="store_true", help="Recover values directly from W_linear_init (keys @ pinv(W_k) @ W_v), skipping MLP training entirely. Requires --un_rope.")
+    parser.add_argument("--per_head_kv_linear", action="store_true", help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.")
+    parser.add_argument("--freeze_W_linear", action="store_true", default=False, help="Freeze W_linear during MLP training.")
+    parser.add_argument("--early_stopping_tol", type=float, default=None, help="Stop MLP training early when relative loss improvement falls below this threshold.")
+    parser.add_argument("--use_attn_predictor", action="store_true", help="Use a shared CNN attention predictor to guide value residual selection.")
+    parser.add_argument("--attn_predictor_path", type=str, default=None, help="Path to a checkpoint from train_attention_predictor.py.")
+    parser.add_argument("--v_turboquant_residuals", action="store_true", help="Quantise stored MLP value residuals with TurboQuant.")
+    parser.add_argument("--v_compressor_bits", type=int, default=3, help="Bits per rotated residual coordinate for TurboQuant residual coding.")
 
     args = parser.parse_args()
     if args.meta_weights_path is not None:
         args = override_args_from_meta_weights(args)
+    args = apply_attn_predictor_config(args)
 
     print("Config for lm-eval: ", vars(args))
 

@@ -17,5 +17,7 @@ checkpoints/*
 scripts/lazy_runs
 data/NIAH
 results
+slurm
 AGENTS.md
 CLAUDE.md
+*.codex

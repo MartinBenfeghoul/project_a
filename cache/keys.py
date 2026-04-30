@@ -1,4 +1,5 @@
 import time
+import warnings
 from typing import Any
 
 import torch
@@ -25,6 +26,7 @@ from utils.logging import (
     sync_cuda,
 )
 from .base import SingleTensorCache
+from .turboquant import TurboQuantCache
 
 
 def get_expected_seq_len(cache_kwargs):
@@ -63,6 +65,9 @@ class DecomposedKeysCache(SingleTensorCache):
         decomp_n_iter: int = 3,
         lr: float = 1e-2,
         unrope_keys: bool = False,
+        quantise_a: bool = False,
+        quantise_b: bool = False,
+        compressor_bits: int = 4,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -82,6 +87,9 @@ class DecomposedKeysCache(SingleTensorCache):
         self.decomp_n = decomp_n_iter
         self.lr = lr
         self.unrope_keys = unrope_keys
+        self.quantise_a = quantise_a
+        self.quantise_b = quantise_b
+        self.compressor_bits = compressor_bits
 
         self.prefill = True
         self.lr_keys = {}
@@ -93,7 +101,13 @@ class DecomposedKeysCache(SingleTensorCache):
         )
 
     def calc_compression_ratio(self):
-        default_ratio = self.r if self.rank_selection == "comp_ratio" else None
+        default_ratio = (
+            self.r
+            if self.rank_selection == "comp_ratio"
+            and not self.quantise_a
+            and not self.quantise_b
+            else None
+        )
         return calc_segment_store_compression_ratio(
             self.lr_keys, default_ratio=default_ratio
         )
@@ -108,6 +122,9 @@ class DecomposedKeysCache(SingleTensorCache):
             "energy_threshold": self.e,
             "n_iter": self.decomp_n,
             "lr": self.lr,
+            "quantise_a": self.quantise_a,
+            "quantise_b": self.quantise_b,
+            "compressor_bits": self.compressor_bits,
         }
 
     def _store_layer_segments(self, layer_idx, layer_segments):
@@ -221,7 +238,7 @@ class DecomposedKeysCache(SingleTensorCache):
         self._store_layer_segments(layer_idx, layer_segments)
         return suffix_start
 
-    def _reconstruct_keys(self, keys, layer_idx, cache_kwargs=None):
+    def _reconstruct_keys(self, keys, layer_idx):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
@@ -237,6 +254,31 @@ class DecomposedKeysCache(SingleTensorCache):
                 type(self), "reconstruct", time.perf_counter() - start_time
             )
         return recon_keys
+
+    def get_reconstructed_keys_only(self, layer_idx):
+        """Utility method to get reconstructed keys without adding suffix keys.
+        If local_window > 0, the returned reconstructed keys will still be concatenated
+        with the local window of suffix keys for consistency of output sequence length.
+        Furthermore, it returns None if no compressed keys are found for the layer.
+        """
+        if not self.lr_keys.get(layer_idx):
+            warnings.warn(
+                f"No compressed keys found for layer {layer_idx}. "
+                "get_reconstructed_keys_only will return None."
+            )
+            return None
+        suffix_keys = self.layers[layer_idx].tensor
+        if self.local_window > 0:
+            assert suffix_keys.size(-2) > 0, f"Suffix keys are required for local_window > 0 but got shape {suffix_keys.shape}."
+            return self._reconstruct_keys(
+                keys=suffix_keys[..., :self.local_window, :],
+                layer_idx=layer_idx,
+            )
+        else:
+            return self._reconstruct_keys(
+                keys=suffix_keys[..., :0, :],
+                layer_idx=layer_idx,
+            )
 
 
 class LowRankKeysCache(DecomposedKeysCache):
@@ -255,9 +297,7 @@ class LowRankKeysCache(DecomposedKeysCache):
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
             return keys
         elif self.lr_keys.get(layer_idx, False):
-            recon_keys = self._reconstruct_keys(
-                keys, layer_idx, cache_kwargs=cache_kwargs
-            )
+            recon_keys = self._reconstruct_keys(keys, layer_idx)
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
         else:
@@ -335,9 +375,7 @@ class SurpriseLRKCache(DecomposedKeysCache):
             keys = keys[..., suffix_start:, :]
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
 
-        recon_keys = self._reconstruct_keys(
-            keys, layer_idx, cache_kwargs=cache_kwargs
-        )
+        recon_keys = self._reconstruct_keys(keys, layer_idx)
         check_recon_length(recon_keys, cache_kwargs)
         return recon_keys
 
@@ -458,7 +496,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         )
         return grouped_prefix, assignments, inverse_permutation, segment_ranges
 
-    def _decompose_clustered_keys(
+    def _decompose_keys(
         self,
         keys,
         prefix_end,
@@ -531,7 +569,7 @@ class KMeansLRKCache(DecomposedKeysCache):
         self._store_layer_segments(layer_idx, layer_segments)
         return suffix_start
 
-    def _reconstruct_clustered_keys(self, keys, layer_idx):
+    def _reconstruct_keys(self, keys, layer_idx, cache_kwargs=None):
         if self.log_timing_stats:
             sync_cuda(keys)
             start_time = time.perf_counter()
@@ -675,7 +713,7 @@ class KMeansLRKCache(DecomposedKeysCache):
     ) -> torch.Tensor:
         keys = super().update(key_states, layer_idx, cache_kwargs)
         if self.prefill:
-            suffix_start = self._decompose_clustered_keys(
+            suffix_start = self._decompose_keys(
                 keys,
                 keys.size(-2),
                 layer_idx,
@@ -685,7 +723,7 @@ class KMeansLRKCache(DecomposedKeysCache):
             return keys
 
         if self.lr_keys.get(layer_idx, False):
-            recon_keys = self._reconstruct_clustered_keys(keys, layer_idx)
+            recon_keys = self._reconstruct_keys(keys, layer_idx)
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
         else:
@@ -700,4 +738,5 @@ KEY_CACHE_CLASSES = {
     "low_rank": LowRankKeysCache,
     "surprise_lr": SurpriseLRKCache,
     "kmeans_lr": KMeansLRKCache,
+    "turboquant": TurboQuantCache,
 }

@@ -22,6 +22,8 @@ class MLP(nn.Module):
         batch_size: int | None = None,
         deterministic_init: bool = True,
         intermediate_activation: str = "gelu",
+        use_residual: bool = False,
+        per_head_residual: bool = False,
     ):
         super().__init__()
 
@@ -30,6 +32,8 @@ class MLP(nn.Module):
         self.per_sequence = per_sequence
         self.num_heads = num_heads
         self.batch_size = batch_size
+        self.use_residual = use_residual
+        self.per_head_residual = per_head_residual
 
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
@@ -43,15 +47,10 @@ class MLP(nn.Module):
         for i in range(num_layers):
             out_dim = head_dim if i == num_layers - 1 else hidden_dim
 
-            if per_sequence:
-                assert batch_size is not None
-                w = nn.Parameter(
-                    torch.empty(batch_size, num_heads, curr_dim, out_dim)
-                )
-                b = nn.Parameter(torch.empty(batch_size, num_heads, 1, out_dim))
-            else:
-                w = nn.Parameter(torch.empty(1, num_heads, curr_dim, out_dim))
-                b = nn.Parameter(torch.empty(1, num_heads, 1, out_dim))
+            w_shape = (batch_size if per_sequence else 1, num_heads, curr_dim, out_dim)
+            b_shape = (batch_size if per_sequence else 1, num_heads, 1, out_dim)
+            w = nn.Parameter(torch.zeros(*w_shape))
+            b = nn.Parameter(torch.zeros(*b_shape))
 
             nn.init.kaiming_uniform_(w, a=math.sqrt(5))
             nn.init.zeros_(b)
@@ -60,8 +59,15 @@ class MLP(nn.Module):
             self.biases.append(b)
             curr_dim = out_dim
 
+        if use_residual:
+            if per_head_residual:
+                self.W_linear = nn.Parameter(torch.zeros(num_heads, head_dim, head_dim))
+            else:
+                self.W_linear = nn.Parameter(torch.zeros(num_heads, head_dim, num_heads, head_dim))
+
     def forward(self, x):
         # x: [B, H, T, D]
+        x_in = x
         for i in range(self.num_layers):
             w = self.weights[i]
             b = self.biases[i]
@@ -70,5 +76,16 @@ class MLP(nn.Module):
 
             if i < self.num_layers - 1:
                 x = self.intermediate_activation(x)
+
+        if self.use_residual:
+            if self.per_head_residual:
+                x = x + torch.einsum('bhtd,hde->bhte', x_in, self.W_linear)
+            else:
+                x = x + torch.einsum('bhtd,hdqe->bqte', x_in, self.W_linear)
+                # equivalent to:
+                # x_in = x_in.permute(0, 2, 1, 3)  # [B, T, H, D]
+                # x_in = x_in.reshape(x_in.shape[0], x_in.shape[1], -1)  # [B, T, H*D]            
+                # W_linear = self.W_linear.reshape(self.num_heads * self.head_dim, -1)  # [H*D, H*D]
+                # x = x + torch.matmul(x_in, W_linear)
 
         return x

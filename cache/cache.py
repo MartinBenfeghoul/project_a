@@ -77,6 +77,14 @@ class CompressedCache:
             )
         else:
             raise ValueError(f"Invalid cache type: {value_cache_type}")
+        self._temp_value_importance = {}
+
+    def set_value_importance(
+        self,
+        layer_idx: int,
+        value_importance: torch.Tensor,
+    ) -> None:
+        self._temp_value_importance[layer_idx] = value_importance
 
     def update(
         self,
@@ -88,7 +96,16 @@ class CompressedCache:
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
         if cache_kwargs is None:
             cache_kwargs = {}
-        cache_kwargs["keys"] = keys
+        if layer_idx in self._temp_value_importance:
+            cache_kwargs["value_importance"] = self._temp_value_importance.pop(
+                layer_idx
+            )
+        fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
+        if callable(fn) and getattr(self.key_cache, "prefill", False):
+            recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
+            cache_kwargs["keys"] = keys if recon_keys is None else recon_keys
+        else:
+            cache_kwargs["keys"] = keys
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
         return keys, values
 
