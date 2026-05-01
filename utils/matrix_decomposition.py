@@ -425,9 +425,7 @@ def reconstruct_segments(
                 else dequantise_factor(B_raw)
             )
             recon_pieces.append(A @ B)
-        if suffix_tensor[batch_idx].size(-2) > 0:
-            recon_pieces.append(suffix_tensor[batch_idx])
-        if not recon_pieces:
+        if suffix_tensor[batch_idx].size(-2) > 0 or not recon_pieces:
             recon_pieces.append(suffix_tensor[batch_idx])
         recon_batches.append(torch.cat(recon_pieces, dim=-2))
     return torch.stack(recon_batches, dim=0)

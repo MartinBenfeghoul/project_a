@@ -309,6 +309,212 @@ class LowRankKeysCache(DecomposedKeysCache):
             )
 
 
+class XKVKeysCache(DecomposedKeysCache):
+    """
+    Cross-layer SVD key cache following xKV's grouped-layer formulation.
+
+    The cache groups adjacent layers into contiguous blocks of size
+    `layer_group_size`, flattens heads within each layer, performs one SVD
+    over the horizontally concatenated key tensors of the full group, stores
+    the shared folded left factor `A = U S` on the last layer of the group,
+    and stores each layer's own right factor on that layer.
+    """
+
+    def __init__(
+        self,
+        *args,
+        layer_group_size: int = 2,
+        num_layers: int | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        if layer_group_size <= 0:
+            raise ValueError("layer_group_size must be positive.")
+        if num_layers is not None and num_layers <= 0:
+            raise ValueError("num_layers must be positive when provided.")
+        if self.decomposition_method != "svd":
+            raise NotImplementedError(
+                "XKVKeysCache currently supports decomposition_method='svd' "
+                "only so the shared folded left factor can be stored "
+                "explicitly."
+            )
+        if self.quantise_a or self.quantise_b:
+            raise NotImplementedError(
+                "XKVKeysCache does not yet support quantised shared/grouped "
+                "factors."
+            )
+
+        self.layer_group_size = layer_group_size
+        self.num_layers = num_layers
+        self.shared_a = {}
+        self.group_metadata = {}
+
+    def reorder_cache(self, beam_idx: torch.LongTensor):
+        raise NotImplementedError(
+            "XKVKeysCache batch ops are intentionally left unimplemented."
+        )
+
+    def batch_repeat_interleave(self, repeats: int):
+        raise NotImplementedError(
+            "XKVKeysCache batch ops are intentionally left unimplemented."
+        )
+
+    def batch_select_indices(self, indices: torch.Tensor):
+        raise NotImplementedError(
+            "XKVKeysCache batch ops are intentionally left unimplemented."
+        )
+
+    def _get_group_bounds(self, layer_idx):
+        group_start = (layer_idx // self.layer_group_size) * self.layer_group_size
+        group_last = group_start + self.layer_group_size - 1
+        if self.num_layers is not None:
+            group_last = min(group_last, self.num_layers - 1)
+        return group_start, group_last
+
+    def _decompose_keys(self, layer_idx, cache_kwargs=None):
+        if self.log_timing_stats:
+            sync_cuda(self.layers[layer_idx].tensor)
+            start_time = time.perf_counter()
+
+        group_start, group_last_layer = self._get_group_bounds(layer_idx)
+        if group_last_layer != layer_idx:
+            raise ValueError(
+                "xKV decomposition should only be triggered from the last "
+                f"layer of a group, got layer {layer_idx} for group ending "
+                f"at layer {group_last_layer}."
+            )
+
+        group_layers = tuple(range(group_start, group_last_layer + 1))
+        group_tensors = [self.layers[i].tensor for i in group_layers]
+
+        suffix_start = self._get_suffix_start(group_tensors[-1])
+        self.compressed_len = suffix_start
+        if suffix_start == 0:
+            batch_size, _, _, _ = group_tensors[-1].shape
+            shared_a = group_tensors[-1].new_empty(
+                batch_size, 1, 0, 0
+            )
+            right_factors = tuple(
+                group_tensors[-1].new_empty(
+                    batch_size,
+                    1,
+                    0,
+                    tensor.size(1) * tensor.size(-1),
+                )
+                for tensor in group_tensors
+            )
+        else:
+            prefix_tensors = []
+            for group_layer_idx, tensor in zip(group_layers, group_tensors):
+                prefix_tensor = tensor[..., :suffix_start, :]
+                if self.unrope_keys:
+                    prefix_tensor = self.layers[group_layer_idx]._undo_rope(
+                        prefix_tensor,
+                        cache_kwargs,
+                        prefill=self.prefill,
+                        compressed_len=suffix_start,
+                    )
+                prefix_tensors.append(
+                    prefix_tensor.transpose(1, 2).reshape(
+                        prefix_tensor.size(0),
+                        prefix_tensor.size(-2),
+                        -1,
+                    )
+                )
+            group_prefix = torch.cat(prefix_tensors, dim=-1).unsqueeze(1)
+
+            shared_a, grouped_right = self.decompose(
+                group_prefix,
+                **self._decomposition_kwargs(),
+            )
+            right_factors = torch.split(
+                grouped_right,
+                group_tensors[0].size(1) * group_tensors[0].size(-1),
+                dim=-1,
+            )
+
+        self.shared_a[group_last_layer] = shared_a
+        for group_layer_idx, right_factor in zip(group_layers, right_factors):
+            self.lr_keys[group_layer_idx] = {"right_factor": right_factor}
+            self.group_metadata[group_layer_idx] = (
+                group_last_layer,
+                suffix_start,
+            )
+
+        if self.log_timing_stats:
+            sync_cuda(self.layers[layer_idx].tensor)
+            update_timing_stats(
+                type(self), "decompose", time.perf_counter() - start_time
+            )
+        return suffix_start
+
+    def _reconstruct_keys(self, keys, layer_idx):
+        if self.log_timing_stats:
+            sync_cuda(keys)
+            start_time = time.perf_counter()
+
+        if layer_idx not in self.group_metadata:
+            raise ValueError(
+                f"No xKV metadata found for layer {layer_idx}."
+            )
+
+        group_last_layer, compressed_len = self.group_metadata[layer_idx]
+        shared_a = self.shared_a[group_last_layer]
+        right_factor = self.lr_keys[layer_idx]["right_factor"]
+        prefix_flat = (shared_a @ right_factor).squeeze(1)
+        batch_size, num_heads, _, head_dim = keys.shape
+        prefix_keys = prefix_flat.reshape(
+            batch_size,
+            prefix_flat.size(1),
+            num_heads,
+            head_dim,
+        ).transpose(1, 2)
+
+        if self.unrope_keys:
+            prefix_keys = self.layers[layer_idx]._apply_rope(
+                prefix_keys,
+                compressed_len=compressed_len,
+            )
+        recon_keys = torch.cat([prefix_keys, keys], dim=-2)
+
+        if self.log_timing_stats:
+            sync_cuda(recon_keys)
+            update_timing_stats(
+                type(self), "reconstruct", time.perf_counter() - start_time
+            )
+        return recon_keys
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: dict[str, Any] | None = None,
+    ) -> torch.Tensor:
+        keys = super().update(key_states, layer_idx, cache_kwargs)
+
+        if self.prefill:
+            group_start, group_last_layer = self._get_group_bounds(layer_idx)
+            if layer_idx != group_last_layer:
+                return keys
+
+            suffix_start = self._decompose_keys(layer_idx, cache_kwargs=cache_kwargs)
+            for group_layer_idx in range(group_start, group_last_layer + 1):
+                self._evict(layer_idx=group_layer_idx, end_idx=suffix_start)
+            return keys
+
+        if self.lr_keys.get(layer_idx, False):
+            recon_keys = self._reconstruct_keys(keys, layer_idx)
+            check_recon_length(recon_keys, cache_kwargs)
+            return recon_keys
+
+        raise Exception(
+            "Prefill is set to False and no xKV factors were found for "
+            f"layer {layer_idx}. If this layer is part of a terminal partial "
+            "group, pass num_layers through later plumbing so the group "
+            "boundary is known."
+        )
+
+
 class SurpriseLRKCache(DecomposedKeysCache):
     def __init__(
         self,
