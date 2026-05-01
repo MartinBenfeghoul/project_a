@@ -19,7 +19,15 @@ def run_roundtrip(cache, prefill_keys, decode_keys, layer_idx=0):
     returned_prefill = cache.update(prefill_keys, layer_idx, cache_kwargs={})
     torch.testing.assert_close(returned_prefill, prefill_keys)
     cache.update_events()
-    recon_keys = cache.update(decode_keys, layer_idx, cache_kwargs={})
+    cache_position = torch.tensor(
+        [prefill_keys.size(-2)],
+        dtype=torch.long,
+    )
+    recon_keys = cache.update(
+        decode_keys,
+        layer_idx,
+        cache_kwargs={"cache_position": cache_position},
+    )
     expected_keys = torch.cat([prefill_keys, decode_keys], dim=-2)
     torch.testing.assert_close(
         recon_keys,
@@ -72,7 +80,15 @@ def test_kmeans_per_head_metadata_tracks_batch_ops():
         1,
         expected_prefix.size(-1),
     )
-    recon_keys = cache.update(decode_keys, layer_idx=0, cache_kwargs={})
+    cache_position = torch.tensor(
+        [prefill_keys.size(-2)],
+        dtype=torch.long,
+    )
+    recon_keys = cache.update(
+        decode_keys,
+        layer_idx=0,
+        cache_kwargs={"cache_position": cache_position},
+    )
     expected_keys = torch.cat([expected_prefix, decode_keys], dim=-2)
 
     torch.testing.assert_close(

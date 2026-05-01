@@ -167,6 +167,7 @@ def main(args):
 
     attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
 
+    num_layers = model.config.num_hidden_layers
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
@@ -185,6 +186,8 @@ def main(args):
         "kmeans_dtype": args.kmeans_dtype,
         "kmeans_avg_heads": args.kmeans_avg_heads,
         "kmeans_per_head": args.kmeans_per_head,
+        "layer_group_size": args.xkv_layer_group_size,
+        "num_layers": num_layers,
         "unrope_keys": args.un_rope,
         "rope_theta": rope_theta,
         "quantise_a": args.k_quantise_a,
@@ -192,7 +195,6 @@ def main(args):
         "compressor_bits": args.k_compressor_bits,
     }
 
-    num_layers = model.config.num_hidden_layers
     target_perc_per_layer = (
         args.target_perc
         if isinstance(args.target_perc, list)
@@ -378,6 +380,12 @@ def parse_args():
     parser.add_argument("--decomp_n_iter", type=int, default=3)
     parser.add_argument("--gamma", type=float, default=3.0)
     parser.add_argument("--local_window", type=int, default=0)
+    parser.add_argument(
+        "--xkv_layer_group_size",
+        type=int,
+        default=2,
+        help="Number of adjacent layers to jointly compress when --k_cache_type=xkv.",
+    )
     parser.add_argument(
         "--kmeans_cluster_size",
         type=float,

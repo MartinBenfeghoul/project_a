@@ -954,6 +954,7 @@ class KMeansLRKCache(DecomposedKeysCache):
 KEY_CACHE_CLASSES = {
     "baseline": SingleTensorCache,
     "low_rank": LowRankKeysCache,
+    "xkv": XKVKeysCache,
     "surprise_lr": SurpriseLRKCache,
     "kmeans_lr": KMeansLRKCache,
     "turboquant": TurboQuantCache,

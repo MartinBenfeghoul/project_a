@@ -59,6 +59,7 @@ KEY_CONFIGS = [
     "decomp_n_iter",
     "gamma",
     "local_window",
+    "xkv_layer_group_size",
     "kmeans_cluster_size",
     "kmeans_n_iter",
     "kmeans_init",
