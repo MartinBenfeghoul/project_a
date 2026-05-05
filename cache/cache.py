@@ -65,6 +65,7 @@ class CompressedCache:
                 ddp_cache_data=ddp_cache_data,
                 **value_cache_kwargs,
             )
+            self.pass_keys_to_value_cache = True
         elif value_cache_type in KEY_CACHE_CLASSES:
             value_cache_kwargs = copy.deepcopy(key_cache_kwargs)
             value_cache_kwargs["unrope_keys"] = False
@@ -76,6 +77,7 @@ class CompressedCache:
                 ddp_cache_data=ddp_cache_data,
                 **value_cache_kwargs,
             )
+            self.pass_keys_to_value_cache = False
         else:
             raise ValueError(f"Invalid cache type: {value_cache_type}")
         self._temp_value_importance = {}
@@ -101,12 +103,13 @@ class CompressedCache:
             cache_kwargs["value_importance"] = self._temp_value_importance.pop(
                 layer_idx
             )
-        fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
-        if callable(fn) and getattr(self.key_cache, "prefill", False):
-            recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
-            cache_kwargs["keys"] = keys if recon_keys is None else recon_keys
-        else:
-            cache_kwargs["keys"] = keys
+        if self.pass_keys_to_value_cache:
+            fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
+            if callable(fn) and getattr(self.key_cache, "prefill", False):
+                recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
+                cache_kwargs["keys"] = keys if recon_keys is None else recon_keys
+            else:
+                cache_kwargs["keys"] = keys
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
         return keys, values
 
