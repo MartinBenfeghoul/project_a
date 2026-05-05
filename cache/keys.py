@@ -1,3 +1,4 @@
+import math
 import time
 import warnings
 from typing import Any
@@ -9,6 +10,7 @@ from utils.matrix_decomposition import (
     DECOMP_METHODS,
     calc_segment_store_compression_ratio,
     decompose_to_segment_store,
+    decompose_grouped_xkv_to_segment_store,
     reconstruct_segments,
 )
 from utils.segmentation import (
@@ -24,6 +26,12 @@ from utils.logging import (
     init_timing_stats,
     update_timing_stats,
     sync_cuda,
+)
+from utils.turboquant import (
+    factor_dtype,
+    factor_nbytes,
+    factor_shape,
+    quantise_factor,
 )
 from .base import SingleTensorCache
 from .turboquant import TurboQuantCache
@@ -338,11 +346,6 @@ class XKVKeysCache(DecomposedKeysCache):
                 "only so the shared folded left factor can be stored "
                 "explicitly."
             )
-        if self.quantise_a or self.quantise_b:
-            raise NotImplementedError(
-                "XKVKeysCache does not yet support quantised shared/grouped "
-                "factors."
-            )
 
         self.layer_group_size = layer_group_size
         self.num_layers = num_layers
@@ -394,12 +397,31 @@ class XKVKeysCache(DecomposedKeysCache):
             for batch_idx, batch_shared in enumerate(self.shared_a[group_last]):
                 for seg_idx, shared_segment in enumerate(batch_shared):
                     A = shared_segment["factor"]
-                    m, k = A.size(-2), A.size(-1)
+                    a_shape = factor_shape(A)
+                    leading = math.prod(a_shape[:-2])
+                    m = a_shape[-2]
                     n = sum(
-                        self.lr_keys[l][batch_idx][seg_idx]["factor"].size(-1)
+                        factor_shape(
+                            self.lr_keys[l][batch_idx][seg_idx]["factor"]
+                        )[-1]
                         for l in group_layers
                     )
-                    crs += (m * n) / (k * (m + n))
+                    original = (
+                        leading
+                        * m
+                        * n
+                        * torch.empty(
+                            (),
+                            dtype=factor_dtype(A),
+                        ).element_size()
+                    )
+                    compressed = factor_nbytes(A) + sum(
+                        factor_nbytes(
+                            self.lr_keys[l][batch_idx][seg_idx]["factor"]
+                        )
+                        for l in group_layers
+                    )
+                    crs += original / compressed
                     num_segments += 1
         return crs / num_segments if num_segments > 0 else 0.0
 
@@ -452,11 +474,16 @@ class XKVKeysCache(DecomposedKeysCache):
 
             group_prefix = torch.cat(prefix_tensors, dim=-1).unsqueeze(1)
             segment_ranges = [[(0, suffix_start)] for _ in range(batch_size)]
-            grouped_segments = decompose_to_segment_store(
+            decompose_kwargs = self._decomposition_kwargs()
+            quantise_a = decompose_kwargs.pop("quantise_a")
+            quantise_b = decompose_kwargs.pop("quantise_b")
+            compressor_bits = decompose_kwargs.pop("compressor_bits")
+            grouped_segments = decompose_grouped_xkv_to_segment_store(
                 group_prefix,
-                self.decompose,
                 segment_ranges=segment_ranges,
-                **self._decomposition_kwargs(),
+                quantise_a=quantise_a,
+                compressor_bits=compressor_bits,
+                **decompose_kwargs,
             )
 
             shared_segments = [[] for _ in range(batch_size)]
@@ -478,6 +505,11 @@ class XKVKeysCache(DecomposedKeysCache):
                     for layer_segments, right_factor in zip(
                         per_layer_segments, right_factors
                     ):
+                        if quantise_b:
+                            right_factor = quantise_factor(
+                                right_factor,
+                                compressor_bits,
+                            )
                         layer_segments[batch_idx].append(
                             {
                                 "range": segment["range"],
@@ -1155,11 +1187,16 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
             grouped_prefix, inverse_permutation, segment_ranges = (
                 self._cluster_group_prefix(group_prefix)
             )
-            grouped_segments = decompose_to_segment_store(
+            decompose_kwargs = self._decomposition_kwargs()
+            quantise_a = decompose_kwargs.pop("quantise_a")
+            quantise_b = decompose_kwargs.pop("quantise_b")
+            compressor_bits = decompose_kwargs.pop("compressor_bits")
+            grouped_segments = decompose_grouped_xkv_to_segment_store(
                 grouped_prefix.unsqueeze(1),
-                self.decompose,
                 segment_ranges=segment_ranges,
-                **self._decomposition_kwargs(),
+                quantise_a=quantise_a,
+                compressor_bits=compressor_bits,
+                **decompose_kwargs,
             )
 
             shared_segments = [[] for _ in range(batch_size)]
@@ -1183,6 +1220,11 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
                     for layer_segments, right_factor in zip(
                         per_layer_segments, right_factors
                     ):
+                        if quantise_b:
+                            right_factor = quantise_factor(
+                                right_factor,
+                                compressor_bits,
+                            )
                         layer_segments[batch_idx].append(
                             {
                                 "range": segment["range"],

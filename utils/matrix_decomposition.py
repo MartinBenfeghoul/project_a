@@ -353,6 +353,66 @@ def decompose_to_segment_store(
     return layer_segments
 
 
+def decompose_grouped_xkv_to_segment_store(
+    tensor: torch.Tensor,
+    segment_ranges: list[list[tuple[int, int]]],
+    rank_selection: str,
+    cr: float = 2.0,
+    energy_threshold: float = 0.95,
+    dtype: torch.dtype = torch.float32,
+    quantise_a: bool = False,
+    quantise_b: bool = False,
+    compressor_bits: int = 4,
+    **kwargs,
+):
+    """Decompose grouped xKV segments directly on the tensor's current device."""
+    del kwargs
+
+    layer_segments = [[] for _ in range(tensor.size(0))]
+    for batch_idx, batch_ranges in enumerate(segment_ranges):
+        for start_idx, end_idx in batch_ranges:
+            segment = tensor[batch_idx, ..., start_idx:end_idx, :]
+            U, S, Vh = torch.linalg.svd(
+                segment.to(dtype=dtype).contiguous(),
+                full_matrices=False,
+            )
+            US, Vh = _truncate_svd_factors(
+                U,
+                S,
+                Vh,
+                segment.shape[:-2],
+                segment.size(-2),
+                segment.size(-1),
+                rank_selection,
+                cr=cr,
+                energy_threshold=energy_threshold,
+            )
+            layer_segments[batch_idx].append(
+                {
+                    "range": (start_idx, end_idx),
+                    "factors": (
+                        (
+                            quantise_factor(
+                                US.to(dtype=segment.dtype),
+                                compressor_bits,
+                            )
+                            if quantise_a
+                            else US.to(dtype=segment.dtype)
+                        ),
+                        (
+                            quantise_factor(
+                                Vh.to(dtype=segment.dtype),
+                                compressor_bits,
+                            )
+                            if quantise_b
+                            else Vh.to(dtype=segment.dtype)
+                        ),
+                    ),
+                }
+            )
+    return layer_segments
+
+
 def _batch_decode_quant_factors(layer_segments):
     """Decode all TurboQuantFactor instances across all segments in one call."""
     groups: dict[int, list] = {}

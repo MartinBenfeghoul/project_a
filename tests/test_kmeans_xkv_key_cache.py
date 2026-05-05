@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from cache.keys import KEY_CACHE_CLASSES, KMeansXKVKeysCache
+from utils.turboquant import is_quantised_factor
 
 
 def build_cache(**kwargs):
@@ -20,6 +21,30 @@ def build_cache(**kwargs):
 
 def test_kmeans_xkv_is_registered():
     assert KEY_CACHE_CLASSES["kmeans_xkv"] is KMeansXKVKeysCache
+
+
+def test_kmeans_xkv_rejects_non_svd_decomposition_method():
+    with pytest.raises(NotImplementedError, match="supports .*'svd' only"):
+        build_cache(decomposition_method="lora")
+
+
+def test_kmeans_xkv_roundtrip_supports_quantised_factors():
+    torch.manual_seed(0)
+    cache = build_cache(quantise_a=True, quantise_b=True, compressor_bits=8)
+    prefill_keys = [torch.randn(2, 3, 4, 5) for _ in range(3)]
+
+    for layer_idx, key_states in enumerate(prefill_keys):
+        returned_keys = cache.update(key_states, layer_idx, cache_kwargs={})
+        torch.testing.assert_close(returned_keys, key_states)
+
+    shared_factor = cache.shared_a[1][0][0]["factor"]
+    right_factor = cache.lr_keys[0][0][0]["factor"]
+    assert is_quantised_factor(shared_factor)
+    assert is_quantised_factor(right_factor)
+
+    recon_keys = cache.get_reconstructed_keys_only(0)
+    assert recon_keys.shape == prefill_keys[0].shape
+    assert torch.isfinite(recon_keys).all()
 
 
 def test_kmeans_xkv_waits_for_group_end_before_decomposing():
