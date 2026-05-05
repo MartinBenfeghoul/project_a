@@ -371,6 +371,38 @@ class XKVKeysCache(DecomposedKeysCache):
             group_last = min(group_last, self.num_layers - 1)
         return group_start, group_last
 
+    def calc_compression_ratio(self):
+        default_ratio = (
+            self.r
+            if self.rank_selection == "comp_ratio"
+            and not self.quantise_a
+            and not self.quantise_b
+            else None
+        )
+        if default_ratio is not None:
+            return default_ratio
+
+        layers_by_group: dict[int, list[int]] = {}
+        for layer_idx, metadata in self.group_metadata.items():
+            layers_by_group.setdefault(
+                metadata["group_last_layer"], []
+            ).append(layer_idx)
+
+        crs = 0.0
+        num_segments = 0
+        for group_last, group_layers in layers_by_group.items():
+            for batch_idx, batch_shared in enumerate(self.shared_a[group_last]):
+                for seg_idx, shared_segment in enumerate(batch_shared):
+                    A = shared_segment["factor"]
+                    m, k = A.size(-2), A.size(-1)
+                    n = sum(
+                        self.lr_keys[l][batch_idx][seg_idx]["factor"].size(-1)
+                        for l in group_layers
+                    )
+                    crs += (m * n) / (k * (m + n))
+                    num_segments += 1
+        return crs / num_segments if num_segments > 0 else 0.0
+
     def _decompose_keys(self, layer_idx, cache_kwargs=None):
         if self.log_timing_stats:
             sync_cuda(self.layers[layer_idx].tensor)
@@ -386,25 +418,21 @@ class XKVKeysCache(DecomposedKeysCache):
 
         group_layers = tuple(range(group_start, group_last_layer + 1))
         group_tensors = [self.layers[i].tensor for i in group_layers]
+        batch_size = group_tensors[-1].size(0)
+        assert all(
+            t.size(-2) == group_tensors[-1].size(-2) for t in group_tensors
+        ), "All layers in an xKV group must share the same cached length."
 
         suffix_start = self._get_suffix_start(group_tensors[-1])
         self.compressed_len = suffix_start
         if suffix_start == 0:
-            batch_size, _, _, _ = group_tensors[-1].shape
-            shared_a = group_tensors[-1].new_empty(
-                batch_size, 1, 0, 0
-            )
-            right_factors = tuple(
-                group_tensors[-1].new_empty(
-                    batch_size,
-                    1,
-                    0,
-                    tensor.size(1) * tensor.size(-1),
-                )
-                for tensor in group_tensors
-            )
+            shared_segments = [[] for _ in range(batch_size)]
+            per_layer_segments = [
+                [[] for _ in range(batch_size)] for _ in group_layers
+            ]
         else:
             prefix_tensors = []
+            split_sizes = []
             for group_layer_idx, tensor in zip(group_layers, group_tensors):
                 prefix_tensor = tensor[..., :suffix_start, :]
                 if self.unrope_keys:
@@ -414,32 +442,59 @@ class XKVKeysCache(DecomposedKeysCache):
                         prefill=self.prefill,
                         compressed_len=suffix_start,
                     )
-                prefix_tensors.append(
-                    prefix_tensor.transpose(1, 2).reshape(
-                        prefix_tensor.size(0),
-                        prefix_tensor.size(-2),
-                        -1,
-                    )
+                prefix_flat = prefix_tensor.transpose(1, 2).reshape(
+                    prefix_tensor.size(0),
+                    prefix_tensor.size(-2),
+                    -1,
                 )
-            group_prefix = torch.cat(prefix_tensors, dim=-1).unsqueeze(1)
+                prefix_tensors.append(prefix_flat)
+                split_sizes.append(prefix_flat.size(-1))
 
-            shared_a, grouped_right = self.decompose(
+            group_prefix = torch.cat(prefix_tensors, dim=-1).unsqueeze(1)
+            segment_ranges = [[(0, suffix_start)] for _ in range(batch_size)]
+            grouped_segments = decompose_to_segment_store(
                 group_prefix,
+                self.decompose,
+                segment_ranges=segment_ranges,
                 **self._decomposition_kwargs(),
             )
-            right_factors = torch.split(
-                grouped_right,
-                group_tensors[0].size(1) * group_tensors[0].size(-1),
-                dim=-1,
-            )
 
-        self.shared_a[group_last_layer] = shared_a
-        for group_layer_idx, right_factor in zip(group_layers, right_factors):
-            self.lr_keys[group_layer_idx] = {"right_factor": right_factor}
-            self.group_metadata[group_layer_idx] = (
-                group_last_layer,
-                suffix_start,
-            )
+            shared_segments = [[] for _ in range(batch_size)]
+            per_layer_segments = [
+                [[] for _ in range(batch_size)] for _ in group_layers
+            ]
+            for batch_idx, batch_segments in enumerate(grouped_segments):
+                for segment in batch_segments:
+                    shared_factor, grouped_right = segment["factors"]
+                    shared_segments[batch_idx].append(
+                        {
+                            "range": segment["range"],
+                            "factor": shared_factor,
+                        }
+                    )
+                    right_factors = torch.split(
+                        grouped_right, split_sizes, dim=-1
+                    )
+                    for layer_segments, right_factor in zip(
+                        per_layer_segments, right_factors
+                    ):
+                        layer_segments[batch_idx].append(
+                            {
+                                "range": segment["range"],
+                                "factor": right_factor,
+                            }
+                        )
+
+        self.shared_a[group_last_layer] = shared_segments
+        for group_layer_idx, layer_segments in zip(
+            group_layers, per_layer_segments
+        ):
+            self.lr_keys[group_layer_idx] = layer_segments
+            self.group_metadata[group_layer_idx] = {
+                "group_last_layer": group_last_layer,
+                "compressed_len": suffix_start,
+            }
+        self.comp_ratio = self.calc_compression_ratio()
 
         if self.log_timing_stats:
             sync_cuda(self.layers[layer_idx].tensor)
@@ -453,15 +508,34 @@ class XKVKeysCache(DecomposedKeysCache):
             sync_cuda(keys)
             start_time = time.perf_counter()
 
-        if layer_idx not in self.group_metadata:
+        metadata = self.group_metadata.get(layer_idx)
+        if metadata is None:
             raise ValueError(
                 f"No xKV metadata found for layer {layer_idx}."
             )
 
-        group_last_layer, compressed_len = self.group_metadata[layer_idx]
-        shared_a = self.shared_a[group_last_layer]
-        right_factor = self.lr_keys[layer_idx]["right_factor"]
-        prefix_flat = (shared_a @ right_factor).squeeze(1)
+        shared_segments = self.shared_a[metadata["group_last_layer"]]
+        layer_segments = self.lr_keys[layer_idx]
+
+        paired_segments = [
+            [
+                {
+                    "range": s["range"],
+                    "factors": (s["factor"], l["factor"]),
+                }
+                for s, l in zip(batch_shared, batch_layer)
+            ]
+            for batch_shared, batch_layer in zip(
+                shared_segments, layer_segments
+            )
+        ]
+
+        flat_dim = keys.size(1) * keys.size(-1)
+        empty_suffix = keys.new_empty(keys.size(0), 1, 0, flat_dim)
+        prefix_flat = reconstruct_segments(
+            paired_segments, empty_suffix
+        ).squeeze(1)
+
         batch_size, num_heads, _, head_dim = keys.shape
         prefix_keys = prefix_flat.reshape(
             batch_size,
@@ -473,7 +547,7 @@ class XKVKeysCache(DecomposedKeysCache):
         if self.unrope_keys:
             prefix_keys = self.layers[layer_idx]._apply_rope(
                 prefix_keys,
-                compressed_len=compressed_len,
+                compressed_len=metadata["compressed_len"],
             )
         recon_keys = torch.cat([prefix_keys, keys], dim=-2)
 
@@ -591,7 +665,47 @@ class SurpriseLRKCache(DecomposedKeysCache):
         return recon_keys
 
 
-class KMeansLRKCache(DecomposedKeysCache):
+class KMeansMixin:
+    """Shared kmeans configuration helpers for low-rank key caches."""
+
+    def _init_kmeans(
+        self,
+        n_clusters: int = 8,
+        kmeans_cluster_size: float | None = None,
+        kmeans_n_iter: int = 8,
+        kmeans_init: str = "infllm",
+        kmeans_dtype: torch.dtype | str = torch.float32,
+    ):
+        if n_clusters <= 0:
+            raise ValueError("n_clusters must be positive.")
+        if kmeans_cluster_size is not None and kmeans_cluster_size <= 0:
+            raise ValueError("kmeans_cluster_size must be positive.")
+        if isinstance(kmeans_dtype, str):
+            try:
+                kmeans_dtype = getattr(torch, kmeans_dtype)
+            except AttributeError as exc:
+                raise ValueError(
+                    f"Unknown kmeans dtype: {kmeans_dtype}"
+                ) from exc
+        if not isinstance(kmeans_dtype, torch.dtype):
+            raise TypeError(
+                "kmeans_dtype must be a torch.dtype or dtype name."
+            )
+        self.n_clusters = n_clusters
+        self.kmeans_cluster_size = kmeans_cluster_size
+        self.kmeans_n = kmeans_n_iter
+        self.kmeans_init = kmeans_init
+        self.kmeans_dtype = kmeans_dtype
+
+    def _get_cluster_count(self, seq_len: int) -> int:
+        if self.kmeans_cluster_size is not None:
+            cluster_count = int(round(seq_len / self.kmeans_cluster_size))
+        else:
+            cluster_count = self.n_clusters
+        return max(1, min(cluster_count, seq_len))
+
+
+class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
     def __init__(
         self,
         *args,
@@ -605,24 +719,13 @@ class KMeansLRKCache(DecomposedKeysCache):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        if n_clusters <= 0:
-            raise ValueError("n_clusters must be positive.")
-        if kmeans_cluster_size is not None and kmeans_cluster_size <= 0:
-            raise ValueError("kmeans_cluster_size must be positive.")
-        if isinstance(kmeans_dtype, str):
-            try:
-                kmeans_dtype = getattr(torch, kmeans_dtype)
-            except AttributeError as exc:
-                raise ValueError(
-                    f"Unknown kmeans dtype: {kmeans_dtype}"
-                ) from exc
-        if not isinstance(kmeans_dtype, torch.dtype):
-            raise TypeError("kmeans_dtype must be a torch.dtype or dtype name.")
-        self.n_clusters = n_clusters
-        self.kmeans_cluster_size = kmeans_cluster_size
-        self.kmeans_n = kmeans_n_iter
-        self.kmeans_init = kmeans_init
-        self.kmeans_dtype = kmeans_dtype
+        self._init_kmeans(
+            n_clusters=n_clusters,
+            kmeans_cluster_size=kmeans_cluster_size,
+            kmeans_n_iter=kmeans_n_iter,
+            kmeans_init=kmeans_init,
+            kmeans_dtype=kmeans_dtype,
+        )
         self.kmeans_avg_heads = kmeans_avg_heads
         self.kmeans_per_head = kmeans_per_head
         if self.kmeans_avg_heads and self.kmeans_per_head:
@@ -636,13 +739,6 @@ class KMeansLRKCache(DecomposedKeysCache):
         else:
             self.kmeans_mode = "concat_heads"
         self.cluster_metadata = {}
-
-    def _get_cluster_count(self, seq_len: int) -> int:
-        if self.kmeans_cluster_size is not None:
-            cluster_count = int(round(seq_len / self.kmeans_cluster_size))
-        else:
-            cluster_count = self.n_clusters
-        return max(1, min(cluster_count, seq_len))
 
     def _cluster_prefix(self, prefix_keys):
         batch_size, _, seq_len, _ = prefix_keys.shape
@@ -951,7 +1047,7 @@ class KMeansLRKCache(DecomposedKeysCache):
             )
 
 
-class KMeansXKVKeysCache(XKVKeysCache):
+class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
     """
     xKV-style grouped key cache with KMeans row clustering before SVD.
 
@@ -972,32 +1068,13 @@ class KMeansXKVKeysCache(XKVKeysCache):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        if n_clusters <= 0:
-            raise ValueError("n_clusters must be positive.")
-        if kmeans_cluster_size is not None and kmeans_cluster_size <= 0:
-            raise ValueError("kmeans_cluster_size must be positive.")
-        if isinstance(kmeans_dtype, str):
-            try:
-                kmeans_dtype = getattr(torch, kmeans_dtype)
-            except AttributeError as exc:
-                raise ValueError(
-                    f"Unknown kmeans dtype: {kmeans_dtype}"
-                ) from exc
-        if not isinstance(kmeans_dtype, torch.dtype):
-            raise TypeError("kmeans_dtype must be a torch.dtype or dtype name.")
-
-        self.n_clusters = n_clusters
-        self.kmeans_cluster_size = kmeans_cluster_size
-        self.kmeans_n = kmeans_n_iter
-        self.kmeans_init = kmeans_init
-        self.kmeans_dtype = kmeans_dtype
-
-    def _get_cluster_count(self, seq_len: int) -> int:
-        if self.kmeans_cluster_size is not None:
-            cluster_count = int(round(seq_len / self.kmeans_cluster_size))
-        else:
-            cluster_count = self.n_clusters
-        return max(1, min(cluster_count, seq_len))
+        self._init_kmeans(
+            n_clusters=n_clusters,
+            kmeans_cluster_size=kmeans_cluster_size,
+            kmeans_n_iter=kmeans_n_iter,
+            kmeans_init=kmeans_init,
+            kmeans_dtype=kmeans_dtype,
+        )
 
     def _cluster_group_prefix(self, group_prefix):
         batch_size, seq_len, _ = group_prefix.shape
@@ -1123,6 +1200,7 @@ class KMeansXKVKeysCache(XKVKeysCache):
                 "compressed_len": suffix_start,
                 "inverse_permutation": inverse_permutation,
             }
+        self.comp_ratio = self.calc_compression_ratio()
 
         if self.log_timing_stats:
             sync_cuda(self.layers[layer_idx].tensor)
