@@ -231,6 +231,7 @@ def main(args):
         "early_stopping_tol": args.early_stopping_tol,
         "freeze_W_linear": args.freeze_W_linear,
         "zero_init_mlp_last_layer": args.zero_init_mlp_last_layer,
+        "prev_layer_init": args.prev_layer_init,
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
@@ -520,6 +521,11 @@ def parse_args():
         "--zero_init_mlp_last_layer",
         action="store_true",
         help="Initialise the final value-cache MLP layer to zero so the residual branch starts from W_linear only.",
+    )
+    parser.add_argument(
+        "--prev_layer_init",
+        action="store_true",
+        help="Initialise each value-cache MLP from the previous layer's trained MLP.",
     )
     parser.add_argument(
         "--early_stopping_tol",
