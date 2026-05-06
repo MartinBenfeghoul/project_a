@@ -432,7 +432,6 @@ class MLPValueCache(SingleTensorCache):
         hidden_factors_per_mlp: list[int],
         num_heads_per_mlp: list[int],
         target_perc: list[float],
-        target_model_num_heads: int = 8,
         per_sequence: bool = False,
         lr: float = 1e-3,
         optimizer: str = "adam",
@@ -470,7 +469,6 @@ class MLPValueCache(SingleTensorCache):
         self.target_perc = target_perc
         self.per_sequence = per_sequence
 
-        self.target_model_num_heads = target_model_num_heads
 
         self.lr = lr
 
@@ -618,7 +616,7 @@ class MLPValueCache(SingleTensorCache):
         compressed_total = 0
 
         for layer in self.layers:
-            h, d = self.target_model_num_heads, layer.head_dim
+            h, d = layer.num_heads, layer.head_dim
             t = layer.compressed_len
             delta_dtype = layer.tensor.dtype
             value_dtype_size = torch.finfo(layer.tensor.dtype).bits / 8
