@@ -41,6 +41,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         linear_only: bool = False,
         early_stopping_tol: float | None = None,
         freeze_W_linear: bool = True,
+        zero_init_mlp_last_layer: bool = False,
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
@@ -69,6 +70,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.linear_only = linear_only
         self.early_stopping_tol = early_stopping_tol
         self.freeze_W_linear = freeze_W_linear
+        self.zero_init_mlp_last_layer = zero_init_mlp_last_layer
         self.intermediate_activation = intermediate_activation
 
         self.mlp = None
@@ -130,6 +132,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 use_residual=self.use_residual,
                 per_head_residual=per_head_residual,
                 intermediate_activation=self.intermediate_activation,
+                zero_init_last_layer=self.zero_init_mlp_last_layer,
             ).to(device=value_states.device, dtype=value_states.dtype)
 
             self._num_params = sum(p.numel() for p in self.mlp.parameters())
@@ -442,6 +445,7 @@ class MLPValueCache(SingleTensorCache):
         linear_only: bool = False,
         early_stopping_tol: float | None = None,
         freeze_W_linear: bool = True,
+        zero_init_mlp_last_layer: bool = False,
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
@@ -479,6 +483,7 @@ class MLPValueCache(SingleTensorCache):
         self.linear_only = linear_only
         self.early_stopping_tol = early_stopping_tol
         self.freeze_W_linear = freeze_W_linear
+        self.zero_init_mlp_last_layer = zero_init_mlp_last_layer
 
         if use_residual and W_linear_per_layer is not None:
             if not un_rope:
@@ -550,6 +555,7 @@ class MLPValueCache(SingleTensorCache):
             linear_only=self.linear_only,
             early_stopping_tol=self.early_stopping_tol,
             freeze_W_linear=self.freeze_W_linear,
+            zero_init_mlp_last_layer=self.zero_init_mlp_last_layer,
             target_cr=self.target_cr,
             turboquant_residuals=self.turboquant_residuals,
             compressor_bits=self.compressor_bits,
