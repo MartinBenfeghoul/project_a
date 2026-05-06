@@ -474,7 +474,7 @@ def parse_args():
         "--un_rope",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Undo RoPE on keys before MLP training and inference.",
+        help="Undo RoPE on keys before MLP training and inference. Use --no-un_rope to disable.",
     )
     parser.add_argument(
         "--rope_theta",
@@ -491,7 +491,7 @@ def parse_args():
         "--use_residual",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.",
+        help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights. Use --no-use_residual to disable.",
     )
     parser.add_argument(
         "--intermediate_activation",
@@ -508,7 +508,7 @@ def parse_args():
         "--per_head_kv_linear",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.",
+        help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly. Use --no-per_head_kv_linear to disable.",
     )
     parser.add_argument(
         "--freeze_W_linear",
