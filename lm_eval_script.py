@@ -467,7 +467,8 @@ def parse_args():
     )
     parser.add_argument(
         "--un_rope",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Undo RoPE on keys before MLP training and inference.",
     )
     parser.add_argument(
@@ -483,7 +484,8 @@ def parse_args():
     )
     parser.add_argument(
         "--use_residual",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.",
     )
     parser.add_argument(
@@ -499,7 +501,8 @@ def parse_args():
     )
     parser.add_argument(
         "--per_head_kv_linear",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.",
     )
     parser.add_argument(
