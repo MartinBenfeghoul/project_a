@@ -89,11 +89,16 @@ def make_hooks(
         seq_len = input_ids.size(-1)
         pkv = output.past_key_values
         if seq_len > 1:
-            if hasattr(pkv, "recon_mse"):
-                mse = pkv.recon_mse
-                if mse is not None:
-                    print(f"Reconstruction MSE: {mse:.6f}")
-                    logger.add_log("recon_mse", mse)
+            if hasattr(pkv, "key_recon_mse"):
+                key_mse = pkv.key_recon_mse
+                if key_mse is not None:
+                    print(f"Key reconstruction MSE: {key_mse:.6f}")
+                    logger.add_log("key_recon_mse", key_mse)
+            if hasattr(pkv, "value_recon_mse"):
+                val_mse = pkv.value_recon_mse
+                if val_mse is not None:
+                    print(f"Value reconstruction MSE: {val_mse:.6f}")
+                    logger.add_log("value_recon_mse", val_mse)
             if hasattr(pkv, "update_events"):
                 if uncompressed_window > 0:
                     label_ed = -uncompressed_window
@@ -302,16 +307,16 @@ def main(args):
         print("Compression metrics:", compression_metrics)
         results["results"]["compression_metrics"] = compression_metrics
 
-    recon_mse_values = logger.get_log_list("recon_mse")
-    if recon_mse_values:
-        mse_mean, mse_std = logger.get_log_mean("recon_mse", std=True)
-        recon_mse_metrics = {
-            "recon_mse_mean": float(mse_mean),
-            "recon_mse_std": float(mse_std),
-            "n_samples": len(recon_mse_values),
-        }
-        print("Reconstruction MSE metrics:", recon_mse_metrics)
-        results["results"]["recon_mse_metrics"] = recon_mse_metrics
+    for label in ["value_recon_mse", "key_recon_mse"]:
+        mse_values = logger.get_log_list(label)
+        if mse_values:
+            mse_mean, mse_std = logger.get_log_mean(label, std=True)
+            metrics = {
+                "recon_mse_mean": float(mse_mean),
+                "recon_mse_std": float(mse_std),
+            }
+            print(f"{label}:", metrics)
+            results["results"][f"{label}"] = metrics
 
     print(make_table(results))
 

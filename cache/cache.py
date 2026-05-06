@@ -79,6 +79,7 @@ class CompressedCache:
         else:
             raise ValueError(f"Invalid cache type: {value_cache_type}")
         self._temp_value_importance = {}
+        self._key_recon_mses = []
 
     def set_value_importance(
         self,
@@ -104,6 +105,10 @@ class CompressedCache:
         fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
         if callable(fn) and getattr(self.key_cache, "prefill", False):
             recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
+            if recon_keys is not None:
+                self._key_recon_mses.append(
+                    torch.nn.functional.mse_loss(recon_keys, key_states).item()
+                )
             cache_kwargs["keys"] = keys if recon_keys is None else recon_keys
         else:
             cache_kwargs["keys"] = keys
@@ -134,7 +139,13 @@ class CompressedCache:
             return None
 
     @property
-    def recon_mse(self) -> float | None:
+    def key_recon_mse(self) -> float | None:
+        if not self._key_recon_mses:
+            return None
+        return sum(self._key_recon_mses) / len(self._key_recon_mses)
+
+    @property
+    def value_recon_mse(self) -> float | None:
         if hasattr(self.value_cache, "recon_mse"):
             return self.value_cache.recon_mse
         return None
