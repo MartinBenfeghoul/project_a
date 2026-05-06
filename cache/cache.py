@@ -133,6 +133,12 @@ class CompressedCache:
         else:
             return None
 
+    @property
+    def recon_mse(self) -> float | None:
+        if hasattr(self.value_cache, "recon_mse"):
+            return self.value_cache.recon_mse
+        return None
+
     def update_events(self, *args, **kwargs):
         """
         Forward event updates to caches.

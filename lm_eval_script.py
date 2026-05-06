@@ -89,6 +89,11 @@ def make_hooks(
         seq_len = input_ids.size(-1)
         pkv = output.past_key_values
         if seq_len > 1:
+            if hasattr(pkv, "recon_mse"):
+                mse = pkv.recon_mse
+                if mse is not None:
+                    print(f"Reconstruction MSE: {mse:.6f}")
+                    logger.add_log("recon_mse", mse)
             if hasattr(pkv, "update_events"):
                 if uncompressed_window > 0:
                     label_ed = -uncompressed_window
@@ -297,6 +302,17 @@ def main(args):
         }
         print("Compression metrics:", compression_metrics)
         results["results"]["compression_metrics"] = compression_metrics
+
+    recon_mse_values = logger.get_log_list("recon_mse")
+    if recon_mse_values:
+        mse_mean, mse_std = logger.get_log_mean("recon_mse", std=True)
+        recon_mse_metrics = {
+            "recon_mse_mean": float(mse_mean),
+            "recon_mse_std": float(mse_std),
+            "n_samples": len(recon_mse_values),
+        }
+        print("Reconstruction MSE metrics:", recon_mse_metrics)
+        results["results"]["recon_mse_metrics"] = recon_mse_metrics
 
     print(make_table(results))
 

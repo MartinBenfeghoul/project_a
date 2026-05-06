@@ -109,6 +109,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             value_states.device,
         )
 
+        self.recon_mse = None
         self.indices = torch.tensor(
             [], dtype=torch.long, device=value_states.device
         )
@@ -193,6 +194,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     freeze_W_linear=self.freeze_W_linear,
                     early_stopping_tol=self.early_stopping_tol,
                 )
+                with torch.no_grad():
+                    self.recon_mse = self.loss_func(self.mlp(keys), values).item()
             else:
                 all_params = [
                     p
@@ -217,6 +220,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                         break
                     prev_loss = loss_val
                 optimizer.zero_grad(set_to_none=True)
+                self.recon_mse = loss_val
 
     def _linear_approx(self, keys: torch.Tensor) -> torch.Tensor:
         w = self.W_linear_init.to(device=keys.device, dtype=keys.dtype)
@@ -644,6 +648,13 @@ class MLPValueCache(SingleTensorCache):
         assert compressed_total != 0
 
         return original_total / compressed_total
+
+    @property
+    def recon_mse(self) -> float | None:
+        mses = [l.recon_mse for l in self.layers if l.recon_mse is not None]
+        if not mses:
+            return None
+        return sum(mses) / len(mses)
 
 
 VALUE_CACHE_CLASSES = {
