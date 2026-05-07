@@ -24,6 +24,8 @@ from utils import (
     get_output_path,
     extract_and_save_stats,
     extract_and_save_efficiency_stats,
+    log_live_value_mlp_training_wandb,
+    init_lm_eval_wandb
 )
 
 GEN_KWARGS = {
@@ -49,6 +51,7 @@ def make_hooks(
     measure_latency=False,
     measure_gpu_memory=False,
     model_baseline_mem=0,
+    use_wandb=False
 ):
     """
     When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
@@ -88,7 +91,15 @@ def make_hooks(
             return
         seq_len = input_ids.size(-1)
         pkv = output.past_key_values
+        logging_event = None
         if seq_len > 1:
+            logger.request_idx += 1
+            if use_wandb:
+                logging_event = {
+                    "request_idx": logger.request_idx,
+                    "seq_len": int(seq_len),
+                }
+
             if hasattr(pkv, "key_recon_mse"):
                 key_mse = pkv.key_recon_mse
                 if key_mse is not None:
@@ -159,6 +170,21 @@ def make_hooks(
             if _cuda:
                 logger.decode_events.append((_start_evt[0], end_evt))
 
+        if logging_event is not None:
+            value_mlp_events = getattr(
+                pkv, "value_mlp_log_events", []
+            )
+            if value_mlp_events:
+                for value_mlp_event in value_mlp_events:
+                    value_mlp_event["request_idx"] = logger.request_idx
+                logger.add_value_mlp_log_events(value_mlp_events)
+            logging_event_idx = logger.request_idx + 1
+            if logging_event_idx % 10 == 0:
+                log_live_value_mlp_training_wandb(
+                    logger.value_mlp_log_events,
+                    logging_event_idx,
+                )
+
     return pre_hook, post_hook
 
 
@@ -172,6 +198,7 @@ def main(args):
     logger.prefill_events = []
     logger.decode_events = []
     logger.recorded_k_timing = False
+    logger.recorded_cr = False
 
     rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
 
@@ -255,14 +282,20 @@ def main(args):
         # model-weights-only footprint
         model_baseline_mem = torch.cuda.memory_allocated()
 
+    args.tasks = get_tasks(args.tasks)
+    use_wandb = init_lm_eval_wandb(args)
+
     pre_hook, post_hook = make_hooks(
         logger,
         measure_latency=args.log_efficiency_metrics,
         measure_gpu_memory=args.log_efficiency_metrics,
         model_baseline_mem=model_baseline_mem,
+        use_wandb=use_wandb,
     )
-    model.register_forward_pre_hook(pre_hook, with_kwargs=True)
-    model.register_forward_hook(post_hook, with_kwargs=True)
+    metric_hook_handles = [
+        model.register_forward_pre_hook(pre_hook, with_kwargs=True),
+        model.register_forward_hook(post_hook, with_kwargs=True),
+    ]
 
     lm = CompressedCacheHFLM(
         key_cache_kwargs=key_cache_kwargs,
@@ -273,7 +306,6 @@ def main(args):
         truncation=False,
         trust_remote_code=True,
     )
-    args.tasks = get_tasks(args.tasks)
     metadata = {"tokenizer": args.model_name}
     if args.max_seq_lengths is not None:
         metadata["max_seq_lengths"] = args.max_seq_lengths
@@ -345,8 +377,17 @@ def main(args):
     with open(output_path, "w") as f:
         json.dump(results["results"], f, ensure_ascii=False, indent=4)
     print(f"Results saved to {output_path}")
-    for handle in attn_predictor_hook_handles:
+    for handle in metric_hook_handles + attn_predictor_hook_handles:
         handle.remove()
+    if use_wandb:
+        import wandb
+        if logger.value_mlp_log_events:
+            log_live_value_mlp_training_wandb(
+                logger.value_mlp_log_events,
+                logger.request_idx + 1,
+                log_tables=True,
+            )
+        wandb.finish()
     return results
 
 
@@ -376,6 +417,7 @@ def parse_args():
         help="Sequence lengths for RULER tasks.",
     )
     parser.add_argument("--log_efficiency_metrics", action="store_true")
+    parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--debug", action="store_true")
 
     # key cache

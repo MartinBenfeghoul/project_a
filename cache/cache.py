@@ -150,6 +150,10 @@ class CompressedCache:
             return self.value_cache.recon_mse
         return None
 
+    @property
+    def value_mlp_log_events(self) -> list[dict[str, Any]]:
+        return getattr(self.value_cache, "mlp_log_events", [])
+
     def update_events(self, *args, **kwargs):
         """
         Forward event updates to caches.
