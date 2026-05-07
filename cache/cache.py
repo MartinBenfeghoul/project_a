@@ -109,7 +109,9 @@ class CompressedCache:
                 self._key_recon_mses.append(
                     torch.nn.functional.mse_loss(recon_keys, key_states).item()
                 )
-            cache_kwargs["keys"] = keys if recon_keys is None else recon_keys
+                cache_kwargs["keys"] = recon_keys 
+            else:
+                cache_kwargs["keys"] = keys
         else:
             cache_kwargs["keys"] = keys
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
