@@ -78,6 +78,7 @@ class CompressedCache:
             )
         else:
             raise ValueError(f"Invalid cache type: {value_cache_type}")
+        self._cache_context = dict(kwargs.get("cache_context") or {})
         self._temp_value_importance = {}
         self._key_recon_mses = []
 
@@ -98,6 +99,8 @@ class CompressedCache:
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
         if cache_kwargs is None:
             cache_kwargs = {}
+        if self._cache_context:
+            cache_kwargs = {**self._cache_context, **cache_kwargs}
         if layer_idx in self._temp_value_importance:
             cache_kwargs["value_importance"] = self._temp_value_importance.pop(
                 layer_idx
