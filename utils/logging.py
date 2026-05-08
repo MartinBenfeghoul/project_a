@@ -16,11 +16,16 @@ class Logger:
     def __init__(self, layer_idx=None):
         self.layer_idx = layer_idx
         self.log_dict = {}
+        self.value_mlp_log_events = []
+        self.request_idx = -1
 
     def add_log(self, key, value):
         if key not in self.log_dict:
             self.log_dict[key] = []
         self.log_dict[key].append(value)
+
+    def add_value_mlp_log_events(self, logging_events):
+        self.value_mlp_log_events.extend(logging_events)
 
     def add_dict(self, input_dict):
         for key, value in input_dict.items():
@@ -69,6 +74,8 @@ class Logger:
 
     def clear(self):
         self.log_dict = {}
+        self.value_mlp_log_events = []
+        self.request_idx = -1
 
 
 def generate_run_name(config):
@@ -408,6 +415,176 @@ def get_output_path(output_path):
         if not os.path.exists(output_path.format(i)):
             return output_path.format(i)
         i += 1
+
+
+def init_lm_eval_wandb(args):
+    if not getattr(args, "use_wandb", False):
+        return False
+
+    wandb_key = os.getenv("WANDB_KEY")
+    if wandb_key:
+        wandb.login(key=wandb_key)
+
+    wandb.init(
+        project="gist_vs_details",
+        entity="mixture_of_titans",
+        config=vars(args),
+    )
+    wandb.define_metric("live/logging_event_idx")
+    wandb.define_metric("live/*", step_metric="live/logging_event_idx")
+    wandb.define_metric("_value_mlp_epoch")
+    return True
+
+
+def sequence_length_bucket(seq_len):
+    if seq_len is None:
+        return "unknown"
+    bounds = [1024, 2048, 4096, 8192, 16384, 32768, 65536]
+    prev = 0
+    for bound in bounds:
+        if seq_len <= bound:
+            return f"{prev + 1:05d}-{bound:05d}"
+        prev = bound
+    return f"{bounds[-1] + 1:05d}+"
+
+
+def log_live_value_mlp_training_wandb(
+    logging_events, logging_event_idx, log_tables=False
+):
+    if not wandb.run or not logging_events:
+        return
+
+    table_payload = {"live/logging_event_idx": logging_event_idx}
+    mse_payloads = []
+    grouped = {}
+    for logging_event in logging_events:
+        key = (
+            _wandb_key_part(logging_event.get("task_name", "unknown")),
+            _wandb_key_part(
+                sequence_length_bucket(logging_event.get("seq_len"))
+            ),
+        )
+        grouped.setdefault(key, []).append(logging_event)
+
+    for (task_name, seq_len_bucket), group_events in grouped.items():
+        prefix = f"{task_name}_{seq_len_bucket}"
+        if log_tables:
+            table_rows = _value_mlp_event_table_rows(group_events)
+            if table_rows:
+                table_key = f"{prefix}/value_mlp_training_events"
+                table_payload[table_key] = _value_mlp_event_table(table_rows)
+
+        mse_key = f"{prefix}/value_recon_mse_mean"
+        _define_value_mlp_mse_metric(mse_key)
+        for epoch, mse_mean in _mean_mse_by_epoch_rows(group_events):
+            mse_payloads.append(
+                {
+                    "live/logging_event_idx": logging_event_idx,
+                    "_value_mlp_epoch": epoch,
+                    mse_key: mse_mean,
+                }
+            )
+
+        for layer_idx, rows in _mean_mse_by_layer_epoch_rows(
+            group_events
+        ).items():
+            layer_part = _layer_key_part(layer_idx)
+
+            mse_key = f"{prefix}/{layer_part}/value_recon_mse_mean"
+            _define_value_mlp_mse_metric(mse_key)
+            for epoch, mse_mean in rows:
+                mse_payloads.append(
+                    {
+                        "live/logging_event_idx": logging_event_idx,
+                        "_value_mlp_epoch": epoch,
+                        mse_key: mse_mean,
+                    }
+                )
+
+    if len(table_payload) > 1:
+        wandb.log(table_payload)
+    for payload in mse_payloads:
+        wandb.log(payload)
+
+
+def _define_value_mlp_mse_metric(metric_key):
+    defined = getattr(_define_value_mlp_mse_metric, "_defined", set())
+    if metric_key in defined:
+        return
+    wandb.define_metric(metric_key, step_metric="_value_mlp_epoch")
+    defined.add(metric_key)
+    _define_value_mlp_mse_metric._defined = defined
+
+
+def _value_mlp_event_table(rows):
+    return wandb.Table(
+        data=rows,
+        columns=[
+            "request_idx",
+            "layer_idx",
+            "epoch",
+            "value_recon_mse",
+            "target_perc",
+        ],
+    )
+
+
+def _value_mlp_event_table_rows(logging_events):
+    rows = []
+    for logging_event in logging_events:
+        rows.append(
+            [
+                logging_event.get("request_idx"),
+                logging_event.get("layer_idx"),
+                logging_event.get("epoch"),
+                float(logging_event.get("value_recon_mse")),
+                float(logging_event.get("target_perc")
+                )
+            ]
+        )
+    return rows
+
+
+def _mean_mse_by_epoch_rows(logging_events):
+    by_epoch = {}
+    for logging_event in logging_events:
+        epoch = logging_event.get("epoch")
+        mse = logging_event.get("value_recon_mse")
+        by_epoch.setdefault(epoch, []).append(float(mse))
+    return [
+        [epoch, float(np.mean(mses))]
+        for epoch, mses in sorted(by_epoch.items())
+    ]
+
+
+def _mean_mse_by_layer_epoch_rows(logging_events):
+    by_layer_epoch = {}
+    for logging_event in logging_events:
+        layer_idx = logging_event.get("layer_idx", "unknown")
+        epoch = logging_event.get("epoch")
+        mse = logging_event.get("value_recon_mse")
+        by_layer_epoch.setdefault(layer_idx, {}).setdefault(
+            epoch, []
+        ).append(float(mse))
+    return {
+        layer_idx: [
+            [epoch, float(np.mean(mses))]
+            for epoch, mses in sorted(by_epoch.items())
+        ]
+        for layer_idx, by_epoch in sorted(
+            by_layer_epoch.items(), key=lambda item: (0, item[0])
+        )
+    }
+
+
+def _wandb_key_part(value):
+    return str(value).replace("/", "_").replace(" ", "_")
+
+
+def _layer_key_part(layer_idx):
+    if isinstance(layer_idx, int):
+        return f"layer_{layer_idx:02d}"
+    return f"layer_{_wandb_key_part(layer_idx)}"
 
 
 def _format_run_value(value: object) -> str:

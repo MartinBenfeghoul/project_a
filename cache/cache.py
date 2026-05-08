@@ -78,7 +78,9 @@ class CompressedCache:
             )
         else:
             raise ValueError(f"Invalid cache type: {value_cache_type}")
+        self._cache_context = dict(kwargs.get("cache_context") or {})
         self._temp_value_importance = {}
+        self._key_recon_mses = []
 
     def set_value_importance(
         self,
@@ -97,6 +99,8 @@ class CompressedCache:
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
         if cache_kwargs is None:
             cache_kwargs = {}
+        if self._cache_context:
+            cache_kwargs = {**self._cache_context, **cache_kwargs}
         if layer_idx in self._temp_value_importance:
             cache_kwargs["value_importance"] = self._temp_value_importance.pop(
                 layer_idx
@@ -104,7 +108,13 @@ class CompressedCache:
         fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
         if callable(fn) and getattr(self.key_cache, "prefill", False):
             recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
-            cache_kwargs["keys"] = keys if recon_keys is None else recon_keys
+            if recon_keys is not None:
+                self._key_recon_mses.append(
+                    torch.nn.functional.mse_loss(recon_keys, key_states).item()
+                )
+                cache_kwargs["keys"] = recon_keys 
+            else:
+                cache_kwargs["keys"] = keys
         else:
             cache_kwargs["keys"] = keys
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
@@ -132,6 +142,22 @@ class CompressedCache:
             return value_cr
         else:
             return None
+
+    @property
+    def key_recon_mse(self) -> float | None:
+        if not self._key_recon_mses:
+            return None
+        return sum(self._key_recon_mses) / len(self._key_recon_mses)
+
+    @property
+    def value_recon_mse(self) -> float | None:
+        if hasattr(self.value_cache, "recon_mse"):
+            return self.value_cache.recon_mse
+        return None
+
+    @property
+    def value_mlp_log_events(self) -> list[dict[str, Any]]:
+        return getattr(self.value_cache, "mlp_log_events", [])
 
     def update_events(self, *args, **kwargs):
         """
