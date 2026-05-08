@@ -747,7 +747,7 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
         kmeans_avg_heads: bool = False,
-        kmeans_per_head: bool = False,
+        kmeans_per_head: bool = True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
