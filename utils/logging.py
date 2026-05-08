@@ -524,7 +524,7 @@ def _value_mlp_event_table(rows):
             "layer_idx",
             "epoch",
             "value_recon_mse",
-            "value_residuals_kept_pct",
+            "target_perc",
         ],
     )
 
@@ -538,7 +538,7 @@ def _value_mlp_event_table_rows(logging_events):
                 logging_event.get("layer_idx"),
                 logging_event.get("epoch"),
                 float(logging_event.get("value_recon_mse")),
-                float(logging_event.get("value_residuals_kept_pct")
+                float(logging_event.get("target_perc")
                 )
             ]
         )
