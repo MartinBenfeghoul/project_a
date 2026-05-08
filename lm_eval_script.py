@@ -110,7 +110,9 @@ def make_hooks(
             },
             output_path,
         )
-        print(f"Saved raw KV dump to {output_path}")
+        print(f"Saved raw KV dump to {output_path}. Exiting script...")
+        import sys
+        sys.exit(0)
 
     def pre_hook(module, args, kwargs):
         input_ids = kwargs.get("input_ids", args[0] if args else None)

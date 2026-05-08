@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=martin_dev
 #SBATCH --partition=cpu
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=119G
-#SBATCH --time=5-00:00:00
+#SBATCH --cpus-per-task=20
+#SBATCH --mem=120000M
+#SBATCH --time=4-00:00:00
 
 set -e
 
