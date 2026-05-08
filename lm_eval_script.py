@@ -49,6 +49,9 @@ def make_hooks(
     measure_latency=False,
     measure_gpu_memory=False,
     model_baseline_mem=0,
+    dump_full_kv_dir=None,
+    model_name=None,
+    task_name=None,
 ):
     """
     When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
@@ -65,6 +68,49 @@ def make_hooks(
             and timing_stats.get("decompose_calls", 0) > 0
             and timing_stats.get("reconstruct_calls", 0) > 0
         )
+
+    def dump_full_kv(input_ids, pkv):
+        if dump_full_kv_dir is None:
+            return
+
+        key_layers = getattr(getattr(pkv, "key_cache", None), "layers", None)
+        value_layers = getattr(
+            getattr(pkv, "value_cache", None), "layers", None
+        )
+        if key_layers is None or value_layers is None:
+            raise ValueError(
+                "KV dump expects baseline key/value cache layers on past_key_values."
+            )
+
+        keys = []
+        values = []
+        for layer_idx, (key_layer, value_layer) in enumerate(
+            zip(key_layers, value_layers)
+        ):
+            if key_layer.tensor is None or value_layer.tensor is None:
+                raise ValueError(
+                    f"KV dump encountered an uninitialised cache tensor at layer {layer_idx}."
+                )
+            keys.append(key_layer.tensor.detach().cpu().clone())
+            values.append(value_layer.tensor.detach().cpu().clone())
+
+        output_path = os.path.join(
+            dump_full_kv_dir, 
+            f"{model_name.replace('/', '_')}/{task_name}_raw_kv.pt"
+        )
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        torch.save(
+            {
+                "task_name": task_name,
+                "input_ids": input_ids.detach().cpu().clone(),
+                "prompt_len": int(input_ids.size(-1)),
+                "model_name": model_name,
+                "keys": torch.stack(keys, dim=0),
+                "values": torch.stack(values, dim=0),
+            },
+            output_path,
+        )
+        print(f"Saved raw KV dump to {output_path}")
 
     def pre_hook(module, args, kwargs):
         input_ids = kwargs.get("input_ids", args[0] if args else None)
@@ -119,6 +165,7 @@ def make_hooks(
                     mem_allocated - model_baseline_mem,
                 )
                 _prefill_mem_start[0] = None
+            dump_full_kv(input_ids, pkv)
         else:
             if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
                 cr = pkv.comp_ratio
@@ -162,6 +209,21 @@ def main(args):
     logger.prefill_events = []
     logger.decode_events = []
     logger.recorded_k_timing = False
+
+    if args.dump_full_kv_dir is not None:
+        if args.k_cache_type != "baseline" or args.v_cache_type != "baseline":
+            raise ValueError(
+                "--dump_full_kv_dir requires --k_cache_type=baseline "
+                "and --v_cache_type=baseline."
+            )
+        tasks = get_tasks(args.tasks, print_tasks=False)
+        if len(tasks) != 1 or args.limit != 1:
+            raise ValueError(
+                "--dump_full_kv_dir currently only supports a single task "
+                "and a limit of 1 sample. "
+                f"Got tasks={tasks} and limit={args.limit}."
+            )
+        os.makedirs(args.dump_full_kv_dir, exist_ok=True)
 
     rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
 
@@ -251,6 +313,9 @@ def main(args):
         measure_latency=args.log_efficiency_metrics,
         measure_gpu_memory=args.log_efficiency_metrics,
         model_baseline_mem=model_baseline_mem,
+        dump_full_kv_dir=args.dump_full_kv_dir,
+        model_name=args.model_name,
+        task_name=args.tasks[0]
     )
     model.register_forward_pre_hook(pre_hook, with_kwargs=True)
     model.register_forward_hook(post_hook, with_kwargs=True)
@@ -355,6 +420,7 @@ def parse_args():
         default=None,
         help="Sequence lengths for RULER tasks.",
     )
+    parser.add_argument("--dump_full_kv_dir", type=str, default=None)
     parser.add_argument("--log_efficiency_metrics", action="store_true")
     parser.add_argument("--debug", action="store_true")
 
