@@ -70,7 +70,7 @@ class DecomposedKeysCache(SingleTensorCache):
         rank_selection: str = "comp_ratio",
         comp_ratio: float = 2.0,
         energy_threshold: float = 0.95,
-        decomp_n_iter: int = 3,
+        decomp_n_iter: int = 8,
         lr: float = 1e-2,
         unrope_keys: bool = False,
         quantise_a: bool = False,
