@@ -19,13 +19,21 @@ class CompressedCacheHFLM(HFLM):
         self._value_cache_kwargs = value_cache_kwargs
         self._logger = logger
 
-    def _make_cache(self):
+    def _make_cache(self, cache_context=None):
         return CompressedCache(
             config=self.model.config,
             key_cache_kwargs=self._key_cache_kwargs,
             value_cache_kwargs=self._value_cache_kwargs,
+            cache_context=cache_context,
             verbose=False,
         )
+
+    def generate_until(self, requests, disable_tqdm=False):
+        self._current_task_name = requests[0].task_name if requests else None
+        try:
+            return super().generate_until(requests, disable_tqdm=disable_tqdm)
+        finally:
+            self._current_task_name = None
 
     def _model_call(self, inps, attn_mask=None, labels=None):
         with (
@@ -46,7 +54,9 @@ class CompressedCacheHFLM(HFLM):
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         self._logger.recorded_cr = False
         self._logger.recorded_k_timing = False
-        generation_kwargs["past_key_values"] = self._make_cache()
+        task_name = getattr(self, "_current_task_name", None)
+        cache_context = {"task_name": task_name} if task_name is not None else None
+        generation_kwargs["past_key_values"] = self._make_cache(cache_context)
         generation_kwargs["temperature"] = generation_kwargs.get(
             "temperature", 0.0
         )

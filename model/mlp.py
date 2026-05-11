@@ -15,15 +15,16 @@ class MLP(nn.Module):
     def __init__(
         self,
         head_dim: int = 128,
-        num_layers: int = 4,
-        hidden_factor: int = 2,
+        num_layers: int = 2,
+        hidden_factor: int = 1,
         num_heads: int = 8,
         per_sequence: bool = False,
         batch_size: int | None = None,
         deterministic_init: bool = True,
-        intermediate_activation: str = "gelu",
+        intermediate_activation: str = "relu",
         use_residual: bool = False,
         per_head_residual: bool = False,
+        zero_init_last_layer: bool = False,
     ):
         super().__init__()
 
@@ -63,6 +64,10 @@ class MLP(nn.Module):
             self.weights.append(w)
             self.biases.append(b)
             curr_dim = out_dim
+
+        if zero_init_last_layer:
+            nn.init.zeros_(self.weights[-1])
+            nn.init.zeros_(self.biases[-1])
 
         if use_residual:
             if per_head_residual:

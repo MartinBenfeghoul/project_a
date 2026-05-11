@@ -24,6 +24,8 @@ from utils import (
     get_output_path,
     extract_and_save_stats,
     extract_and_save_efficiency_stats,
+    log_live_value_mlp_training_wandb,
+    init_lm_eval_wandb
 )
 
 GEN_KWARGS = {
@@ -49,6 +51,7 @@ def make_hooks(
     measure_latency=False,
     measure_gpu_memory=False,
     model_baseline_mem=0,
+    use_wandb=False,
     dump_full_kv_dir=None,
     model_name=None,
     task_name=None,
@@ -138,7 +141,25 @@ def make_hooks(
             return
         seq_len = input_ids.size(-1)
         pkv = output.past_key_values
+        logging_event = None
         if seq_len > 1:
+            logger.request_idx += 1
+            if use_wandb:
+                logging_event = {
+                    "request_idx": logger.request_idx,
+                    "seq_len": int(seq_len),
+                }
+
+            if hasattr(pkv, "key_recon_mse"):
+                key_mse = pkv.key_recon_mse
+                if key_mse is not None:
+                    print(f"Key reconstruction MSE: {key_mse:.6f}")
+                    logger.add_log("key_recon_mse", key_mse)
+            if hasattr(pkv, "value_recon_mse"):
+                val_mse = pkv.value_recon_mse
+                if val_mse is not None:
+                    print(f"Value reconstruction MSE: {val_mse:.6f}")
+                    logger.add_log("value_recon_mse", val_mse)
             if hasattr(pkv, "update_events"):
                 if uncompressed_window > 0:
                     label_ed = -uncompressed_window
@@ -200,6 +221,21 @@ def make_hooks(
             if _cuda:
                 logger.decode_events.append((_start_evt[0], end_evt))
 
+        if logging_event is not None:
+            value_mlp_events = getattr(
+                pkv, "value_mlp_log_events", []
+            )
+            if value_mlp_events:
+                for value_mlp_event in value_mlp_events:
+                    value_mlp_event["request_idx"] = logger.request_idx
+                logger.add_value_mlp_log_events(value_mlp_events)
+            logging_event_idx = logger.request_idx + 1
+            if logging_event_idx % 10 == 0:
+                log_live_value_mlp_training_wandb(
+                    logger.value_mlp_log_events,
+                    logging_event_idx,
+                )
+
     return pre_hook, post_hook
 
 
@@ -213,6 +249,7 @@ def main(args):
     logger.prefill_events = []
     logger.decode_events = []
     logger.recorded_k_timing = False
+    logger.recorded_cr = False
 
     if args.dump_full_kv_dir is not None:
         if args.k_cache_type != "baseline" or args.v_cache_type != "baseline":
@@ -273,7 +310,6 @@ def main(args):
         "num_heads_per_mlp": [args.num_heads_per_mlp] * num_layers,
         "per_sequence": args.per_sequence,
         "target_perc": target_perc_per_layer,
-        "target_model_num_heads": args.target_model_num_heads,
         "lr": args.v_lr,
         "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         "optimizer": args.optimizer,
@@ -289,6 +325,8 @@ def main(args):
         "linear_only": args.linear_only,
         "early_stopping_tol": args.early_stopping_tol,
         "freeze_W_linear": args.freeze_W_linear,
+        "zero_init_mlp_last_layer": args.zero_init_mlp_last_layer,
+        "prev_layer_init": args.prev_layer_init,
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
@@ -312,18 +350,24 @@ def main(args):
         # model-weights-only footprint
         model_baseline_mem = torch.cuda.memory_allocated()
 
+    args.tasks = get_tasks(args.tasks)
+    use_wandb = init_lm_eval_wandb(args)
+
     pre_hook, post_hook = make_hooks(
         logger,
         measure_latency=args.log_efficiency_metrics,
         measure_gpu_memory=args.log_efficiency_metrics,
         model_baseline_mem=model_baseline_mem,
+        use_wandb=use_wandb,
         dump_full_kv_dir=args.dump_full_kv_dir,
         model_name=args.model_name,
         task_name=args.tasks[0],
         rope_theta=rope_theta,
     )
-    model.register_forward_pre_hook(pre_hook, with_kwargs=True)
-    model.register_forward_hook(post_hook, with_kwargs=True)
+    metric_hook_handles = [
+        model.register_forward_pre_hook(pre_hook, with_kwargs=True),
+        model.register_forward_hook(post_hook, with_kwargs=True),
+    ]
 
     lm = CompressedCacheHFLM(
         key_cache_kwargs=key_cache_kwargs,
@@ -334,7 +378,6 @@ def main(args):
         truncation=False,
         trust_remote_code=True,
     )
-    args.tasks = get_tasks(args.tasks)
     metadata = {"tokenizer": args.model_name}
     if args.max_seq_lengths is not None:
         metadata["max_seq_lengths"] = args.max_seq_lengths
@@ -369,6 +412,17 @@ def main(args):
         print("Compression metrics:", compression_metrics)
         results["results"]["compression_metrics"] = compression_metrics
 
+    for label in ["value_recon_mse", "key_recon_mse"]:
+        mse_values = logger.get_log_list(label)
+        if mse_values:
+            mse_mean, mse_std = logger.get_log_mean(label, std=True)
+            metrics = {
+                "recon_mse_mean": float(mse_mean),
+                "recon_mse_std": float(mse_std),
+            }
+            print(f"{label}:", metrics)
+            results["results"][f"{label}"] = metrics
+
     print(make_table(results))
 
     results = extract_and_save_stats(logger, results)
@@ -395,8 +449,17 @@ def main(args):
     with open(output_path, "w") as f:
         json.dump(results["results"], f, ensure_ascii=False, indent=4)
     print(f"Results saved to {output_path}")
-    for handle in attn_predictor_hook_handles:
+    for handle in metric_hook_handles + attn_predictor_hook_handles:
         handle.remove()
+    if use_wandb:
+        import wandb
+        if logger.value_mlp_log_events:
+            log_live_value_mlp_training_wandb(
+                logger.value_mlp_log_events,
+                logger.request_idx + 1,
+                log_tables=True,
+            )
+        wandb.finish()
     return results
 
 
@@ -427,6 +490,7 @@ def parse_args():
     )
     parser.add_argument("--dump_full_kv_dir", type=str, default=None)
     parser.add_argument("--log_efficiency_metrics", action="store_true")
+    parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--debug", action="store_true")
 
     # key cache
@@ -497,13 +561,12 @@ def parse_args():
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--num_layers_per_mlp", type=int, default=4)
-    parser.add_argument("--hidden_factors_per_mlp", type=int, default=2)
+    parser.add_argument("--num_layers_per_mlp", type=int, default=2)
+    parser.add_argument("--hidden_factors_per_mlp", type=int, default=1)
     parser.add_argument("--num_heads_per_mlp", type=int, default=8)
     parser.add_argument("--per_sequence", action="store_true")
     parser.add_argument("--target_perc", type=int, default=85)
     parser.add_argument("--target_cr", type=float, default=None)
-    parser.add_argument("--target_model_num_heads", type=int, default=8)
     parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument(
         "--optimizer",
@@ -531,8 +594,9 @@ def parse_args():
     )
     parser.add_argument(
         "--un_rope",
-        action="store_true",
-        help="Undo RoPE on keys before MLP training and inference.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Undo RoPE on keys before MLP training and inference. Use --no-un_rope to disable.",
     )
     parser.add_argument(
         "--rope_theta",
@@ -547,8 +611,9 @@ def parse_args():
     )
     parser.add_argument(
         "--use_residual",
-        action="store_true",
-        help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights. Use --no-use_residual to disable.",
     )
     parser.add_argument(
         "--intermediate_activation",
@@ -563,14 +628,25 @@ def parse_args():
     )
     parser.add_argument(
         "--per_head_kv_linear",
-        action="store_true",
-        help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly. Use --no-per_head_kv_linear to disable.",
     )
     parser.add_argument(
         "--freeze_W_linear",
         action="store_true",
         default=False,
         help="Freeze W_linear during MLP training.",
+    )
+    parser.add_argument(
+        "--zero_init_mlp_last_layer",
+        action="store_true",
+        help="Initialise the final value-cache MLP layer to zero so the residual branch starts from W_linear only.",
+    )
+    parser.add_argument(
+        "--prev_layer_init",
+        action="store_true",
+        help="Initialise each value-cache MLP from the previous layer's trained MLP.",
     )
     parser.add_argument(
         "--early_stopping_tol",

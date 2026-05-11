@@ -35,6 +35,8 @@ from .logging import (
     save_attention_predictor_checkpoint,
     prepare_run_directory,
     attention_predictor_config,
+    log_live_value_mlp_training_wandb,
+    init_lm_eval_wandb
 )
 from .rope import inverse_rope, apply_rope, compute_rope_cos_sin
 from .device import get_device, get_device_type
