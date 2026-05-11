@@ -72,7 +72,7 @@ class DecomposedKeysCache(SingleTensorCache):
         energy_threshold: float = 0.95,
         decomp_n_iter: int = 8,
         lr: float = 1e-2,
-        unrope_keys: bool = False,
+        unrope_keys: bool = True,
         quantise_a: bool = False,
         quantise_b: bool = False,
         compressor_bits: int = 4,

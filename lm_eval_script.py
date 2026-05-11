@@ -52,6 +52,7 @@ def make_hooks(
     dump_full_kv_dir=None,
     model_name=None,
     task_name=None,
+    rope_theta=None,
 ):
     """
     When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
@@ -105,6 +106,7 @@ def make_hooks(
                 "input_ids": input_ids.detach().cpu().clone(),
                 "prompt_len": int(input_ids.size(-1)),
                 "model_name": model_name,
+                "rope_theta": rope_theta,
                 "keys": torch.stack(keys, dim=0),
                 "values": torch.stack(values, dim=0),
             },
@@ -317,7 +319,8 @@ def main(args):
         model_baseline_mem=model_baseline_mem,
         dump_full_kv_dir=args.dump_full_kv_dir,
         model_name=args.model_name,
-        task_name=args.tasks[0]
+        task_name=args.tasks[0],
+        rope_theta=rope_theta,
     )
     model.register_forward_pre_hook(pre_hook, with_kwargs=True)
     model.register_forward_hook(post_hook, with_kwargs=True)
