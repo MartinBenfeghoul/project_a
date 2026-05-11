@@ -1,4 +1,5 @@
 import math
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 from typing import Callable
@@ -33,7 +34,13 @@ def find_rank_wrt_cr(r, m, n):
     such that the compression ratio is ~r.
     """
     k = m * n / (r * (m + n))
-    return int(round(k))
+    k = min(int(k), min(m, n))
+    if k < 1:
+        warnings.warn(
+            f"Target compression ratio {r} is too high for matrix of shape ({m}, {n}). Using rank 1."
+        )
+        k = 1
+    return k
 
 
 def find_rank_wrt_energy(S, energy_threshold):
