@@ -22,7 +22,6 @@ from .args import (
     args_type,
     parse_layers,
 )
-from .analysis import plot_success_matrix
 from .logging import (
     Logger,
     save_results,
