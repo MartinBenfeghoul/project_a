@@ -144,17 +144,24 @@ def make_hooks(
         logging_event = None
         if seq_len > 1:
             logger.request_idx += 1
+            logging_event_idx = logger.request_idx + 1
             if use_wandb:
-                logging_event = {
-                    "request_idx": logger.request_idx,
-                    "seq_len": int(seq_len),
-                }
+                logging_event = {}
 
             if hasattr(pkv, "key_recon_mse"):
                 key_mse = pkv.key_recon_mse
                 if key_mse is not None:
                     print(f"Key reconstruction MSE: {key_mse:.6f}")
                     logger.add_log("key_recon_mse", key_mse)
+            if logging_event is not None:
+                eta_mean = getattr(pkv, "eta_mean", None)
+                if eta_mean is not None:
+                    logging_event["live/logging_event_idx"] = logging_event_idx
+                    logging_event["live/key_cache_eta_mean"] = eta_mean
+                    logging_event["live/seq_len"] = int(seq_len)
+                    eta_std = getattr(pkv, "eta_std", None)
+                    if eta_std is not None:
+                        logging_event["live/key_cache_eta_std"] = eta_std
             if hasattr(pkv, "value_recon_mse"):
                 val_mse = pkv.value_recon_mse
                 if val_mse is not None:
@@ -229,7 +236,10 @@ def make_hooks(
                 for value_mlp_event in value_mlp_events:
                     value_mlp_event["request_idx"] = logger.request_idx
                 logger.add_value_mlp_log_events(value_mlp_events)
-            logging_event_idx = logger.request_idx + 1
+            if logging_event:
+                import wandb
+
+                wandb.log(logging_event)
             if logging_event_idx % 10 == 0:
                 log_live_value_mlp_training_wandb(
                     logger.value_mlp_log_events,

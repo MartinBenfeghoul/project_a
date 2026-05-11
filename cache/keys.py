@@ -58,6 +58,86 @@ def check_recon_length(recon_keys, cache_kwargs):
         )
 
 
+def _full_segment_ranges(
+    batch_size: int,
+    seq_len: int,
+) -> list[list[tuple[int, int]]]:
+    return [[(0, seq_len)] for _ in range(batch_size)]
+
+
+def _scatter_eta_from_grouped(
+    grouped_features: torch.Tensor,
+    segment_ranges: list[list[tuple[int, int]]],
+) -> torch.Tensor:
+    if grouped_features.dim() != 3:
+        raise ValueError(
+            "Expected grouped_features with shape [batch, seq_len, dim]."
+        )
+    if len(segment_ranges) != grouped_features.size(0):
+        raise ValueError(
+            "segment_ranges must have one entry per batch item."
+        )
+
+    eta_values = grouped_features.new_zeros(grouped_features.size(0))
+    for batch_idx, batch_ranges in enumerate(segment_ranges):
+        batch_features = grouped_features[batch_idx]
+        if batch_features.size(0) == 0:
+            continue
+
+        frob_sq = batch_features.pow(2).sum()
+        scatter = batch_features.new_zeros(())
+        for start_idx, end_idx in batch_ranges:
+            cluster = batch_features[start_idx:end_idx]
+            if cluster.numel() == 0:
+                continue
+            centroid = cluster.mean(dim=0, keepdim=True)
+            scatter = scatter + (cluster - centroid).pow(2).sum()
+
+        denom = float(frob_sq.item())
+        eta_values[batch_idx] = float(scatter.item()) / denom if denom > 0 else 0.0
+    return eta_values
+
+
+def _single_centroid_eta_from_features(
+    features: torch.Tensor,
+) -> torch.Tensor | None:
+    if features.dim() != 3:
+        raise ValueError(
+            "Expected features with shape [batch, seq_len, dim]."
+        )
+    if features.size(1) == 0:
+        return None
+    return _scatter_eta_from_grouped(
+        features,
+        _full_segment_ranges(features.size(0), features.size(1)),
+    )
+
+
+def _single_centroid_eta_from_keys(
+    keys: torch.Tensor,
+) -> torch.Tensor | None:
+    if keys.dim() != 4:
+        raise ValueError(
+            "Expected keys with shape [batch, heads, seq_len, dim]."
+        )
+    batch_size, num_heads, seq_len, head_dim = keys.shape
+    if seq_len == 0:
+        return None
+    eta_values = _single_centroid_eta_from_features(
+        keys.reshape(batch_size * num_heads, seq_len, head_dim)
+    )
+    if eta_values is None:
+        return None
+    return eta_values.reshape(batch_size, num_heads)
+
+
+def _eta_summary_to_python(values: torch.Tensor) -> float | list[float]:
+    values = values.detach().cpu()
+    if values.numel() == 1:
+        return float(values.item())
+    return [float(item) for item in values.tolist()]
+
+
 class DecomposedKeysCache(SingleTensorCache):
     timing_stats = None
 
@@ -103,6 +183,7 @@ class DecomposedKeysCache(SingleTensorCache):
         self.lr_keys = {}
         self.comp_ratio = None
         self.compressed_len = 0
+        self._eta_values = {}
         self.log_timing_stats = log_timing_stats
         type(self).timing_stats = (
             init_timing_stats() if self.log_timing_stats else None
@@ -138,6 +219,51 @@ class DecomposedKeysCache(SingleTensorCache):
     def _store_layer_segments(self, layer_idx, layer_segments):
         self.lr_keys[layer_idx] = layer_segments
         self.comp_ratio = self.calc_compression_ratio()
+
+    def _set_eta_values(
+        self,
+        source_key: int,
+        eta_values: torch.Tensor | None,
+    ) -> None:
+        if eta_values is None or eta_values.numel() == 0:
+            self._eta_values.pop(source_key, None)
+            return
+        self._eta_values[source_key] = eta_values.detach()
+
+    def _summarize_eta(self) -> tuple[float | list[float], float | list[float]] | tuple[None, None]:
+        if not self._eta_values:
+            return None, None
+
+        flattened = []
+        batch_size = None
+        for eta_values in self._eta_values.values():
+            if eta_values is None or eta_values.numel() == 0:
+                continue
+            eta_values = eta_values.reshape(eta_values.size(0), -1)
+            if batch_size is None:
+                batch_size = eta_values.size(0)
+            elif eta_values.size(0) != batch_size:
+                raise ValueError("All eta tensors must share the same batch size.")
+            flattened.append(eta_values.to(dtype=torch.float64))
+
+        if not flattened:
+            return None, None
+
+        merged = torch.cat(flattened, dim=1)
+        return (
+            _eta_summary_to_python(merged.mean(dim=1)),
+            _eta_summary_to_python(merged.std(dim=1, unbiased=False)),
+        )
+
+    @property
+    def eta_mean(self) -> float | list[float] | None:
+        mean, _ = self._summarize_eta()
+        return mean
+
+    @property
+    def eta_std(self) -> float | list[float] | None:
+        _, std = self._summarize_eta()
+        return std
 
     def _apply_lr_keys_batch_op(self, op):
         for layer_idx, layer_segments in self.lr_keys.items():
@@ -218,6 +344,10 @@ class DecomposedKeysCache(SingleTensorCache):
                 prefill=self.prefill,
                 compressed_len=suffix_start,
             )
+        self._set_eta_values(
+            layer_idx,
+            _single_centroid_eta_from_keys(decomp_keys),
+        )
         trimmed_segment_ranges = self._trim_segment_ranges(
             segment_ranges, suffix_start
         )
@@ -448,6 +578,7 @@ class XKVKeysCache(DecomposedKeysCache):
         suffix_start = self._get_suffix_start(group_tensors[-1])
         self.compressed_len = suffix_start
         if suffix_start == 0:
+            self._set_eta_values(group_last_layer, None)
             shared_segments = [[] for _ in range(batch_size)]
             per_layer_segments = [
                 [[] for _ in range(batch_size)] for _ in group_layers
@@ -473,6 +604,10 @@ class XKVKeysCache(DecomposedKeysCache):
                 split_sizes.append(prefix_flat.size(-1))
 
             group_prefix = torch.cat(prefix_tensors, dim=-1).unsqueeze(1)
+            self._set_eta_values(
+                group_last_layer,
+                _single_centroid_eta_from_features(group_prefix.squeeze(1)),
+            )
             segment_ranges = [[(0, suffix_start)] for _ in range(batch_size)]
             decompose_kwargs = self._decomposition_kwargs()
             quantise_a = decompose_kwargs.pop("quantise_a")
@@ -678,8 +813,18 @@ class SurpriseLRKCache(DecomposedKeysCache):
         keys = super().update(key_states, layer_idx, cache_kwargs)
 
         if self.prefill:
+            eta_keys = keys
             if self.unrope_keys:
-                self.layers[layer_idx]._cache_rope_state(keys, cache_kwargs)
+                eta_keys = self.layers[layer_idx]._undo_rope(
+                    keys,
+                    cache_kwargs,
+                    prefill=True,
+                    compressed_len=keys.size(-2),
+                )
+            self._set_eta_values(
+                layer_idx,
+                _single_centroid_eta_from_keys(eta_keys),
+            )
             return keys
 
         if layer_idx not in self.lr_keys:
@@ -783,6 +928,7 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
                 empty_long,
                 empty_long,
                 [[] for _ in range(batch_size)],
+                None,
             )
 
         if self.kmeans_mode == "per_head":
@@ -810,6 +956,10 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
                 assignments.reshape(batch_size, num_heads, seq_len),
                 inverse_permutation.reshape(batch_size, num_heads, seq_len),
                 segment_ranges,
+                _scatter_eta_from_grouped(
+                    grouped_prefix,
+                    segment_ranges,
+                ).reshape(batch_size, num_heads),
             )
 
         if self.kmeans_mode == "avg_heads":
@@ -823,8 +973,11 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
             token_features,
             n_clusters=cluster_count,
             n_iter=max(1, self.kmeans_n),
-            kmeans_init=self.kmeans_init,
-            dtype=self.kmeans_dtype,
+                kmeans_init=self.kmeans_init,
+                dtype=self.kmeans_dtype,
+            )
+        grouped_features, _, _ = group_sequences_by_cluster(
+            token_features, assignments
         )
         grouped_prefix, _, inverse_permutation = group_keys_by_cluster(
             prefix_keys, assignments
@@ -833,7 +986,13 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
             assignments,
             n_clusters=cluster_count,
         )
-        return grouped_prefix, assignments, inverse_permutation, segment_ranges
+        return (
+            grouped_prefix,
+            assignments,
+            inverse_permutation,
+            segment_ranges,
+            _scatter_eta_from_grouped(grouped_features, segment_ranges),
+        )
 
     def _decompose_keys(
         self,
@@ -886,13 +1045,17 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
                 assignments,
                 inverse_permutation,
                 segment_ranges,
+                eta_values,
             ) = self._cluster_prefix(prefix_keys)
+            self._set_eta_values(layer_idx, eta_values)
             layer_segments = decompose_to_segment_store(
                 grouped_prefix,
                 self.decompose,
                 segment_ranges=segment_ranges,
                 **self._decomposition_kwargs(),
             )
+        if suffix_start == 0:
+            self._set_eta_values(layer_idx, None)
 
         if self.log_timing_stats:
             sync_cuda(keys)
@@ -1114,7 +1277,12 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
             empty_long = torch.empty(
                 batch_size, 0, dtype=torch.long, device=group_prefix.device
             )
-            return group_prefix, empty_long, [[] for _ in range(batch_size)]
+            return (
+                group_prefix,
+                empty_long,
+                [[] for _ in range(batch_size)],
+                None,
+            )
 
         cluster_count = self._get_cluster_count(seq_len)
         assignments = kmeans_cluster_sequences(
@@ -1131,7 +1299,12 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
             assignments,
             n_clusters=cluster_count,
         )
-        return grouped_prefix, inverse_permutation, segment_ranges
+        return (
+            grouped_prefix,
+            inverse_permutation,
+            segment_ranges,
+            _scatter_eta_from_grouped(grouped_prefix, segment_ranges),
+        )
 
     def _decompose_keys(self, layer_idx, cache_kwargs=None):
         if self.log_timing_stats:
@@ -1153,6 +1326,7 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
         self.compressed_len = suffix_start
 
         if suffix_start == 0:
+            self._set_eta_values(group_last_layer, None)
             shared_segments = [[] for _ in range(batch_size)]
             per_layer_segments = [
                 [[] for _ in range(batch_size)] for _ in group_layers
@@ -1184,9 +1358,10 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
                 split_sizes.append(prefix_flat.size(-1))
 
             group_prefix = torch.cat(prefix_tensors, dim=-1)
-            grouped_prefix, inverse_permutation, segment_ranges = (
+            grouped_prefix, inverse_permutation, segment_ranges, eta_values = (
                 self._cluster_group_prefix(group_prefix)
             )
+            self._set_eta_values(group_last_layer, eta_values)
             decompose_kwargs = self._decomposition_kwargs()
             quantise_a = decompose_kwargs.pop("quantise_a")
             quantise_b = decompose_kwargs.pop("quantise_b")

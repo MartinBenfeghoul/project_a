@@ -153,6 +153,14 @@ class CompressedCache:
         return sum(self._key_recon_mses) / len(self._key_recon_mses)
 
     @property
+    def eta_mean(self):
+        return getattr(self.key_cache, "eta_mean", None)
+
+    @property
+    def eta_std(self):
+        return getattr(self.key_cache, "eta_std", None)
+
+    @property
     def value_recon_mse(self) -> float | None:
         if hasattr(self.value_cache, "recon_mse"):
             return self.value_cache.recon_mse
