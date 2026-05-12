@@ -259,6 +259,7 @@ def main(args):
         "freeze_W_linear": args.freeze_W_linear,
         "zero_init_mlp_last_layer": args.zero_init_mlp_last_layer,
         "prev_layer_init": args.prev_layer_init,
+        "input_layernorm": args.mlp_input_layernorm,
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
@@ -568,6 +569,11 @@ def parse_args():
         "--prev_layer_init",
         action="store_true",
         help="Initialise each value-cache MLP from the previous layer's trained MLP.",
+    )
+    parser.add_argument(
+        "--mlp_input_layernorm",
+        action="store_true",
+        help="Apply LayerNorm over the head dimension to value-cache MLP inputs.",
     )
     parser.add_argument(
         "--early_stopping_tol",
