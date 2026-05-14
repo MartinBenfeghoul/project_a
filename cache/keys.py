@@ -45,6 +45,42 @@ def get_expected_seq_len(cache_kwargs):
     return None
 
 
+def summarise_segment_sizes_by_sequence(
+    sequence_segment_sizes: list[list[int]],
+) -> dict[str, float] | None:
+    flat_segment_sizes = [
+        int(size)
+        for segment_sizes in sequence_segment_sizes
+        for size in segment_sizes
+    ]
+    if not flat_segment_sizes:
+        return None
+
+    sorted_sizes = sorted(flat_segment_sizes)
+    mid = len(sorted_sizes) // 2
+    if len(sorted_sizes) % 2 == 0:
+        median_size = 0.5 * (sorted_sizes[mid - 1] + sorted_sizes[mid])
+    else:
+        median_size = float(sorted_sizes[mid])
+
+    per_sequence_stds = []
+    for segment_sizes in sequence_segment_sizes:
+        if not segment_sizes:
+            continue
+        mean_size = sum(segment_sizes) / len(segment_sizes)
+        variance = sum(
+            (size - mean_size) ** 2 for size in segment_sizes
+        ) / len(segment_sizes)
+        per_sequence_stds.append(math.sqrt(variance))
+
+    return {
+        "segment_size_min": float(sorted_sizes[0]),
+        "segment_size_median": float(median_size),
+        "segment_size_max": float(sorted_sizes[-1]),
+        "segment_size_std_mean": float(sum(per_sequence_stds) / len(per_sequence_stds)),
+    }
+
+
 def check_recon_length(recon_keys, cache_kwargs):
     exp_seq_len = get_expected_seq_len(cache_kwargs)
     if exp_seq_len is not None and recon_keys.size(-2) != exp_seq_len:
@@ -203,6 +239,16 @@ class DecomposedKeysCache(SingleTensorCache):
 
     def update_events(self, *args, **kwargs):
         self.prefill = False
+        sequence_segment_sizes = []
+        for layer_segments in self.lr_keys.values():
+            for sequence_segments in layer_segments:
+                sequence_segment_sizes.append(
+                    [
+                        segment["range"][1] - segment["range"][0]
+                        for segment in sequence_segments
+                    ]
+                )
+        return summarise_segment_sizes_by_sequence(sequence_segment_sizes)
 
     def _decomposition_kwargs(self):
         return {
@@ -780,7 +826,7 @@ class SurpriseLRKCache(DecomposedKeysCache):
         ).reshape(B, T)
 
         self.events = []
-        n_events = 0
+        sequence_segment_sizes = []
         for b in range(B):
             events = find_thresholds(
                 surprise[b],
@@ -791,9 +837,11 @@ class SurpriseLRKCache(DecomposedKeysCache):
             # boundary to include the last token from prefill.
             events[-1] += 1
             self.events.append(events)
-            n_events += len(events) - 1
+            sequence_segment_sizes.append(
+                [events[i + 1] - events[i] for i in range(len(events) - 1)]
+            )
         self.prefill = False
-        return n_events / B
+        return summarise_segment_sizes_by_sequence(sequence_segment_sizes)
 
     def _build_segment_ranges(self):
         segment_ranges = []
@@ -1118,29 +1166,6 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
                 type(self), "reconstruct", time.perf_counter() - start_time
             )
         return recon_keys
-
-    def update_events(self, *args, **kwargs):
-        self.prefill = False
-        if not self.cluster_metadata:
-            return None
-
-        layer_counts = []
-        for metadata in self.cluster_metadata.values():
-            assignments = metadata["assignments"]
-            if assignments.numel() == 0:
-                layer_counts.append(0.0)
-                continue
-
-            # In per-head mode, assignments has shape [B, H, T], so reshaping
-            # to [-1, T] treats each (batch, head) sequence independently.
-            counts = []
-            flat_assignments = assignments.reshape(
-                -1, assignments.size(-1)
-            )
-            for sequence_assignments in flat_assignments:
-                counts.append(torch.unique(sequence_assignments).numel())
-            layer_counts.append(sum(counts) / len(counts))
-        return sum(layer_counts) / len(layer_counts)
 
     def _apply_cluster_metadata_batch_op(self, op):
         for metadata in self.cluster_metadata.values():

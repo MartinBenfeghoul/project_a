@@ -336,27 +336,33 @@ def extract_and_save_stats(logger, results):
         print(timing_str)
         results["results"]["key_cache_timings"] = timing_str
 
-    n_events_stats = logger.get_log_mean("n_events", std=True)
-    avg_event_size_stats = logger.get_log_mean("avg_event_size", std=True)
-    if n_events_stats is not None and avg_event_size_stats is not None:
-        n_events, n_events_std = (
-            float(n_events_stats[0]),
-            float(n_events_stats[1]),
-        )
-        avg_event_size, avg_event_size_std = (
-            float(avg_event_size_stats[0]),
-            float(avg_event_size_stats[1]),
-        )
-        results["results"]["event_stats"] = {
-            "n_events": n_events,
-            "n_events_std": n_events_std,
-            "avg_event_size": avg_event_size,
-            "avg_event_size_std": avg_event_size_std,
-        }
+    event_stat_keys = [
+        "segment_size_min",
+        "segment_size_median",
+        "segment_size_max",
+        "segment_size_std_mean",
+    ]
+    event_stat_values = {
+        key: logger.get_log_mean(key, std=True) for key in event_stat_keys
+    }
+    if all(value is not None for value in event_stat_values.values()):
+        results["results"]["event_stats"] = {}
+        for key, value in event_stat_values.items():
+            results["results"]["event_stats"][key] = float(value[0])
+            results["results"]["event_stats"][f"{key}_std"] = float(
+                value[1]
+            )
         print(
-            f"Logged an average of {n_events:.2f}+/-{n_events_std:.2f}"
-            f" events with average size of"
-            f" {avg_event_size:.2f}+/-{avg_event_size_std:.2f} tokens"
+            "Logged segment sizes:"
+            f" min={event_stat_values['segment_size_min'][0]:.2f}"
+            f"+/-{event_stat_values['segment_size_min'][1]:.2f},"
+            f" median={event_stat_values['segment_size_median'][0]:.2f}"
+            f"+/-{event_stat_values['segment_size_median'][1]:.2f},"
+            f" max={event_stat_values['segment_size_max'][0]:.2f}"
+            f"+/-{event_stat_values['segment_size_max'][1]:.2f},"
+            " avg per-sequence std="
+            f"{event_stat_values['segment_size_std_mean'][0]:.2f}"
+            f"+/-{event_stat_values['segment_size_std_mean'][1]:.2f} tokens"
         )
 
     return results

@@ -210,10 +210,14 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
     events_stats = results.get("event_stats", {})
     if events_stats:
         print("\nEvents stats:")
-        print(f"{events_stats.get('n_events', 'N/A'):.0f}")
-        print(f"{events_stats.get('n_events_std', 'N/A'):.0f}")
-        print(f"{events_stats.get('avg_event_size', 'N/A'):.0f}")
-        print(f"{events_stats.get('avg_event_size_std', 'N/A'):.0f}")
+        print(f"{events_stats.get('segment_size_min', 'N/A'):.0f}")
+        print(f"{events_stats.get('segment_size_min_std', 'N/A'):.0f}")
+        print(f"{events_stats.get('segment_size_median', 'N/A'):.0f}")
+        print(f"{events_stats.get('segment_size_median_std', 'N/A'):.0f}")
+        print(f"{events_stats.get('segment_size_max', 'N/A'):.0f}")
+        print(f"{events_stats.get('segment_size_max_std', 'N/A'):.0f}")
+        print(f"{events_stats.get('segment_size_std_mean', 'N/A'):.0f}")
+        print(f"{events_stats.get('segment_size_std_mean_std', 'N/A'):.0f}")
 
 
 if __name__ == "__main__":

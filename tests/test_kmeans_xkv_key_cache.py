@@ -134,6 +134,27 @@ def test_kmeans_xkv_local_window_preserves_suffix():
         )
 
 
+def test_kmeans_xkv_update_events_reports_segment_size_summary():
+    cache = build_cache()
+    cache.lr_keys = {
+        0: [
+            [{"range": (0, 2)}, {"range": (2, 5)}],
+            [{"range": (0, 4)}],
+        ],
+        1: [
+            [{"range": (0, 1)}, {"range": (1, 5)}],
+            [{"range": (0, 3)}, {"range": (3, 4)}],
+        ],
+    }
+
+    assert cache.update_events() == {
+        "segment_size_min": 1.0,
+        "segment_size_median": 3.0,
+        "segment_size_max": 4.0,
+        "segment_size_std_mean": 0.75,
+    }
+
+
 def test_kmeans_xkv_batch_ops_are_unimplemented():
     cache = build_cache()
     with pytest.raises(NotImplementedError):

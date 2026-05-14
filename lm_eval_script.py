@@ -173,14 +173,13 @@ def make_hooks(
                 else:
                     label_ed = None
                 logits = output.logits
-                n_events = pkv.update_events(
+                event_stats = pkv.update_events(
                     logits[..., : -1 - uncompressed_window, :],
                     input_ids[..., 1:label_ed],
                 )
-                if n_events is not None and n_events > 0:
-                    avg_event_size = seq_len / n_events
-                    logger.add_log("n_events", n_events)
-                    logger.add_log("avg_event_size", avg_event_size)
+                if event_stats is not None:
+                    for key, value in event_stats.items():
+                        logger.add_log(key, value)
             if _cuda:
                 logger.prefill_events.append((_start_evt[0], end_evt))
             if _cuda_mem:
