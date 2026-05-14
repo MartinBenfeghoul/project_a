@@ -28,6 +28,7 @@ class CompressedCache:
         config: PreTrainedConfig | None = None,
         key_cache_kwargs: dict | None = None,
         value_cache_kwargs: dict | None = None,
+        log_key_recon_mse: bool = True,  # TODO: add full plumbing for this flag
         **kwargs,
     ):
         # super().__init__(ddp_cache_data=ddp_cache_data, config=config)
@@ -82,6 +83,7 @@ class CompressedCache:
             raise ValueError(f"Invalid cache type: {value_cache_type}")
         self._cache_context = dict(kwargs.get("cache_context") or {})
         self._temp_value_importance = {}
+        self.log_key_recon_mse = log_key_recon_mse
         self._key_recon_mses = []
 
     def set_value_importance(
@@ -107,7 +109,7 @@ class CompressedCache:
             cache_kwargs["value_importance"] = self._temp_value_importance.pop(
                 layer_idx
             )
-        if self.pass_keys_to_value_cache:
+        if self.pass_keys_to_value_cache or self.log_key_recon_mse:
             fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
             if callable(fn) and getattr(self.key_cache, "prefill", False):
                 recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
