@@ -156,16 +156,11 @@ def test_xkv_roundtrip_handles_terminal_partial_group():
         torch.testing.assert_close(recon_values, expected_values)
 
 
-def test_xkv_update_events_reports_segment_size_summary():
+def test_xkv_update_events_skips_single_chunk_sequences():
     cache = build_cache()
     cache.key_cache.lr_keys = {
         0: [[{"range": (0, 4)}], [{"range": (0, 6)}]],
         1: [[{"range": (0, 5)}], [{"range": (0, 7)}]],
     }
 
-    assert cache.update_events() == {
-        "segment_size_min": 4.0,
-        "segment_size_median": 5.5,
-        "segment_size_max": 7.0,
-        "segment_size_std_mean": 0.0,
-    }
+    assert cache.update_events() is None

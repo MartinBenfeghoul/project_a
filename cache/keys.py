@@ -48,6 +48,12 @@ def get_expected_seq_len(cache_kwargs):
 def summarise_segment_sizes_by_sequence(
     sequence_segment_sizes: list[list[int]],
 ) -> dict[str, float] | None:
+    if not any(
+        len(segment_sizes) > 1
+        for segment_sizes in sequence_segment_sizes
+    ):
+        return None
+
     flat_segment_sizes = [
         int(size)
         for segment_sizes in sequence_segment_sizes
