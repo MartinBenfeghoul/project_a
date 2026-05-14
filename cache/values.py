@@ -47,6 +47,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
+        key_l2_error_weight: float = 0.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -91,6 +92,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self._num_params = None
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
+        self.key_l2_error_weight = key_l2_error_weight
         self.compressor = None
         self.mlp_training_history = []
 
@@ -283,7 +285,15 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self,
         errors: torch.Tensor,
         importance: torch.Tensor | None = None,
+        keys: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.key_l2_error_weight > 0:
+            key_l2 = keys.norm(p=2, dim=-1).to(
+                device=errors.device, dtype=errors.dtype
+            )
+            norm_scale = key_l2.mean(dim=(1, 2), keepdim=True).clamp(min=1e-8)
+            errors = errors * (norm_scale / key_l2.clamp(min=1e-8)).pow(self.key_l2_error_weight)
+
         if importance is None:
             return errors
 
@@ -313,6 +323,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         )
         self.compressed_len = self.tensor.shape[2]
 
+        errors = self._score_errors(errors, value_importance, keys=keys)
+
         if self.global_compression:
             self.errors = errors
             self.value_residuals = (self.tensor - v_approx).detach()
@@ -321,7 +333,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             )
             return
 
-        errors = self._score_errors(errors, value_importance)
         if self.threshold is None and self.target_perc is None:
             raise ValueError(
                 "MLPValueLayer requires either a threshold or target_perc to compress values"
@@ -478,6 +489,7 @@ class MLPValueCache(SingleTensorCache):
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
+        key_l2_error_weight: float = 0.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -545,6 +557,7 @@ class MLPValueCache(SingleTensorCache):
         self.target_cr = target_cr
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
+        self.key_l2_error_weight = key_l2_error_weight
         self.mlp_log_events = []
 
         self.meta_init = (
@@ -592,6 +605,7 @@ class MLPValueCache(SingleTensorCache):
             target_cr=self.target_cr,
             turboquant_residuals=self.turboquant_residuals,
             compressor_bits=self.compressor_bits,
+            key_l2_error_weight=self.key_l2_error_weight,
         )
 
     def _previous_layer_mlp(self, layer_idx: int) -> MLP | None:

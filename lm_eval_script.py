@@ -263,6 +263,7 @@ def main(args):
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
+        "key_l2_error_weight": args.mlp_error_key_l2_weight,
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(
@@ -513,6 +514,15 @@ def parse_args():
         "--global_compression",
         action="store_true",
         help="Pool errors across all layers and apply a single global threshold instead of per-layer thresholds.",
+    )
+    parser.add_argument(
+        "--mlp_error_key_l2_weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight value-cache MLP error by inverse key L2 norm."
+            "0 disables weighting; 1 makes scores inversely proportional to key L2 norm."
+        ),
     )
     parser.add_argument(
         "--un_rope",
