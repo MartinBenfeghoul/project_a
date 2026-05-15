@@ -489,7 +489,7 @@ class LowRankKeysCache(DecomposedKeysCache):
             )
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
             return keys
-        elif self.lr_keys.get(layer_idx, False):
+        elif layer_idx in self.lr_keys:
             recon_keys = self._reconstruct_keys(keys, layer_idx)
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
@@ -795,7 +795,7 @@ class XKVKeysCache(DecomposedKeysCache):
                 self._evict(layer_idx=group_layer_idx, end_idx=suffix_start)
             return keys
 
-        if self.lr_keys.get(layer_idx, False):
+        if layer_idx in self.lr_keys:
             recon_keys = self._reconstruct_keys(keys, layer_idx)
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
@@ -1262,7 +1262,7 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
             self._evict(layer_idx=layer_idx, end_idx=suffix_start)
             return keys
 
-        if self.lr_keys.get(layer_idx, False):
+        if layer_idx in self.lr_keys:
             recon_keys = self._reconstruct_keys(keys, layer_idx)
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
