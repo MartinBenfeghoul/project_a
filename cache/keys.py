@@ -1027,9 +1027,9 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
             token_features,
             n_clusters=cluster_count,
             n_iter=max(1, self.kmeans_n),
-                kmeans_init=self.kmeans_init,
-                dtype=self.kmeans_dtype,
-            )
+            kmeans_init=self.kmeans_init,
+            dtype=self.kmeans_dtype,
+        )
         grouped_features, _, _ = group_sequences_by_cluster(
             token_features, assignments
         )

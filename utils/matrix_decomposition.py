@@ -34,7 +34,7 @@ def find_rank_wrt_cr(r, m, n):
     such that the compression ratio is ~r.
     """
     k = m * n / (r * (m + n))
-    k = min(int(k), min(m, n))
+    k = min(math.floor(k + 0.5), min(m, n))
     if k < 1:
         warnings.warn(
             f"Target compression ratio {r} is too high for matrix of shape ({m}, {n}). Using rank 1."

@@ -273,6 +273,7 @@ def main(args):
                 "and a limit of 1 sample. "
                 f"Got tasks={tasks} and limit={args.limit}."
             )
+        args.use_wandb = False
         os.makedirs(args.dump_full_kv_dir, exist_ok=True)
 
     rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
