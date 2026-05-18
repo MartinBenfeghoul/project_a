@@ -181,6 +181,7 @@ def main(args):
         key_cache_kwargs=key_cache_kwargs,
         value_cache_kwargs=value_cache_kwargs,
         logger=logger,
+        adjust_key_value_comp_ratio=args.adjust_key_value_comp_ratio,
         pretrained=model,
         tokenizer=tokenizer,
         truncation=False,
@@ -312,6 +313,14 @@ def parse_args():
         choices=["svd", "lora"],
     )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
+    parser.add_argument(
+        "--adjust_key_value_comp_ratio",
+        action="store_true",
+        help=(
+            "Use different low-rank compression targets for key and value "
+            "caches while preserving the requested combined --comp_ratio."
+        ),
+    )
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
     parser.add_argument(
         "--rank_selection",

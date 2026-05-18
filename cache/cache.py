@@ -16,6 +16,23 @@ def get_cache(cache_type, CACHE_CLASSES, verbose=True):
     return CACHE_CLASSES[cache_type]
 
 
+def adjust_lr_comp_ratios(key_cache_kwargs, value_cache_kwargs):
+    if "comp_ratio" not in key_cache_kwargs:
+        return
+
+    comp_ratio = key_cache_kwargs["comp_ratio"]
+    key_comp_ratio = 1.25 * comp_ratio
+    value_comp_ratio = (5 / 6) * comp_ratio
+    if value_comp_ratio <= 1.0:
+        raise ValueError(
+            f"Adjusted value comp ratio {value_comp_ratio} is <= 1.0, "
+            f"consider starting with a higher comp ratio than {comp_ratio}."
+        )
+
+    key_cache_kwargs["comp_ratio"] = key_comp_ratio
+    value_cache_kwargs["comp_ratio"] = value_comp_ratio
+
+
 class CompressedCache:
     """
     Dynamic cache that applies low-rank decomposition to keys
@@ -29,6 +46,7 @@ class CompressedCache:
         key_cache_kwargs: dict | None = None,
         value_cache_kwargs: dict | None = None,
         log_key_recon_mse: bool = True,  # TODO: add full plumbing for this flag
+        adjust_key_value_comp_ratio: bool = False,
         **kwargs,
     ):
         # super().__init__(ddp_cache_data=ddp_cache_data, config=config)
@@ -43,10 +61,21 @@ class CompressedCache:
         else:
             value_cache_kwargs = dict(value_cache_kwargs)
 
+        key_cache_type = key_cache_kwargs.pop("cache_type")
+        value_cache_type = value_cache_kwargs.pop("cache_type")
+
         # local import to avoid circular import at module load
         from .keys import KEY_CACHE_CLASSES
+        from .values import VALUE_CACHE_CLASSES
 
-        key_cache_type = key_cache_kwargs.pop("cache_type")
+        value_key_cache_kwargs = copy.deepcopy(key_cache_kwargs)
+        if (
+            adjust_key_value_comp_ratio
+            and value_cache_type in KEY_CACHE_CLASSES
+            and "baseline" not in (key_cache_type, value_cache_type)
+        ):
+            adjust_lr_comp_ratios(key_cache_kwargs, value_key_cache_kwargs)
+
         self.key_cache = get_cache(
             key_cache_type, KEY_CACHE_CLASSES, kwargs.get("verbose", True)
         )(
@@ -54,9 +83,6 @@ class CompressedCache:
             **key_cache_kwargs,
         )
 
-        from .values import VALUE_CACHE_CLASSES
-
-        value_cache_type = value_cache_kwargs.pop("cache_type")
         if value_cache_type in VALUE_CACHE_CLASSES:
             self.value_cache = get_cache(
                 value_cache_type,
@@ -68,7 +94,7 @@ class CompressedCache:
             )
             self.pass_keys_to_value_cache = True
         elif value_cache_type in KEY_CACHE_CLASSES:
-            value_cache_kwargs = copy.deepcopy(key_cache_kwargs)
+            value_cache_kwargs = value_key_cache_kwargs
             value_cache_kwargs["unrope_keys"] = False
             self.value_cache = get_cache(
                 value_cache_type,
