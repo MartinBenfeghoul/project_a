@@ -305,6 +305,7 @@ def main(args):
         logger=logger,
         pretrained=model,
         tokenizer=tokenizer,
+        max_length=args.max_length,
         truncation=False,
         trust_remote_code=True,
     )
@@ -418,6 +419,7 @@ def parse_args():
         default=None,
         help="Sequence lengths for RULER tasks.",
     )
+    parser.add_argument("--max_length", type=int, default=None, help="Maximum input sequence length in tokens.")
     parser.add_argument("--log_efficiency_metrics", action="store_true")
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -495,7 +497,7 @@ def parse_args():
         "--optimizer",
         type=str,
         default="adam",
-        choices=["adam", "adamw", "sgd"],
+        choices=["adam", "adamw", "sgd", "lbfgs"],
     )
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=50)
@@ -610,7 +612,7 @@ def parse_args():
     parser.add_argument(
         "--v_compressor_bits",
         type=int,
-        default=3,
+        default=2,
         help="Bits per rotated residual coordinate for TurboQuant residual coding.",
     )
 

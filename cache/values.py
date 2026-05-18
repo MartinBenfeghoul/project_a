@@ -1,5 +1,5 @@
 from .base import SingleTensorCache, SingleTensorDynamicLayer
-from torch.optim import Adam, AdamW, SGD
+from torch.optim import Adam, AdamW, SGD, LBFGS
 from torch.nn.functional import mse_loss
 import torch
 from model.mlp import MLP
@@ -15,7 +15,15 @@ from utils.turboquant import init_compressor
 
 LOSS_FUNC = {"mse": mse_loss}
 
-OPTIMIZER = {"adam": Adam, "adamw": AdamW, "sgd": SGD}
+OPTIMIZER = {"adam": Adam, "adamw": AdamW, "sgd": SGD, "lbfgs": LBFGS}
+
+
+@torch.compile(dynamic=True)
+def _compiled_train_step(mlp, keys, values, loss_func):
+    v_hat = mlp(keys)
+    loss = loss_func(v_hat, values)
+    loss.backward()
+    return loss.detach()
 
 
 class MLPValueLayer(SingleTensorDynamicLayer):
@@ -225,26 +233,46 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     for name, p in self.mlp.named_parameters()
                     if not (self.freeze_W_linear and name == "W_linear")
                 ]
-                optimizer = self.optimizer_cls(all_params, lr=self.lr)
-                prev_loss = float("inf")
-                for epoch_idx in range(self.num_epochs):
-                    optimizer.zero_grad()
-                    # keys/values shape: [num_sequences, num_head, num_token, head_dim]
-                    v_hat = self.mlp(keys)
-                    loss = self.loss_func(v_hat, values)
-                    loss.backward()
-                    optimizer.step()
-                    loss_val = loss.item()
-                    self.mlp_training_history.append(
-                        {"epoch": epoch_idx + 1, "value_recon_mse": loss_val}
-                    )
-                    improvement = (prev_loss - loss_val) / (prev_loss + 1e-8)
-                    if (
-                        self.early_stopping_tol is not None
-                        and 0 <= improvement < self.early_stopping_tol
-                    ):
-                        break
-                    prev_loss = loss_val
+                loss_val = float("inf")
+                if self.optimizer_cls is LBFGS:
+                    optimizer = LBFGS(all_params, lr=self.lr, max_iter=20, history_size=10)
+
+                    def closure():
+                        optimizer.zero_grad()
+                        return _compiled_train_step(self.mlp, keys, values, self.loss_func)
+
+                    for epoch_idx in range(self.num_epochs):
+                        loss = optimizer.step(closure)
+                        loss_val = loss.item()
+                        self.mlp_training_history.append(
+                            {"epoch": epoch_idx + 1, "value_recon_mse": loss_val}
+                        )
+                        if (
+                            self.early_stopping_tol is not None
+                            and loss_val < self.early_stopping_tol
+                        ):
+                            break
+                else:
+                    use_fused = self.optimizer_cls is Adam and torch.cuda.is_available()
+                    optimizer = self.optimizer_cls(all_params, lr=self.lr, fused=use_fused)
+                    prev_loss = float("inf")
+                    for epoch_idx in range(self.num_epochs):
+                        optimizer.zero_grad()
+                        # keys/values shape: [num_sequences, num_head, num_token, head_dim]
+                        loss_val = _compiled_train_step(
+                            self.mlp, keys, values, self.loss_func
+                        ).item()
+                        optimizer.step()
+                        self.mlp_training_history.append(
+                            {"epoch": epoch_idx + 1, "value_recon_mse": loss_val}
+                        )
+                        improvement = (prev_loss - loss_val) / (prev_loss + 1e-8)
+                        if (
+                            self.early_stopping_tol is not None
+                            and 0 <= improvement < self.early_stopping_tol
+                        ):
+                            break
+                        prev_loss = loss_val
                 optimizer.zero_grad(set_to_none=True)
                 self.recon_mse = loss_val
 
