@@ -346,9 +346,7 @@ def _resolve_kmeans_dtype(kmeans_dtype: torch.dtype | str) -> torch.dtype:
         try:
             kmeans_dtype = getattr(torch, kmeans_dtype)
         except AttributeError as exc:
-            raise ValueError(
-                f"Unknown kmeans dtype: {kmeans_dtype}"
-            ) from exc
+            raise ValueError(f"Unknown kmeans dtype: {kmeans_dtype}") from exc
     if not isinstance(kmeans_dtype, torch.dtype):
         raise TypeError("kmeans_dtype must be a torch.dtype or dtype name.")
     return kmeans_dtype
@@ -441,7 +439,13 @@ def _cluster_items_and_ranges(
         assignments,
         cluster_count,
     )
-    return item_matrix, grouped_items, assignments, segment_ranges, cluster_count
+    return (
+        item_matrix,
+        grouped_items,
+        assignments,
+        segment_ranges,
+        cluster_count,
+    )
 
 
 def _scatter_from_grouped(
@@ -491,8 +495,8 @@ def _group_tensor_last_dim_by_cluster(
     )
     inverse_permutation.scatter_(1, permutation, original_positions)
     gather_shape = (
-        tensor.size(0),
-    ) + (1,) * (tensor.dim() - 2) + (tensor.size(-1),)
+        (tensor.size(0),) + (1,) * (tensor.dim() - 2) + (tensor.size(-1),)
+    )
     gather_idx = permutation.view(gather_shape).expand_as(tensor)
     grouped_tensor = torch.gather(
         tensor,
@@ -507,9 +511,13 @@ def _restore_tensor_last_dim(
     inverse_permutation: torch.Tensor,
 ) -> torch.Tensor:
     gather_shape = (
-        grouped_tensor.size(0),
-    ) + (1,) * (grouped_tensor.dim() - 2) + (grouped_tensor.size(-1),)
-    gather_idx = inverse_permutation.view(gather_shape).expand_as(grouped_tensor)
+        (grouped_tensor.size(0),)
+        + (1,) * (grouped_tensor.dim() - 2)
+        + (grouped_tensor.size(-1),)
+    )
+    gather_idx = inverse_permutation.view(gather_shape).expand_as(
+        grouped_tensor
+    )
     return torch.gather(
         grouped_tensor,
         dim=grouped_tensor.dim() - 1,
@@ -852,9 +860,11 @@ def analyze_kmeans_lrk(
                         )
             continue
 
-        grouped_target, _, inverse_permutation = _group_tensor_last_dim_by_cluster(
-            token_features,
-            assignments,
+        grouped_target, _, inverse_permutation = (
+            _group_tensor_last_dim_by_cluster(
+                token_features,
+                assignments,
+            )
         )
         scatter_metrics = _scatter_from_grouped(
             grouped_items,
@@ -900,9 +910,11 @@ def analyze_kmeans_lrk(
             for head_idx in range(num_heads):
                 if kmeans_mode == "avg_heads":
                     head_target = prefix_tensor[:, head_idx]
-                    grouped_head_target, _, _ = _group_tensor_last_dim_by_cluster(
-                        head_target,
-                        assignments,
+                    grouped_head_target, _, _ = (
+                        _group_tensor_last_dim_by_cluster(
+                            head_target,
+                            assignments,
+                        )
                     )
                     grouped_head_items, head_segment_ranges = (
                         _group_features_and_ranges(
@@ -929,12 +941,14 @@ def analyze_kmeans_lrk(
                 else:
                     start_idx = head_idx * head_dim
                     end_idx = start_idx + head_dim
-                    head_items, head_segment_ranges = _group_features_and_ranges(
-                        token_features[..., start_idx:end_idx]
-                        .transpose(1, 2)
-                        .contiguous(),
-                        assignments[..., start_idx:end_idx],
-                        cluster_count,
+                    head_items, head_segment_ranges = (
+                        _group_features_and_ranges(
+                            token_features[..., start_idx:end_idx]
+                            .transpose(1, 2)
+                            .contiguous(),
+                            assignments[..., start_idx:end_idx],
+                            cluster_count,
+                        )
                     )
                     head_scatter_metrics = _scatter_from_grouped(
                         head_items,
@@ -1037,9 +1051,7 @@ def analyze_kmeans_xkv(
         if layer_idx != group_last:
             continue
 
-        group_tensors = [
-            tensor[i] for i in range(group_start, group_last + 1)
-        ]
+        group_tensors = [tensor[i] for i in range(group_start, group_last + 1)]
         seq_len = group_tensors[-1].size(-2)
         if any(item.size(-2) != seq_len for item in group_tensors[:-1]):
             raise ValueError(

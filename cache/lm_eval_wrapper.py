@@ -64,7 +64,9 @@ class CompressedCacheHFLM(HFLM):
         self._logger.recorded_cr = False
         self._logger.recorded_k_timing = False
         task_name = getattr(self, "_current_task_name", None)
-        cache_context = {"task_name": task_name} if task_name is not None else None
+        cache_context = (
+            {"task_name": task_name} if task_name is not None else None
+        )
         generation_kwargs["past_key_values"] = self._make_cache(cache_context)
         generation_kwargs["temperature"] = generation_kwargs.get(
             "temperature", 0.0

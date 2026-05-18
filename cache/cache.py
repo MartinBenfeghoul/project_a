@@ -138,10 +138,14 @@ class CompressedCache:
         if self.pass_keys_to_value_cache or self.log_key_recon_mse:
             fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
             if callable(fn) and getattr(self.key_cache, "prefill", False):
-                recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
+                recon_keys = self.key_cache.get_reconstructed_keys_only(
+                    layer_idx
+                )
                 if self.log_key_recon_mse and recon_keys is not None:
                     self._key_recon_mses.append(
-                        torch.nn.functional.mse_loss(recon_keys, key_states).item()
+                        torch.nn.functional.mse_loss(
+                            recon_keys, key_states
+                        ).item()
                     )
                 cache_kwargs["keys"] = recon_keys
             else:

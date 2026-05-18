@@ -75,9 +75,7 @@ def _scatter_eta_from_grouped(
             "Expected grouped_features with shape [batch, seq_len, dim]."
         )
     if len(segment_ranges) != grouped_features.size(0):
-        raise ValueError(
-            "segment_ranges must have one entry per batch item."
-        )
+        raise ValueError("segment_ranges must have one entry per batch item.")
 
     eta_values = grouped_features.new_zeros(grouped_features.size(0))
     for batch_idx, batch_ranges in enumerate(segment_ranges):
@@ -95,7 +93,9 @@ def _scatter_eta_from_grouped(
             scatter = scatter + (cluster - centroid).pow(2).sum()
 
         denom = float(frob_sq.item())
-        eta_values[batch_idx] = float(scatter.item()) / denom if denom > 0 else 0.0
+        eta_values[batch_idx] = (
+            float(scatter.item()) / denom if denom > 0 else 0.0
+        )
     return eta_values
 
 
@@ -103,9 +103,7 @@ def _single_centroid_eta_from_features(
     features: torch.Tensor,
 ) -> torch.Tensor | None:
     if features.dim() != 3:
-        raise ValueError(
-            "Expected features with shape [batch, seq_len, dim]."
-        )
+        raise ValueError("Expected features with shape [batch, seq_len, dim].")
     if features.size(1) == 0:
         return None
     return _scatter_eta_from_grouped(
@@ -241,7 +239,9 @@ class DecomposedKeysCache(SingleTensorCache):
             return
         self._eta_values[source_key] = eta_values.detach()
 
-    def _summarize_eta(self) -> tuple[float | list[float], float | list[float]] | tuple[None, None]:
+    def _summarize_eta(
+        self,
+    ) -> tuple[float | list[float], float | list[float]] | tuple[None, None]:
         if not self._eta_values:
             return None, None
 
@@ -254,7 +254,9 @@ class DecomposedKeysCache(SingleTensorCache):
             if batch_size is None:
                 batch_size = eta_values.size(0)
             elif eta_values.size(0) != batch_size:
-                raise ValueError("All eta tensors must share the same batch size.")
+                raise ValueError(
+                    "All eta tensors must share the same batch size."
+                )
             flattened.append(eta_values.to(dtype=torch.float64))
 
         if not flattened:
@@ -509,7 +511,9 @@ class XKVKeysCache(DecomposedKeysCache):
         )
 
     def _get_group_bounds(self, layer_idx):
-        group_start = (layer_idx // self.layer_group_size) * self.layer_group_size
+        group_start = (
+            layer_idx // self.layer_group_size
+        ) * self.layer_group_size
         group_last = group_start + self.layer_group_size - 1
         if self.num_layers is not None:
             group_last = min(group_last, self.num_layers - 1)
@@ -650,9 +654,9 @@ class XKVKeysCache(DecomposedKeysCache):
 
         layers_by_group: dict[int, list[int]] = {}
         for layer_idx, metadata in self.group_metadata.items():
-            layers_by_group.setdefault(
-                metadata["group_last_layer"], []
-            ).append(layer_idx)
+            layers_by_group.setdefault(metadata["group_last_layer"], []).append(
+                layer_idx
+            )
 
         crs = 0.0
         num_segments = 0
@@ -760,9 +764,7 @@ class XKVKeysCache(DecomposedKeysCache):
 
         metadata = self.group_metadata.get(layer_idx)
         if metadata is None:
-            raise ValueError(
-                f"No xKV metadata found for layer {layer_idx}."
-            )
+            raise ValueError(f"No xKV metadata found for layer {layer_idx}.")
 
         shared_segments = self.shared_a[metadata["group_last_layer"]]
         layer_segments = self.lr_keys[layer_idx]
@@ -821,7 +823,9 @@ class XKVKeysCache(DecomposedKeysCache):
             if layer_idx != group_last_layer:
                 return keys
 
-            suffix_start = self._decompose_keys(layer_idx, cache_kwargs=cache_kwargs)
+            suffix_start = self._decompose_keys(
+                layer_idx, cache_kwargs=cache_kwargs
+            )
             for group_layer_idx in range(group_start, group_last_layer + 1):
                 self._evict(layer_idx=group_layer_idx, end_idx=suffix_start)
             return keys
@@ -950,9 +954,7 @@ class KMeansMixin:
                     f"Unknown kmeans dtype: {kmeans_dtype}"
                 ) from exc
         if not isinstance(kmeans_dtype, torch.dtype):
-            raise TypeError(
-                "kmeans_dtype must be a torch.dtype or dtype name."
-            )
+            raise TypeError("kmeans_dtype must be a torch.dtype or dtype name.")
         self.n_clusters = n_clusters
         self.kmeans_cluster_size = kmeans_cluster_size
         self.kmeans_n = kmeans_n_iter
@@ -1515,7 +1517,7 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
                 type(self), "reconstruct", time.perf_counter() - start_time
             )
         return recon_keys
-    
+
 
 KEY_CACHE_CLASSES = {
     "baseline": SingleTensorCache,

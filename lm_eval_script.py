@@ -26,7 +26,7 @@ from utils import (
     extract_and_save_stats,
     extract_and_save_efficiency_stats,
     log_live_value_mlp_training_wandb,
-    init_lm_eval_wandb
+    init_lm_eval_wandb,
 )
 
 GEN_KWARGS = {
@@ -262,6 +262,7 @@ def main(args):
         handle.remove()
     if use_wandb:
         import wandb
+
         if logger.value_mlp_log_events:
             log_live_value_mlp_training_wandb(
                 logger.value_mlp_log_events,

@@ -670,9 +670,7 @@ def build_successive_chunk_cpu_vs_gpu_results(shape_specs, desc: str):
                 "cpu_std_ms": cpu_stats["std_ms"],
                 "cpu_min_ms": cpu_stats["min_ms"],
                 "cpu_max_ms": cpu_stats["max_ms"],
-                "cpu_used_float32_fallback": cpu_stats[
-                    "used_float32_fallback"
-                ],
+                "cpu_used_float32_fallback": cpu_stats["used_float32_fallback"],
                 "cpu_segment_calls": cpu_stats["segment_calls"],
                 "cpu_matrices_per_segment_call": cpu_stats[
                     "matrices_per_segment_call"
@@ -832,8 +830,8 @@ def plot_successive_chunk_cpu_vs_gpu_results(
             label=f"CPU workers={cpu_workers}",
         )
 
-    gpu_df = df.drop_duplicates(subset=["label"]).set_index("label").reindex(
-        labels
+    gpu_df = (
+        df.drop_duplicates(subset=["label"]).set_index("label").reindex(labels)
     )
     if gpu_df["cuda_mean_ms"].notna().any():
         offsets = [
@@ -875,7 +873,9 @@ def plot_grouped_results(
     group_column: str | None,
 ) -> None:
     if group_column is None:
-        plot_path = f"svd_segmented_cpu_offload_vs_cuda_benchmark{output_suffix}.png"
+        plot_path = (
+            f"svd_segmented_cpu_offload_vs_cuda_benchmark{output_suffix}.png"
+        )
         plot_results(df, plot_path, title_suffix=title_suffix)
         print()
         print(f"Saved plot to {plot_path}")
@@ -902,7 +902,9 @@ def plot_grouped_cpu_thread_results(
     group_column: str | None,
 ) -> None:
     if group_column is None:
-        plot_path = f"svd_cpu_offload_thread_scaling_benchmark{output_suffix}.png"
+        plot_path = (
+            f"svd_cpu_offload_thread_scaling_benchmark{output_suffix}.png"
+        )
         plot_cpu_thread_results(df, plot_path, title_suffix=title_suffix)
         print()
         print(f"Saved plot to {plot_path}")
@@ -931,7 +933,9 @@ def plot_grouped_successive_chunk_cpu_vs_gpu_results(
     group_column: str | None,
 ) -> None:
     if group_column is None:
-        plot_path = f"svd_cpu_vs_gpu_successive_chunk_benchmark{output_suffix}.png"
+        plot_path = (
+            f"svd_cpu_vs_gpu_successive_chunk_benchmark{output_suffix}.png"
+        )
         plot_successive_chunk_cpu_vs_gpu_results(
             df, plot_path, title_suffix=title_suffix
         )
@@ -990,7 +994,9 @@ def run_benchmark_config(config: dict) -> None:
 
     print(f"=== {config['description']} ===")
 
-    df = build_results(shape_specs, desc=f"{config['name']} cpu-offload vs cuda")
+    df = build_results(
+        shape_specs, desc=f"{config['name']} cpu-offload vs cuda"
+    )
     print(df.round(3).to_string(index=False))
     plot_grouped_results(
         df,

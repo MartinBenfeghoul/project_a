@@ -546,16 +546,15 @@ def extract_and_save_stats(logger, results):
         key: logger.get_log_mean(key, std=True) for key in event_stat_keys
     }
     event_stat_values = {
-        key: value for key, value in event_stat_values.items()
+        key: value
+        for key, value in event_stat_values.items()
         if value is not None
     }
     if event_stat_values:
         results["results"]["event_stats"] = {}
         for key, value in event_stat_values.items():
             results["results"]["event_stats"][key] = float(value[0])
-            results["results"]["event_stats"][f"{key}_std"] = float(
-                value[1]
-            )
+            results["results"]["event_stats"][f"{key}_std"] = float(value[1])
         event_stat_labels = {
             "segment_size_min": "min",
             "segment_size_median": "median",
@@ -750,8 +749,7 @@ def _value_mlp_event_table_rows(logging_events):
                 logging_event.get("layer_idx"),
                 logging_event.get("epoch"),
                 float(logging_event.get("value_recon_mse")),
-                float(logging_event.get("target_perc")
-                )
+                float(logging_event.get("target_perc")),
             ]
         )
     return rows
@@ -775,9 +773,9 @@ def _mean_mse_by_layer_epoch_rows(logging_events):
         layer_idx = logging_event.get("layer_idx", "unknown")
         epoch = logging_event.get("epoch")
         mse = logging_event.get("value_recon_mse")
-        by_layer_epoch.setdefault(layer_idx, {}).setdefault(
-            epoch, []
-        ).append(float(mse))
+        by_layer_epoch.setdefault(layer_idx, {}).setdefault(epoch, []).append(
+            float(mse)
+        )
     return {
         layer_idx: [
             [epoch, float(np.mean(mses))]
@@ -893,8 +891,7 @@ def summarise_segment_sizes_by_sequence(
     sequence_segment_sizes: list[list[int]],
 ) -> dict[str, float] | None:
     if not any(
-        len(segment_sizes) > 1
-        for segment_sizes in sequence_segment_sizes
+        len(segment_sizes) > 1 for segment_sizes in sequence_segment_sizes
     ):
         return None
 
@@ -918,15 +915,16 @@ def summarise_segment_sizes_by_sequence(
         if not segment_sizes:
             continue
         mean_size = sum(segment_sizes) / len(segment_sizes)
-        variance = sum(
-            (size - mean_size) ** 2 for size in segment_sizes
-        ) / len(segment_sizes)
+        variance = sum((size - mean_size) ** 2 for size in segment_sizes) / len(
+            segment_sizes
+        )
         per_sequence_stds.append(math.sqrt(variance))
 
     return {
         "segment_size_min": float(sorted_sizes[0]),
         "segment_size_median": float(median_size),
         "segment_size_max": float(sorted_sizes[-1]),
-        "segment_size_std_mean": float(sum(per_sequence_stds) / len(per_sequence_stds)),
+        "segment_size_std_mean": float(
+            sum(per_sequence_stds) / len(per_sequence_stds)
+        ),
     }
-
