@@ -50,6 +50,7 @@ ALL_TASKS = {**LM_EVAL_TASKS, **RULER_TASKS, **LONGBENCH_TASKS}
 KEY_CONFIGS = [
     "model_name",
     "tasks",
+    "v_cache_type",
     "k_cache_type",
     "decomposition_method",
     "comp_ratio",
@@ -58,6 +59,7 @@ KEY_CONFIGS = [
     "decomp_n_iter",
     "gamma",
     "local_window",
+    "xkv_layer_group_size",
     "kmeans_cluster_size",
     "kmeans_n_iter",
     "kmeans_init",
@@ -105,6 +107,10 @@ def get_nested_value(config, key_path):
         if value is None:
             return None
     return value
+
+
+def format_if_numeric(value, fmt):
+    return f"{value:{fmt}}" if isinstance(value, (int, float)) else value
 
 
 def print_configs(config):
@@ -208,10 +214,8 @@ def main(benchmark, file_path, show_key_configs=False, decimal_points=4):
     events_stats = results.get("event_stats", {})
     if events_stats:
         print("\nEvents stats:")
-        print(f"{events_stats.get('n_events', 'N/A'):.0f}")
-        print(f"{events_stats.get('n_events_std', 'N/A'):.0f}")
-        print(f"{events_stats.get('avg_event_size', 'N/A'):.0f}")
-        print(f"{events_stats.get('avg_event_size_std', 'N/A'):.0f}")
+        for key in events_stats:
+            print(format_if_numeric(events_stats.get(key, "N/A"), ".0f"))
 
 
 if __name__ == "__main__":

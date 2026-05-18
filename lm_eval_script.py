@@ -14,6 +14,7 @@ from model.attention_predictor import (
     get_attn_predictor_hook_handles,
     apply_attn_predictor_config,
 )
+from utils.logging import make_hooks
 from utils import (
     Logger,
     get_model_and_tokenizer,
@@ -25,7 +26,7 @@ from utils import (
     extract_and_save_stats,
     extract_and_save_efficiency_stats,
     log_live_value_mlp_training_wandb,
-    init_lm_eval_wandb
+    init_lm_eval_wandb,
 )
 
 GEN_KWARGS = {
@@ -45,149 +46,6 @@ def get_tasks(tasks, print_tasks=True):
     return tasks
 
 
-def make_hooks(
-    logger,
-    uncompressed_window=0,
-    measure_latency=False,
-    measure_gpu_memory=False,
-    model_baseline_mem=0,
-    use_wandb=False
-):
-    """
-    When measure_latency=True, cuda events are recorded to time each prefill and decode pass.
-    """
-    _start_evt = [None]
-    _prefill_mem_start = [None]
-
-    _cuda = measure_latency and torch.cuda.is_available()
-    _cuda_mem = measure_gpu_memory and torch.cuda.is_available()
-
-    def has_complete_key_cache_timings(timing_stats):
-        return (
-            timing_stats is not None
-            and timing_stats.get("decompose_calls", 0) > 0
-            and timing_stats.get("reconstruct_calls", 0) > 0
-        )
-
-    def pre_hook(module, args, kwargs):
-        input_ids = kwargs.get("input_ids", args[0] if args else None)
-        is_prefill = input_ids is not None and input_ids.size(-1) > 1
-        if _cuda:
-            evt = torch.cuda.Event(enable_timing=True)
-            evt.record()
-            _start_evt[0] = evt
-        if _cuda_mem and is_prefill:
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            _prefill_mem_start[0] = torch.cuda.memory_allocated()
-
-    def post_hook(module, args, kwargs, output):
-        if _cuda:
-            end_evt = torch.cuda.Event(enable_timing=True)
-            end_evt.record()
-
-        input_ids = kwargs.get("input_ids", args[0] if args else None)
-        if input_ids is None:
-            return
-        seq_len = input_ids.size(-1)
-        pkv = output.past_key_values
-        logging_event = None
-        if seq_len > 1:
-            logger.request_idx += 1
-            if use_wandb:
-                logging_event = {
-                    "request_idx": logger.request_idx,
-                    "seq_len": int(seq_len),
-                }
-
-            if hasattr(pkv, "key_recon_mse"):
-                key_mse = pkv.key_recon_mse
-                if key_mse is not None:
-                    print(f"Key reconstruction MSE: {key_mse:.6f}")
-                    logger.add_log("key_recon_mse", key_mse)
-            if hasattr(pkv, "value_recon_mse"):
-                val_mse = pkv.value_recon_mse
-                if val_mse is not None:
-                    print(f"Value reconstruction MSE: {val_mse:.6f}")
-                    logger.add_log("value_recon_mse", val_mse)
-            if hasattr(pkv, "update_events"):
-                if uncompressed_window > 0:
-                    label_ed = -uncompressed_window
-                else:
-                    label_ed = None
-                logits = output.logits
-                n_events = pkv.update_events(
-                    logits[..., : -1 - uncompressed_window, :],
-                    input_ids[..., 1:label_ed],
-                )
-                if n_events is not None and n_events > 0:
-                    avg_event_size = seq_len / n_events
-                    logger.add_log("n_events", n_events)
-                    logger.add_log("avg_event_size", avg_event_size)
-            if _cuda:
-                logger.prefill_events.append((_start_evt[0], end_evt))
-            if _cuda_mem:
-                torch.cuda.synchronize()
-                mem_allocated = torch.cuda.memory_allocated()
-                mem_start = _prefill_mem_start[0]
-                if mem_start is not None:
-                    logger.add_log(
-                        "prefill_gpu_mem_delta_bytes", mem_allocated - mem_start
-                    )
-                logger.add_log("prefill_gpu_mem_allocated_bytes", mem_allocated)
-                logger.add_log(
-                    "prefill_gpu_mem_overhead_bytes",
-                    mem_allocated - model_baseline_mem,
-                )
-                _prefill_mem_start[0] = None
-        else:
-            if hasattr(pkv, "comp_ratio") and not logger.recorded_cr:
-                cr = pkv.comp_ratio
-                if cr is not None:
-                    print(f"Compression ratio: {cr:.2f}")
-                    logger.add_log("crs", cr)
-                    logger.recorded_cr = True
-            if hasattr(pkv, "timing_stats") and not logger.recorded_k_timing:
-                timing_stats = pkv.timing_stats
-                if has_complete_key_cache_timings(timing_stats):
-                    logger.add_log(
-                        "key_cache_decompose_time",
-                        timing_stats["decompose_time"],
-                    )
-                    logger.add_log(
-                        "key_cache_reconstruct_time",
-                        timing_stats["reconstruct_time"],
-                    )
-                    logger.add_log(
-                        "key_cache_decompose_relative",
-                        timing_stats["decompose_relative"],
-                    )
-                    logger.add_log(
-                        "key_cache_reconstruct_relative",
-                        timing_stats["reconstruct_relative"],
-                    )
-                    logger.recorded_k_timing = True
-            if _cuda:
-                logger.decode_events.append((_start_evt[0], end_evt))
-
-        if logging_event is not None:
-            value_mlp_events = getattr(
-                pkv, "value_mlp_log_events", []
-            )
-            if value_mlp_events:
-                for value_mlp_event in value_mlp_events:
-                    value_mlp_event["request_idx"] = logger.request_idx
-                logger.add_value_mlp_log_events(value_mlp_events)
-            logging_event_idx = logger.request_idx + 1
-            if logging_event_idx % 10 == 0:
-                log_live_value_mlp_training_wandb(
-                    logger.value_mlp_log_events,
-                    logging_event_idx,
-                )
-
-    return pre_hook, post_hook
-
-
 @torch.no_grad()
 def main(args):
     device_type = get_device_type()
@@ -200,10 +58,27 @@ def main(args):
     logger.recorded_k_timing = False
     logger.recorded_cr = False
 
+    if args.dump_full_kv_dir is not None:
+        if args.k_cache_type != "baseline" or args.v_cache_type != "baseline":
+            raise ValueError(
+                "--dump_full_kv_dir requires --k_cache_type=baseline "
+                "and --v_cache_type=baseline."
+            )
+        tasks = get_tasks(args.tasks, print_tasks=False)
+        if len(tasks) != 1 or args.limit != 1:
+            raise ValueError(
+                "--dump_full_kv_dir currently only supports a single task "
+                "and a limit of 1 sample. "
+                f"Got tasks={tasks} and limit={args.limit}."
+            )
+        args.use_wandb = False
+        os.makedirs(args.dump_full_kv_dir, exist_ok=True)
+
     rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
 
     attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
 
+    num_layers = model.config.num_hidden_layers
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "decomposition_method": args.decomposition_method,
@@ -222,6 +97,8 @@ def main(args):
         "kmeans_dtype": args.kmeans_dtype,
         "kmeans_avg_heads": args.kmeans_avg_heads,
         "kmeans_per_head": args.kmeans_per_head,
+        "layer_group_size": args.xkv_layer_group_size,
+        "num_layers": num_layers,
         "unrope_keys": args.un_rope,
         "rope_theta": rope_theta,
         "quantise_a": args.k_quantise_a,
@@ -229,7 +106,6 @@ def main(args):
         "compressor_bits": args.k_compressor_bits,
     }
 
-    num_layers = model.config.num_hidden_layers
     target_perc_per_layer = (
         args.target_perc
         if isinstance(args.target_perc, list)
@@ -291,6 +167,10 @@ def main(args):
         measure_gpu_memory=args.log_efficiency_metrics,
         model_baseline_mem=model_baseline_mem,
         use_wandb=use_wandb,
+        dump_full_kv_dir=args.dump_full_kv_dir,
+        model_name=args.model_name,
+        task_name=args.tasks[0],
+        rope_theta=rope_theta,
     )
     metric_hook_handles = [
         model.register_forward_pre_hook(pre_hook, with_kwargs=True),
@@ -301,6 +181,7 @@ def main(args):
         key_cache_kwargs=key_cache_kwargs,
         value_cache_kwargs=value_cache_kwargs,
         logger=logger,
+        adjust_key_value_comp_ratio=args.adjust_key_value_comp_ratio,
         pretrained=model,
         tokenizer=tokenizer,
         truncation=False,
@@ -381,6 +262,7 @@ def main(args):
         handle.remove()
     if use_wandb:
         import wandb
+
         if logger.value_mlp_log_events:
             log_live_value_mlp_training_wandb(
                 logger.value_mlp_log_events,
@@ -416,6 +298,7 @@ def parse_args():
         default=None,
         help="Sequence lengths for RULER tasks.",
     )
+    parser.add_argument("--dump_full_kv_dir", type=str, default=None)
     parser.add_argument("--log_efficiency_metrics", action="store_true")
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -431,6 +314,14 @@ def parse_args():
         choices=["svd", "lora"],
     )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
+    parser.add_argument(
+        "--adjust_key_value_comp_ratio",
+        action="store_true",
+        help=(
+            "Use different low-rank compression targets for key and value "
+            "caches while preserving the requested combined --comp_ratio."
+        ),
+    )
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
     parser.add_argument(
         "--rank_selection",
@@ -442,6 +333,12 @@ def parse_args():
     parser.add_argument("--decomp_n_iter", type=int, default=3)
     parser.add_argument("--gamma", type=float, default=3.0)
     parser.add_argument("--local_window", type=int, default=0)
+    parser.add_argument(
+        "--xkv_layer_group_size",
+        type=int,
+        default=2,
+        help="Number of adjacent layers to jointly compress when --k_cache_type=xkv.",
+    )
     parser.add_argument(
         "--kmeans_cluster_size",
         type=float,
