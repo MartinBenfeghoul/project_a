@@ -515,6 +515,128 @@ class XKVKeysCache(DecomposedKeysCache):
             group_last = min(group_last, self.num_layers - 1)
         return group_start, group_last
 
+    def _get_decomposition_group(self, layer_idx, cache_name):
+        group_start, group_last_layer = self._get_group_bounds(layer_idx)
+        if group_last_layer != layer_idx:
+            raise ValueError(
+                f"{cache_name} decomposition should only be triggered from "
+                f"the last layer of a group, got layer {layer_idx} for group "
+                f"ending at layer {group_last_layer}."
+            )
+
+        group_layers = tuple(range(group_start, group_last_layer + 1))
+        group_tensors = [self.layers[i].tensor for i in group_layers]
+        assert all(
+            t.size(-2) == group_tensors[-1].size(-2) for t in group_tensors
+        ), (
+            f"All layers in the {cache_name} group must share the same "
+            "cached length."
+        )
+        return group_layers, group_last_layer, group_tensors
+
+    def _get_group_prefix(
+        self,
+        group_layers,
+        group_tensors,
+        suffix_start,
+        cache_kwargs,
+    ):
+        prefix_tensors = []
+        split_sizes = []
+        for group_layer_idx, tensor in zip(group_layers, group_tensors):
+            prefix_tensor = tensor[..., :suffix_start, :]
+            if self.unrope_keys:
+                prefix_tensor = self.layers[group_layer_idx]._undo_rope(
+                    prefix_tensor,
+                    cache_kwargs,
+                    prefill=self.prefill,
+                    compressed_len=suffix_start,
+                )
+            prefix_flat = prefix_tensor.transpose(1, 2).reshape(
+                prefix_tensor.size(0),
+                prefix_tensor.size(-2),
+                -1,
+            )
+            prefix_tensors.append(prefix_flat)
+            split_sizes.append(prefix_flat.size(-1))
+
+        return torch.cat(prefix_tensors, dim=-1), split_sizes
+
+    def _empty_xkv_segments(self, batch_size, group_layers):
+        shared_segments = [[] for _ in range(batch_size)]
+        per_layer_segments = [
+            [[] for _ in range(batch_size)] for _ in group_layers
+        ]
+        return shared_segments, per_layer_segments
+
+    def _xkv_decomposition_kwargs(self):
+        decompose_kwargs = self._decomposition_kwargs()
+        quantise_a = decompose_kwargs.pop("quantise_a")
+        quantise_b = decompose_kwargs.pop("quantise_b")
+        compressor_bits = decompose_kwargs.pop("compressor_bits")
+        return decompose_kwargs, quantise_a, quantise_b, compressor_bits
+
+    def _split_grouped_xkv_segments(
+        self,
+        grouped_segments,
+        split_sizes,
+        group_layers,
+        batch_size,
+        quantise_b,
+        compressor_bits,
+    ):
+        shared_segments, per_layer_segments = self._empty_xkv_segments(
+            batch_size, group_layers
+        )
+        for batch_idx, batch_segments in enumerate(grouped_segments):
+            for segment in batch_segments:
+                shared_factor, grouped_right = segment["factors"]
+                shared_segments[batch_idx].append(
+                    {
+                        "range": segment["range"],
+                        "factor": shared_factor,
+                    }
+                )
+                right_factors = torch.split(grouped_right, split_sizes, dim=-1)
+                for layer_segments, right_factor in zip(
+                    per_layer_segments, right_factors
+                ):
+                    if quantise_b:
+                        right_factor = quantise_factor(
+                            right_factor,
+                            compressor_bits,
+                        )
+                    layer_segments[batch_idx].append(
+                        {
+                            "range": segment["range"],
+                            "factor": right_factor,
+                        }
+                    )
+        return shared_segments, per_layer_segments
+
+    def _store_xkv_group_segments(
+        self,
+        group_layers,
+        group_last_layer,
+        suffix_start,
+        shared_segments,
+        per_layer_segments,
+        extra_metadata=None,
+    ):
+        self.shared_a[group_last_layer] = shared_segments
+        for group_layer_idx, layer_segments in zip(
+            group_layers, per_layer_segments
+        ):
+            self.lr_keys[group_layer_idx] = layer_segments
+            metadata = {
+                "group_last_layer": group_last_layer,
+                "compressed_len": suffix_start,
+            }
+            if extra_metadata:
+                metadata.update(extra_metadata)
+            self.group_metadata[group_layer_idx] = metadata
+        self.comp_ratio = self.calc_compression_ratio()
+
     def calc_compression_ratio(self):
         default_ratio = (
             self.r
@@ -571,108 +693,58 @@ class XKVKeysCache(DecomposedKeysCache):
             sync_cuda(self.layers[layer_idx].tensor)
             start_time = time.perf_counter()
 
-        group_start, group_last_layer = self._get_group_bounds(layer_idx)
-        if group_last_layer != layer_idx:
-            raise ValueError(
-                "xKV decomposition should only be triggered from the last "
-                f"layer of a group, got layer {layer_idx} for group ending "
-                f"at layer {group_last_layer}."
-            )
-
-        group_layers = tuple(range(group_start, group_last_layer + 1))
-        group_tensors = [self.layers[i].tensor for i in group_layers]
+        group_layers, group_last_layer, group_tensors = (
+            self._get_decomposition_group(layer_idx, "xKV")
+        )
         batch_size = group_tensors[-1].size(0)
-        assert all(
-            t.size(-2) == group_tensors[-1].size(-2) for t in group_tensors
-        ), "All layers in an xKV group must share the same cached length."
 
         suffix_start = self._get_suffix_start(group_tensors[-1])
         self.compressed_len = suffix_start
         if suffix_start == 0:
             self._set_eta_values(group_last_layer, None)
-            shared_segments = [[] for _ in range(batch_size)]
-            per_layer_segments = [
-                [[] for _ in range(batch_size)] for _ in group_layers
-            ]
+            shared_segments, per_layer_segments = self._empty_xkv_segments(
+                batch_size, group_layers
+            )
         else:
-            prefix_tensors = []
-            split_sizes = []
-            for group_layer_idx, tensor in zip(group_layers, group_tensors):
-                prefix_tensor = tensor[..., :suffix_start, :]
-                if self.unrope_keys:
-                    prefix_tensor = self.layers[group_layer_idx]._undo_rope(
-                        prefix_tensor,
-                        cache_kwargs,
-                        prefill=self.prefill,
-                        compressed_len=suffix_start,
-                    )
-                prefix_flat = prefix_tensor.transpose(1, 2).reshape(
-                    prefix_tensor.size(0),
-                    prefix_tensor.size(-2),
-                    -1,
-                )
-                prefix_tensors.append(prefix_flat)
-                split_sizes.append(prefix_flat.size(-1))
-
-            group_prefix = torch.cat(prefix_tensors, dim=-1).unsqueeze(1)
+            group_prefix, split_sizes = self._get_group_prefix(
+                group_layers,
+                group_tensors,
+                suffix_start,
+                cache_kwargs,
+            )
             self._set_eta_values(
                 group_last_layer,
-                _single_centroid_eta_from_features(group_prefix.squeeze(1)),
+                _single_centroid_eta_from_features(group_prefix),
             )
             segment_ranges = [[(0, suffix_start)] for _ in range(batch_size)]
-            decompose_kwargs = self._decomposition_kwargs()
-            quantise_a = decompose_kwargs.pop("quantise_a")
-            quantise_b = decompose_kwargs.pop("quantise_b")
-            compressor_bits = decompose_kwargs.pop("compressor_bits")
+            decompose_kwargs, quantise_a, quantise_b, compressor_bits = (
+                self._xkv_decomposition_kwargs()
+            )
             grouped_segments = decompose_grouped_xkv_to_segment_store(
-                group_prefix,
+                group_prefix.unsqueeze(1),
                 segment_ranges=segment_ranges,
                 quantise_a=quantise_a,
                 compressor_bits=compressor_bits,
                 **decompose_kwargs,
             )
+            shared_segments, per_layer_segments = (
+                self._split_grouped_xkv_segments(
+                    grouped_segments,
+                    split_sizes,
+                    group_layers,
+                    batch_size,
+                    quantise_b,
+                    compressor_bits,
+                )
+            )
 
-            shared_segments = [[] for _ in range(batch_size)]
-            per_layer_segments = [
-                [[] for _ in range(batch_size)] for _ in group_layers
-            ]
-            for batch_idx, batch_segments in enumerate(grouped_segments):
-                for segment in batch_segments:
-                    shared_factor, grouped_right = segment["factors"]
-                    shared_segments[batch_idx].append(
-                        {
-                            "range": segment["range"],
-                            "factor": shared_factor,
-                        }
-                    )
-                    right_factors = torch.split(
-                        grouped_right, split_sizes, dim=-1
-                    )
-                    for layer_segments, right_factor in zip(
-                        per_layer_segments, right_factors
-                    ):
-                        if quantise_b:
-                            right_factor = quantise_factor(
-                                right_factor,
-                                compressor_bits,
-                            )
-                        layer_segments[batch_idx].append(
-                            {
-                                "range": segment["range"],
-                                "factor": right_factor,
-                            }
-                        )
-
-        self.shared_a[group_last_layer] = shared_segments
-        for group_layer_idx, layer_segments in zip(
-            group_layers, per_layer_segments
-        ):
-            self.lr_keys[group_layer_idx] = layer_segments
-            self.group_metadata[group_layer_idx] = {
-                "group_last_layer": group_last_layer,
-                "compressed_len": suffix_start,
-            }
-        self.comp_ratio = self.calc_compression_ratio()
+        self._store_xkv_group_segments(
+            group_layers,
+            group_last_layer,
+            suffix_start,
+            shared_segments,
+            per_layer_segments,
+        )
 
         if self.log_timing_stats:
             sync_cuda(self.layers[layer_idx].tensor)
@@ -1301,26 +1373,18 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
             sync_cuda(self.layers[layer_idx].tensor)
             start_time = time.perf_counter()
 
-        group_start, group_last_layer = self._get_group_bounds(layer_idx)
-        if group_last_layer != layer_idx:
-            raise ValueError(
-                "KMeans xKV decomposition should only be triggered from the "
-                f"last layer of a group, got layer {layer_idx} for group "
-                f"ending at layer {group_last_layer}."
-            )
-
-        group_layers = tuple(range(group_start, group_last_layer + 1))
-        group_tensors = [self.layers[i].tensor for i in group_layers]
+        group_layers, group_last_layer, group_tensors = (
+            self._get_decomposition_group(layer_idx, "KMeans xKV")
+        )
         batch_size = group_tensors[-1].size(0)
         suffix_start = self._get_suffix_start(group_tensors[-1])
         self.compressed_len = suffix_start
 
         if suffix_start == 0:
             self._set_eta_values(group_last_layer, None)
-            shared_segments = [[] for _ in range(batch_size)]
-            per_layer_segments = [
-                [[] for _ in range(batch_size)] for _ in group_layers
-            ]
+            shared_segments, per_layer_segments = self._empty_xkv_segments(
+                batch_size, group_layers
+            )
             inverse_permutation = torch.empty(
                 batch_size,
                 0,
@@ -1328,34 +1392,19 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
                 device=group_tensors[-1].device,
             )
         else:
-            prefix_tensors = []
-            split_sizes = []
-            for group_layer_idx, tensor in zip(group_layers, group_tensors):
-                prefix_tensor = tensor[..., :suffix_start, :]
-                if self.unrope_keys:
-                    prefix_tensor = self.layers[group_layer_idx]._undo_rope(
-                        prefix_tensor,
-                        cache_kwargs,
-                        prefill=self.prefill,
-                        compressed_len=suffix_start,
-                    )
-                prefix_flat = prefix_tensor.transpose(1, 2).reshape(
-                    prefix_tensor.size(0),
-                    prefix_tensor.size(-2),
-                    -1,
-                )
-                prefix_tensors.append(prefix_flat)
-                split_sizes.append(prefix_flat.size(-1))
-
-            group_prefix = torch.cat(prefix_tensors, dim=-1)
+            group_prefix, split_sizes = self._get_group_prefix(
+                group_layers,
+                group_tensors,
+                suffix_start,
+                cache_kwargs,
+            )
             grouped_prefix, inverse_permutation, segment_ranges, eta_values = (
                 self._cluster_group_prefix(group_prefix)
             )
             self._set_eta_values(group_last_layer, eta_values)
-            decompose_kwargs = self._decomposition_kwargs()
-            quantise_a = decompose_kwargs.pop("quantise_a")
-            quantise_b = decompose_kwargs.pop("quantise_b")
-            compressor_bits = decompose_kwargs.pop("compressor_bits")
+            decompose_kwargs, quantise_a, quantise_b, compressor_bits = (
+                self._xkv_decomposition_kwargs()
+            )
             grouped_segments = decompose_grouped_xkv_to_segment_store(
                 grouped_prefix.unsqueeze(1),
                 segment_ranges=segment_ranges,
@@ -1363,51 +1412,25 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
                 compressor_bits=compressor_bits,
                 **decompose_kwargs,
             )
+            shared_segments, per_layer_segments = (
+                self._split_grouped_xkv_segments(
+                    grouped_segments,
+                    split_sizes,
+                    group_layers,
+                    batch_size,
+                    quantise_b,
+                    compressor_bits,
+                )
+            )
 
-            shared_segments = [[] for _ in range(batch_size)]
-            per_layer_segments = [
-                [[] for _ in range(batch_size)] for _ in group_layers
-            ]
-            for batch_idx, batch_segments in enumerate(grouped_segments):
-                for segment in batch_segments:
-                    shared_factor, grouped_right = segment["factors"]
-                    shared_segments[batch_idx].append(
-                        {
-                            "range": segment["range"],
-                            "factor": shared_factor,
-                        }
-                    )
-                    right_factors = torch.split(
-                        grouped_right,
-                        split_sizes,
-                        dim=-1,
-                    )
-                    for layer_segments, right_factor in zip(
-                        per_layer_segments, right_factors
-                    ):
-                        if quantise_b:
-                            right_factor = quantise_factor(
-                                right_factor,
-                                compressor_bits,
-                            )
-                        layer_segments[batch_idx].append(
-                            {
-                                "range": segment["range"],
-                                "factor": right_factor,
-                            }
-                        )
-
-        self.shared_a[group_last_layer] = shared_segments
-        for group_layer_idx, layer_segments in zip(
-            group_layers, per_layer_segments
-        ):
-            self.lr_keys[group_layer_idx] = layer_segments
-            self.group_metadata[group_layer_idx] = {
-                "group_last_layer": group_last_layer,
-                "compressed_len": suffix_start,
-                "inverse_permutation": inverse_permutation,
-            }
-        self.comp_ratio = self.calc_compression_ratio()
+        self._store_xkv_group_segments(
+            group_layers,
+            group_last_layer,
+            suffix_start,
+            shared_segments,
+            per_layer_segments,
+            extra_metadata={"inverse_permutation": inverse_permutation},
+        )
 
         if self.log_timing_stats:
             sync_cuda(self.layers[layer_idx].tensor)
