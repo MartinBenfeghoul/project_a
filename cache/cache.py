@@ -1,4 +1,5 @@
 import copy
+import math
 import torch
 
 from transformers.cache_utils import (
@@ -81,6 +82,8 @@ class CompressedCache:
         self._cache_context = dict(kwargs.get("cache_context") or {})
         self._temp_value_importance = {}
         self._key_recon_mses = []
+        self.eviction_keep_ratio = kwargs.get("eviction_keep_ratio", 1.0)
+        self.kept_positions = {}
 
     def set_value_importance(
         self,
@@ -89,6 +92,51 @@ class CompressedCache:
     ) -> None:
         self._temp_value_importance[layer_idx] = value_importance
 
+    def _build_keep_positions(
+        self,
+        value_importance: torch.Tensor,
+        seq_len: int,
+    ) -> torch.Tensor:
+        score = value_importance[..., :seq_len].float().mean(dim=(0, 1))
+        keep_count = max(1, math.ceil(seq_len * self.eviction_keep_ratio))
+
+        force = torch.zeros(seq_len, dtype=torch.bool, device=score.device)
+
+        # Attention sinks and local window
+        force[:8] = True
+        force[-min(seq_len, 64) :] = True
+
+        remaining = max(0, keep_count - int(force.sum().item()))
+        keep = force.clone()
+        if remaining > 0:
+            selectable = score.masked_fill(force, float("-inf"))
+            topk = selectable.topk(min(remaining, seq_len), largest=True).indices
+            keep[topk] = True
+
+        return keep.nonzero(as_tuple=False).flatten().sort().values
+
+    def _maybe_apply_eviction(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if self.eviction_keep_ratio == 1.0:
+            return key_states, value_states, None
+        value_importance = self._temp_value_importance.get(layer_idx)
+        if key_states.shape[-2] == 1:
+            return key_states, value_states, None
+
+        keep_positions = self._build_keep_positions(value_importance, key_states.shape[-2]).to(
+            device=key_states.device
+        )
+        self.kept_positions[layer_idx] = keep_positions.detach().cpu()
+        return (
+            key_states.index_select(-2, keep_positions),
+            value_states.index_select(-2, keep_positions),
+            keep_positions,
+        )
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -96,15 +144,31 @@ class CompressedCache:
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        full_key_states, full_value_states = key_states, value_states
+        key_states, value_states, keep_positions = self._maybe_apply_eviction(
+            key_states, value_states, layer_idx
+        )
+        if keep_positions is not None:
+            cache_kwargs = {} if cache_kwargs is None else dict(cache_kwargs)
+            cache_kwargs["kept_positions"] = keep_positions
+            cache_kwargs["allow_sparse_kv"] = True
+        elif self.eviction_keep_ratio < 1.0 and cache_kwargs is not None: # decode
+            cache_kwargs = dict(cache_kwargs)
+            cache_kwargs["allow_sparse_kv"] = True
+
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
         if cache_kwargs is None:
             cache_kwargs = {}
         if self._cache_context:
             cache_kwargs = {**self._cache_context, **cache_kwargs}
         if layer_idx in self._temp_value_importance:
-            cache_kwargs["value_importance"] = self._temp_value_importance.pop(
-                layer_idx
-            )
+            value_importance = self._temp_value_importance.pop(layer_idx)
+            if keep_positions is not None:
+                value_importance = value_importance.index_select(
+                    -1, keep_positions.to(device=value_importance.device)
+                )
+            if self.eviction_keep_ratio==1.0:
+                cache_kwargs["value_importance"] = value_importance
         fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
         if callable(fn) and getattr(self.key_cache, "prefill", False):
             recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
@@ -118,6 +182,8 @@ class CompressedCache:
         else:
             cache_kwargs["keys"] = keys
         values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
+        if keep_positions is not None:
+            return full_key_states, full_value_states
         return keys, values
 
     @property

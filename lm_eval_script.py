@@ -302,6 +302,7 @@ def main(args):
     lm = CompressedCacheHFLM(
         key_cache_kwargs=key_cache_kwargs,
         value_cache_kwargs=value_cache_kwargs,
+        eviction_keep_ratio=args.eviction_keep_ratio,
         logger=logger,
         pretrained=model,
         tokenizer=tokenizer,
@@ -605,6 +606,12 @@ def parse_args():
         help="Path to a checkpoint from train_attention_predictor.py.",
     )
     parser.add_argument(
+        "--eviction_keep_ratio",
+        type=float,
+        default=1.0,
+        help="Fraction of prefill KV tokens to retain per layer. Values below 1 enable attention-predictor physical eviction.",
+    )
+    parser.add_argument(
         "--v_turboquant_residuals",
         action="store_true",
         help="Quantise stored MLP value residuals with TurboQuant.",
@@ -620,6 +627,8 @@ def parse_args():
     if args.meta_weights_path is not None:
         args = override_args_from_meta_weights(args)
     args = apply_attn_predictor_config(args)
+    if args.eviction_keep_ratio < 1 and not args.use_attn_predictor:
+        raise ValueError("--eviction_keep_ratio < 1 requires --use_attn_predictor.")
 
     print("Config for lm-eval: ", vars(args))
 

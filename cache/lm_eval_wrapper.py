@@ -13,10 +13,18 @@ class CompressedCacheHFLM(HFLM):
     simply pass "cache_implementation": "compressive_cache" in generation kwargs
     """
 
-    def __init__(self, key_cache_kwargs, value_cache_kwargs, logger, **kwargs):
+    def __init__(
+        self,
+        key_cache_kwargs,
+        value_cache_kwargs,
+        logger,
+        eviction_keep_ratio,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._key_cache_kwargs = key_cache_kwargs
         self._value_cache_kwargs = value_cache_kwargs
+        self._eviction_keep_ratio = eviction_keep_ratio
         self._logger = logger
 
     def _make_cache(self, cache_context=None):
@@ -25,6 +33,7 @@ class CompressedCacheHFLM(HFLM):
             key_cache_kwargs=self._key_cache_kwargs,
             value_cache_kwargs=self._value_cache_kwargs,
             cache_context=cache_context,
+            eviction_keep_ratio=self._eviction_keep_ratio,
             verbose=False,
         )
 
