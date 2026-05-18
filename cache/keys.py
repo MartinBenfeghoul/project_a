@@ -26,6 +26,7 @@ from utils.logging import (
     init_timing_stats,
     update_timing_stats,
     sync_cuda,
+    summarise_segment_sizes_by_sequence,
 )
 from utils.turboquant import (
     factor_dtype,
@@ -43,48 +44,6 @@ def get_expected_seq_len(cache_kwargs):
         if cache_position is not None:
             return cache_position[..., -1] + 1
     return None
-
-
-def summarise_segment_sizes_by_sequence(
-    sequence_segment_sizes: list[list[int]],
-) -> dict[str, float] | None:
-    if not any(
-        len(segment_sizes) > 1
-        for segment_sizes in sequence_segment_sizes
-    ):
-        return None
-
-    flat_segment_sizes = [
-        int(size)
-        for segment_sizes in sequence_segment_sizes
-        for size in segment_sizes
-    ]
-    if not flat_segment_sizes:
-        return None
-
-    sorted_sizes = sorted(flat_segment_sizes)
-    mid = len(sorted_sizes) // 2
-    if len(sorted_sizes) % 2 == 0:
-        median_size = 0.5 * (sorted_sizes[mid - 1] + sorted_sizes[mid])
-    else:
-        median_size = float(sorted_sizes[mid])
-
-    per_sequence_stds = []
-    for segment_sizes in sequence_segment_sizes:
-        if not segment_sizes:
-            continue
-        mean_size = sum(segment_sizes) / len(segment_sizes)
-        variance = sum(
-            (size - mean_size) ** 2 for size in segment_sizes
-        ) / len(segment_sizes)
-        per_sequence_stds.append(math.sqrt(variance))
-
-    return {
-        "segment_size_min": float(sorted_sizes[0]),
-        "segment_size_median": float(median_size),
-        "segment_size_max": float(sorted_sizes[-1]),
-        "segment_size_std_mean": float(sum(per_sequence_stds) / len(per_sequence_stds)),
-    }
 
 
 def check_recon_length(recon_keys, cache_kwargs):

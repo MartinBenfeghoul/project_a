@@ -545,24 +545,30 @@ def extract_and_save_stats(logger, results):
     event_stat_values = {
         key: logger.get_log_mean(key, std=True) for key in event_stat_keys
     }
-    if all(value is not None for value in event_stat_values.values()):
+    event_stat_values = {
+        key: value for key, value in event_stat_values.items()
+        if value is not None
+    }
+    if event_stat_values:
         results["results"]["event_stats"] = {}
         for key, value in event_stat_values.items():
             results["results"]["event_stats"][key] = float(value[0])
             results["results"]["event_stats"][f"{key}_std"] = float(
                 value[1]
             )
+        event_stat_labels = {
+            "segment_size_min": "min",
+            "segment_size_median": "median",
+            "segment_size_max": "max",
+            "segment_size_std_mean": "avg per-sequence std",
+        }
         print(
-            "Logged segment sizes:"
-            f" min={event_stat_values['segment_size_min'][0]:.2f}"
-            f"+/-{event_stat_values['segment_size_min'][1]:.2f},"
-            f" median={event_stat_values['segment_size_median'][0]:.2f}"
-            f"+/-{event_stat_values['segment_size_median'][1]:.2f},"
-            f" max={event_stat_values['segment_size_max'][0]:.2f}"
-            f"+/-{event_stat_values['segment_size_max'][1]:.2f},"
-            " avg per-sequence std="
-            f"{event_stat_values['segment_size_std_mean'][0]:.2f}"
-            f"+/-{event_stat_values['segment_size_std_mean'][1]:.2f} tokens"
+            "Logged segment sizes: "
+            + ", ".join(
+                f"{event_stat_labels[key]}={value[0]:.2f}+/-{value[1]:.2f}"
+                for key, value in event_stat_values.items()
+            )
+            + " tokens"
         )
 
     return results
@@ -881,3 +887,46 @@ def update_timing_stats(cache_cls, operation, elapsed_time):
             ("decompose", "reconstruct"),
             key=lambda op: cache_cls.timing_stats[f"{op}_time"],
         )
+
+
+def summarise_segment_sizes_by_sequence(
+    sequence_segment_sizes: list[list[int]],
+) -> dict[str, float] | None:
+    if not any(
+        len(segment_sizes) > 1
+        for segment_sizes in sequence_segment_sizes
+    ):
+        return None
+
+    flat_segment_sizes = [
+        int(size)
+        for segment_sizes in sequence_segment_sizes
+        for size in segment_sizes
+    ]
+    if not flat_segment_sizes:
+        return None
+
+    sorted_sizes = sorted(flat_segment_sizes)
+    mid = len(sorted_sizes) // 2
+    if len(sorted_sizes) % 2 == 0:
+        median_size = 0.5 * (sorted_sizes[mid - 1] + sorted_sizes[mid])
+    else:
+        median_size = float(sorted_sizes[mid])
+
+    per_sequence_stds = []
+    for segment_sizes in sequence_segment_sizes:
+        if not segment_sizes:
+            continue
+        mean_size = sum(segment_sizes) / len(segment_sizes)
+        variance = sum(
+            (size - mean_size) ** 2 for size in segment_sizes
+        ) / len(segment_sizes)
+        per_sequence_stds.append(math.sqrt(variance))
+
+    return {
+        "segment_size_min": float(sorted_sizes[0]),
+        "segment_size_median": float(median_size),
+        "segment_size_max": float(sorted_sizes[-1]),
+        "segment_size_std_mean": float(sum(per_sequence_stds) / len(per_sequence_stds)),
+    }
+
