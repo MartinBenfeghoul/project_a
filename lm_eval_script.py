@@ -248,6 +248,7 @@ def main(args):
         "loss_func": args.loss_func,
         "num_epochs": args.num_epochs,
         "meta_weights_path": args.meta_weights_path,
+        "value_mlp_weights_path": args.value_mlp_weights_path,
         "un_rope": args.un_rope,
         "rope_theta": rope_theta,
         "global_compression": args.global_compression,
@@ -503,6 +504,12 @@ def parse_args():
     parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
+    parser.add_argument(
+        "--value_mlp_weights_path",
+        type=str,
+        default=None,
+        help="Path to plain pretrained value-cache MLP weights from train_value_mlps.py.",
+    )
     parser.add_argument(
         "--override_target_perc",
         action="store_true",
