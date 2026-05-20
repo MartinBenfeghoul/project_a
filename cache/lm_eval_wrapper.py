@@ -26,16 +26,26 @@ class CompressedCacheHFLM(HFLM):
         self._value_cache_kwargs = value_cache_kwargs
         self._eviction_keep_ratio = eviction_keep_ratio
         self._logger = logger
+        self._previous_value_mlps = None
 
     def _make_cache(self, cache_context=None):
+        value_cache_kwargs = dict(self._value_cache_kwargs)
+        if value_cache_kwargs.get("prev_sample_init"):
+            value_cache_kwargs["previous_sample_mlps"] = self._previous_value_mlps
         return CompressedCache(
             config=self.model.config,
             key_cache_kwargs=self._key_cache_kwargs,
-            value_cache_kwargs=self._value_cache_kwargs,
+            value_cache_kwargs=value_cache_kwargs,
             cache_context=cache_context,
             eviction_keep_ratio=self._eviction_keep_ratio,
             verbose=False,
         )
+
+    def _remember_value_mlps(self, cache):
+        if self._value_cache_kwargs.get("prev_sample_init"):
+            get_mlps = getattr(cache.value_cache, "get_layer_mlps", None)
+            if callable(get_mlps):
+                self._previous_value_mlps = get_mlps()
 
     def generate_until(self, requests, disable_tqdm=False):
         self._current_task_name = requests[0].task_name if requests else None
@@ -58,14 +68,18 @@ class CompressedCacheHFLM(HFLM):
                 return self.model(
                     input_ids=inps, attention_mask=attn_mask, labels=labels
                 ).logits
-            return self.model(inps, past_key_values=self._make_cache()).logits
+            cache = self._make_cache()
+            output = self.model(inps, past_key_values=cache)
+            self._remember_value_mlps(cache)
+            return output.logits
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         self._logger.recorded_cr = False
         self._logger.recorded_k_timing = False
         task_name = getattr(self, "_current_task_name", None)
         cache_context = {"task_name": task_name} if task_name is not None else None
-        generation_kwargs["past_key_values"] = self._make_cache(cache_context)
+        cache = self._make_cache(cache_context)
+        generation_kwargs["past_key_values"] = cache
         generation_kwargs["temperature"] = generation_kwargs.get(
             "temperature", 0.0
         )
@@ -86,10 +100,12 @@ class CompressedCacheHFLM(HFLM):
             dtype=self.mixed_precision_dtype,
             enabled=self.mixed_precision_dtype is not None,
         ):
-            return self.model.generate(
+            output = self.model.generate(
                 input_ids=context,
                 max_length=max_length,
                 stopping_criteria=stopping_criteria,
                 pad_token_id=self.tokenizer.pad_token_id,
                 **generation_kwargs,
             )
+        self._remember_value_mlps(cache)
+        return output

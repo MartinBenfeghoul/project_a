@@ -163,9 +163,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             if self.learned_init.has_weights:
                 self.mlp.load_state_dict(self.learned_init.weights)
 
-            if self.warm_start_mlp is not None:
-                self._apply_warm_start_mlp()
-
             if self.use_residual and self.W_linear_init is not None:
                 with torch.no_grad():
                     self.mlp.W_linear.copy_(
@@ -174,12 +171,13 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                         )
                     )
 
+            if self.warm_start_mlp is not None:
+                self._apply_warm_start_mlp()
+
     def _apply_warm_start_mlp(self) -> None:
         current_params = dict(self.mlp.named_parameters())
         with torch.no_grad():
             for name, param in self.warm_start_mlp.named_parameters():
-                if name == "W_linear":
-                    continue
                 current_params[name].copy_(param)
 
     def _encode_residuals(self, residuals):
@@ -520,6 +518,8 @@ class MLPValueCache(SingleTensorCache):
         freeze_W_linear: bool = True,
         zero_init_mlp_last_layer: bool = False,
         prev_layer_init: bool = False,
+        prev_sample_init: bool = False,
+        previous_sample_mlps: list[MLP | None] | None = None,
         input_layernorm: bool = False,
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
@@ -560,6 +560,8 @@ class MLPValueCache(SingleTensorCache):
         self.freeze_W_linear = freeze_W_linear
         self.zero_init_mlp_last_layer = zero_init_mlp_last_layer
         self.prev_layer_init = prev_layer_init
+        self.prev_sample_init = prev_sample_init
+        self.previous_sample_mlps = previous_sample_mlps
         self.input_layernorm = input_layernorm
 
         if use_residual and W_linear_per_layer is not None:
@@ -647,17 +649,36 @@ class MLPValueCache(SingleTensorCache):
             freeze_W_linear=self.freeze_W_linear,
             zero_init_mlp_last_layer=self.zero_init_mlp_last_layer,
             input_layernorm=self.input_layernorm,
-            warm_start_mlp=self._previous_layer_mlp(layer_idx),
+            warm_start_mlp=self._warm_start_mlp(layer_idx),
             target_cr=self.target_cr,
             turboquant_residuals=self.turboquant_residuals,
             compressor_bits=self.compressor_bits,
             key_l2_error_weight=self.key_l2_error_weight,
         )
 
+    def _warm_start_mlp(self, layer_idx: int) -> MLP | None:
+        if self._has_previous_sample_mlp(layer_idx):
+            return self.previous_sample_mlps[layer_idx]
+        return self._previous_layer_mlp(layer_idx)
+
+    def _has_previous_sample_mlp(self, layer_idx: int) -> bool:
+        return (
+            self.prev_sample_init
+            and self.previous_sample_mlps is not None
+            and layer_idx < len(self.previous_sample_mlps)
+            and self.previous_sample_mlps[layer_idx] is not None
+        )
+
     def _previous_layer_mlp(self, layer_idx: int) -> MLP | None:
         if not self.prev_layer_init or layer_idx == 0:
             return None
         return getattr(self.layers[layer_idx-1], "mlp", None)
+
+    def get_layer_mlps(self) -> list[MLP | None]:
+        return [
+            getattr(layer, "mlp", None)
+            for layer in self.layers
+        ]
 
     def _run_global_compression(self):
         all_errors = torch.cat(
