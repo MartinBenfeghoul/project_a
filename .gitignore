@@ -21,3 +21,6 @@ slurm
 AGENTS.md
 CLAUDE.md
 *.codex
+
+data/*
+figures/*
