@@ -227,9 +227,14 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     early_stopping_tol=self.early_stopping_tol,
                 )
                 with torch.no_grad():
-                    self.recon_mse = self.loss_func(self.mlp(keys), values).item()
+                    self.recon_mse = self.loss_func(
+                        self.mlp(keys), values
+                    ).item()
                 self.mlp_training_history.append(
-                    {"epoch": self.num_epochs, "value_recon_mse": self.recon_mse}
+                    {
+                        "epoch": self.num_epochs,
+                        "value_recon_mse": self.recon_mse,
+                    }
                 )
             else:
                 all_params = [
@@ -542,7 +547,6 @@ class MLPValueCache(SingleTensorCache):
         self.target_perc = target_perc
         self.per_sequence = per_sequence
 
-
         self.lr = lr
 
         self.optimizer_cls = optimizer
@@ -672,7 +676,7 @@ class MLPValueCache(SingleTensorCache):
     def _previous_layer_mlp(self, layer_idx: int) -> MLP | None:
         if not self.prev_layer_init or layer_idx == 0:
             return None
-        return getattr(self.layers[layer_idx-1], "mlp", None)
+        return getattr(self.layers[layer_idx - 1], "mlp", None)
 
     def get_layer_mlps(self) -> list[MLP | None]:
         return [
@@ -720,7 +724,9 @@ class MLPValueCache(SingleTensorCache):
             value_states=value_states,
             cache_kwargs=cache_kwargs,
         )
-        self._collect_layer_training_history(layer_idx, value_states, cache_kwargs)
+        self._collect_layer_training_history(
+            layer_idx, value_states, cache_kwargs
+        )
 
         if self.global_compression and not self._global_compression_done:
             if layer_idx == len(self.num_layers_per_mlp) - 1:

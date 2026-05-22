@@ -19,12 +19,14 @@ class CompressedCacheHFLM(HFLM):
         value_cache_kwargs,
         logger,
         eviction_keep_ratio,
+        adjust_key_value_comp_ratio=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._key_cache_kwargs = key_cache_kwargs
         self._value_cache_kwargs = value_cache_kwargs
         self._eviction_keep_ratio = eviction_keep_ratio
+        self._adjust_key_value_comp_ratio = adjust_key_value_comp_ratio
         self._logger = logger
         self._previous_value_mlps = None
 
@@ -36,6 +38,7 @@ class CompressedCacheHFLM(HFLM):
             config=self.model.config,
             key_cache_kwargs=self._key_cache_kwargs,
             value_cache_kwargs=value_cache_kwargs,
+            adjust_key_value_comp_ratio=self._adjust_key_value_comp_ratio,
             cache_context=cache_context,
             eviction_keep_ratio=self._eviction_keep_ratio,
             verbose=False,
