@@ -114,6 +114,7 @@ class CompressedCache:
         self._key_recon_mses = []
         self.eviction_keep_ratio = kwargs.get("eviction_keep_ratio", 1.0)
         self.kept_positions = {}
+        self._deferred_value_updates = {}
 
     def set_value_importance(
         self,
@@ -199,25 +200,137 @@ class CompressedCache:
                 )
             if self.eviction_keep_ratio == 1.0:
                 cache_kwargs["value_importance"] = value_importance
-        if self.pass_keys_to_value_cache or self.log_key_recon_mse:
-            fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
-            if callable(fn) and getattr(self.key_cache, "prefill", False):
-                recon_keys = self.key_cache.get_reconstructed_keys_only(
-                    layer_idx
+        value_group_bounds = self._value_update_group_bounds(layer_idx)
+        if (
+            value_group_bounds is not None
+            and layer_idx != value_group_bounds[1]
+        ):
+            self._deferred_value_updates[layer_idx] = (
+                value_states,
+                dict(cache_kwargs),
+                key_states,
+            )
+            values = value_states
+        elif (
+            value_group_bounds is not None
+            and self._should_flush_deferred_value_updates(value_group_bounds)
+        ):
+            values = self._flush_deferred_value_updates(
+                layer_idx,
+                value_states,
+                cache_kwargs,
+                key_states,
+                value_group_bounds,
+            )
+        else:
+            if self.pass_keys_to_value_cache or self.log_key_recon_mse:
+                self._attach_keys_to_value_cache_kwargs(
+                    cache_kwargs,
+                    layer_idx,
+                    key_states,
+                    keys,
                 )
-                if self.log_key_recon_mse and recon_keys is not None:
-                    self._key_recon_mses.append(
-                        torch.nn.functional.mse_loss(
-                            recon_keys, key_states
-                        ).item()
-                    )
-                cache_kwargs["keys"] = recon_keys
-            else:
-                cache_kwargs["keys"] = keys
-        values = self.value_cache.update(value_states, layer_idx, cache_kwargs)
+            values = self.value_cache.update(
+                value_states, layer_idx, cache_kwargs
+            )
         if keep_positions is not None:
             return full_key_states, full_value_states
         return keys, values
+
+    def _value_update_group_bounds(
+        self,
+        layer_idx: int,
+    ) -> tuple[int, int] | None:
+        if not self.pass_keys_to_value_cache:
+            return None
+        if not callable(
+            getattr(self.value_cache, "update_prefill_group", None)
+        ):
+            return None
+        if not getattr(self.key_cache, "prefill", False):
+            return None
+
+        get_group_bounds = getattr(self.key_cache, "_get_group_bounds", None)
+        if not callable(get_group_bounds):
+            return None
+        return get_group_bounds(layer_idx)
+
+    def _should_flush_deferred_value_updates(
+        self,
+        bounds: tuple[int, int],
+    ) -> bool:
+        group_start, group_last_layer = bounds
+        expected_layers = range(group_start, group_last_layer)
+        deferred_layers = [
+            idx
+            for idx in expected_layers
+            if idx in self._deferred_value_updates
+        ]
+        if not deferred_layers:
+            return False
+        return True
+
+    def _attach_keys_to_value_cache_kwargs(
+        self,
+        cache_kwargs: dict[str, Any],
+        layer_idx: int,
+        key_states: torch.Tensor,
+        keys: torch.Tensor,
+    ) -> None:
+        fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
+        if callable(fn) and getattr(self.key_cache, "prefill", False):
+            recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
+            if self.log_key_recon_mse and recon_keys is not None:
+                self._key_recon_mses.append(
+                    torch.nn.functional.mse_loss(recon_keys, key_states).item()
+                )
+            cache_kwargs["keys"] = recon_keys
+        else:
+            cache_kwargs["keys"] = keys
+
+    def _flush_deferred_value_updates(
+        self,
+        layer_idx: int,
+        value_states: torch.Tensor,
+        cache_kwargs: dict[str, Any],
+        key_states: torch.Tensor,
+        bounds: tuple[int, int],
+    ) -> torch.Tensor:
+        group_start, group_last_layer = bounds
+        updates = []
+        for group_layer_idx in range(group_start, group_last_layer + 1):
+            if group_layer_idx == layer_idx:
+                continue
+            deferred_values, deferred_kwargs, original_keys = (
+                self._deferred_value_updates.pop(group_layer_idx)
+            )
+            recon_keys = self.key_cache.get_reconstructed_keys_only(
+                group_layer_idx
+            )
+            if self.log_key_recon_mse and recon_keys is not None:
+                self._key_recon_mses.append(
+                    torch.nn.functional.mse_loss(
+                        recon_keys, original_keys
+                    ).item()
+                )
+            deferred_kwargs["keys"] = recon_keys
+            updates.append((group_layer_idx, deferred_values, deferred_kwargs))
+
+        current_recon_keys = self.key_cache.get_reconstructed_keys_only(
+            layer_idx
+        )
+        if self.log_key_recon_mse and current_recon_keys is not None:
+            self._key_recon_mses.append(
+                torch.nn.functional.mse_loss(
+                    current_recon_keys, key_states
+                ).item()
+            )
+        current_kwargs = dict(cache_kwargs)
+        current_kwargs["keys"] = current_recon_keys
+        updates.append((layer_idx, value_states, current_kwargs))
+
+        results = self.value_cache.update_prefill_group(updates)
+        return results[layer_idx]
 
     @property
     def comp_ratio(self) -> float | None:

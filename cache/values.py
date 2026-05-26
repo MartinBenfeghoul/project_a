@@ -18,12 +18,16 @@ LOSS_FUNC = {"mse": mse_loss}
 OPTIMIZER = {"adam": Adam, "adamw": AdamW, "sgd": SGD, "lbfgs": LBFGS}
 
 
-@torch.compile(dynamic=True)
-def _compiled_train_step(mlp, keys, values, loss_func):
+def _eager_train_step(mlp, keys, values, loss_func):
     v_hat = mlp(keys)
     loss = loss_func(v_hat, values)
     loss.backward()
     return loss.detach()
+
+
+@torch.compile(dynamic=True)
+def _compiled_train_step(mlp, keys, values, loss_func):
+    return _eager_train_step(mlp, keys, values, loss_func)
 
 
 class MLPValueLayer(SingleTensorDynamicLayer):
@@ -207,7 +211,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         dtype_size = torch.finfo(dtype).bits / 8
         return num_stored * head_dim * dtype_size
 
-    def train_mlp(self, keys: torch.Tensor) -> None:
+    def train_mlp(
+        self,
+        keys: torch.Tensor,
+        use_compiled_train_step: bool = True,
+    ) -> None:
         self.mlp_training_history = []
         if self.linear_only:
             return
@@ -243,12 +251,19 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     if not (self.freeze_W_linear and name == "W_linear")
                 ]
                 loss_val = float("inf")
+                train_step = (
+                    _compiled_train_step
+                    if use_compiled_train_step
+                    else _eager_train_step
+                )
                 if self.optimizer_cls is LBFGS:
                     optimizer = LBFGS(all_params, lr=self.lr, max_iter=20, history_size=10)
 
                     def closure():
                         optimizer.zero_grad()
-                        return _compiled_train_step(self.mlp, keys, values, self.loss_func)
+                        return train_step(
+                            self.mlp, keys, values, self.loss_func
+                        )
 
                     for epoch_idx in range(self.num_epochs):
                         loss = optimizer.step(closure)
@@ -268,7 +283,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     for epoch_idx in range(self.num_epochs):
                         optimizer.zero_grad()
                         # keys/values shape: [num_sequences, num_head, num_token, head_dim]
-                        loss_val = _compiled_train_step(
+                        loss_val = train_step(
                             self.mlp, keys, values, self.loss_func
                         ).item()
                         optimizer.step()
@@ -428,6 +443,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self,
         value_states: torch.Tensor,
         cache_kwargs: dict[str, Any] | None = None,
+        use_compiled_train_step: bool = True,
     ) -> torch.Tensor:
 
         if cache_kwargs is None or "keys" not in cache_kwargs:
@@ -449,7 +465,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         if self.prefill:
             if self.target_cr and not self.linear_only:
                 self.compute_new_perc(keys_for_mlp)
-            self.train_mlp(keys_for_mlp)
+            self.train_mlp(
+                keys_for_mlp,
+                use_compiled_train_step=use_compiled_train_step,
+            )
             self.compress(
                 keys_for_mlp,
                 value_importance=cache_kwargs.get("value_importance"),
@@ -619,6 +638,11 @@ class MLPValueCache(SingleTensorCache):
             else LearnedInit.empty()
         )
 
+    def _ensure_layers(self, layer_idx: int) -> None:
+        while len(self.layers) <= layer_idx:
+            new_idx = len(self.layers)
+            self.layers.append(self._build_layer(new_idx))
+
     def _build_layer(self, layer_idx: int) -> MLPValueLayer:
         learned_init = self.learned_init.for_layer(layer_idx)
         checkpoint_has_w_linear = (
@@ -716,13 +740,21 @@ class MLPValueCache(SingleTensorCache):
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
-        while len(self.layers) <= layer_idx:
-            new_idx = len(self.layers)
-            self.layers.append(self._build_layer(new_idx))
+        return self._update_one(value_states, layer_idx, cache_kwargs)
 
-        values = self.layers[layer_idx].update(
+    def _update_one(
+        self,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: dict[str, Any] | None = None,
+        use_compiled_train_step: bool = True,
+    ) -> torch.Tensor:
+        self._ensure_layers(layer_idx)
+        layer = self.layers[layer_idx]
+        values = layer.update(
             value_states=value_states,
             cache_kwargs=cache_kwargs,
+            use_compiled_train_step=use_compiled_train_step,
         )
         self._collect_layer_training_history(
             layer_idx, value_states, cache_kwargs
@@ -733,6 +765,20 @@ class MLPValueCache(SingleTensorCache):
                 self._run_global_compression()
 
         return values
+
+    def update_prefill_group(
+        self,
+        updates: list[tuple[int, torch.Tensor, dict[str, Any] | None]],
+    ) -> dict[int, torch.Tensor]:
+        return {
+            layer_idx: self._update_one(
+                value_states,
+                layer_idx,
+                cache_kwargs,
+                use_compiled_train_step=False,
+            )
+            for layer_idx, value_states, cache_kwargs in updates
+        }
 
     def _collect_layer_training_history(
         self,
