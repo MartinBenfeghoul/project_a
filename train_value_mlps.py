@@ -292,7 +292,8 @@ def train(args):
                 },
             }
         )
-    output_path = "checkpoints/value_mlps/value_mlps" + f"_{args.max_batches}batches_{args.num_epochs}epochs_{args.seq_len}seqlen.pt"
+    model_name = args.model_name.replace("/", "--")
+    output_path = f"checkpoints/value_mlps/{model_name}/value_mlps_{args.max_batches}batches_{args.num_epochs}epochs_{args.seq_len}seqlen.pt"
     save_checkpoint(output_path, mlps, args, layers, metrics)
     if wandb_run is not None:
         wandb_run.log({f"train/final_{k}": v for k, v in metrics.items()})
