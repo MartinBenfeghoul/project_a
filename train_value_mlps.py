@@ -309,14 +309,14 @@ def build_arg_parser():
         default="mistralai/Mistral-7B-Instruct-v0.3",
     )
     parser.add_argument("--seq_len", type=int, default=4096)
-    parser.add_argument("--max_batches", type=int, default=1)
-    parser.add_argument("--val_batches", type=int, default=0, help="Number of batches for validation.")
+    parser.add_argument("--max_batches", type=int, default=32)
+    parser.add_argument("--val_batches", type=int, default=2, help="Number of batches for validation.")
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--num_epochs", type=int, default=200)
+    parser.add_argument("--num_epochs", type=int, default=25)
     parser.add_argument(
         "--dtype",
         choices=["float16", "bfloat16", "float32"],
-        default="bfloat16",
+        default="float32",
     )
     parser.add_argument("--use_wandb", action="store_true")
     return parser
