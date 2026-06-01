@@ -314,8 +314,7 @@ def run_condition(
     output_dir: Path,
 ) -> tuple[dict[str, Any], Path]:
     logger = MetricLogger()
-
-    rope_theta = getattr(model.config, "rope_theta")
+    rope_theta = model.config.rope_parameters.get("rope_theta", 500000.0)
     num_layers = model.config.num_hidden_layers
     num_kv_heads = model.config.num_key_value_heads
     key_cache_kwargs, value_cache_kwargs = make_cache_kwargs(
@@ -336,6 +335,7 @@ def run_condition(
             truncation=False,
             trust_remote_code=True,
         )
+        tm = TaskManager(metadata={"tokenizer": args.model_name})
         results = evaluator.simple_evaluate(
             model=lm,
             gen_kwargs=GEN_KWARGS,
@@ -344,6 +344,7 @@ def run_condition(
             batch_size=1,
             max_batch_size=1,
             device=get_device(lm),
+            task_manager=tm,
             limit=args.limit,
         )
         cr_values = logger.get_log_list("crs")

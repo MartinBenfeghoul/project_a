@@ -92,17 +92,25 @@ class MLPPredictionLayer(SingleTensorDynamicLayer):
         cache_kwargs = cache_kwargs or {}
         if self.source == "current_keys":
             source = cache_kwargs.get("current_keys")
+            if source is None:
+                return None
             source = self._undo_rope(source, cache_kwargs, self.prefill, self.compressed_len)
         elif self.source == "current_values":
             source = cache_kwargs.get("current_values")
         elif self.source == "prev_keys":
             source = cache_kwargs.get("prev_layer_keys")
+            if source is None:
+                return None
             source = self._undo_rope(source, cache_kwargs, self.prefill, self.compressed_len)
         elif self.source == "prev_values":
             source = cache_kwargs.get("prev_layer_values")
+            if source is None:
+                return None
         elif self.source == "prev_kv":
             prev_keys = cache_kwargs.get("prev_layer_keys")
             prev_values = cache_kwargs.get("prev_layer_values")
+            if prev_keys is None or prev_values is None:
+                return None
             prev_keys = self._undo_rope(prev_keys, cache_kwargs, self.prefill, self.compressed_len)
             source = torch.cat([prev_keys, prev_values], dim=-1)
         else:
