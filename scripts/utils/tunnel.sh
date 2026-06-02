@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=martin_dev
-#SBATCH --partition=agent-long
+#SBATCH --partition=agent-long,agent-long-15
 #SBATCH --gres=gpu:1
 #SBATCH --time=1-00:00:00
 

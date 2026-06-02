@@ -1028,11 +1028,16 @@ class KMeansMixin:
                 kmeans_cluster_sequences,
                 **cluster_kwargs,
             )
+            self._cluster_eta = _scatter_eta_from_grouped
         else:
             self._cluster_sequences = partial(
                 ksubspaces_cluster_sequences,
                 subspace_rank=self.ksubspaces_rank,
                 **cluster_kwargs,
+            )
+            self._cluster_eta = partial(
+                _subspace_eta_from_grouped,
+                subspace_rank=self.ksubspaces_rank,
             )
 
     def _get_cluster_count(self, seq_len: int) -> int:
@@ -1041,19 +1046,6 @@ class KMeansMixin:
         else:
             cluster_count = self.n_clusters
         return max(1, min(cluster_count, seq_len))
-
-    def _cluster_eta(
-        self,
-        grouped_features: torch.Tensor,
-        segment_ranges: list[list[tuple[int, int]]],
-    ) -> torch.Tensor:
-        if self.kmeans_algorithm == "ksubspaces":
-            return _subspace_eta_from_grouped(
-                grouped_features,
-                segment_ranges,
-                self.ksubspaces_rank,
-            )
-        return _scatter_eta_from_grouped(grouped_features, segment_ranges)
 
 
 class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
