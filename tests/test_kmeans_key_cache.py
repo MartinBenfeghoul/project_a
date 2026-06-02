@@ -11,6 +11,7 @@ def build_cache(**kwargs):
         kmeans_cluster_size=2.0,
         kmeans_n_iter=4,
         local_window=0,
+        unrope_keys=False,
         **kwargs,
     )
 
@@ -51,6 +52,19 @@ def test_kmeans_per_head_roundtrip():
     prefill_keys = torch.randn(2, 3, 6, 4)
     decode_keys = torch.randn(2, 3, 1, 4)
     cache = build_cache(kmeans_per_head=True)
+
+    run_roundtrip(cache, prefill_keys, decode_keys)
+
+
+def test_ksubspaces_per_head_roundtrip():
+    torch.manual_seed(3)
+    prefill_keys = torch.randn(2, 3, 6, 4)
+    decode_keys = torch.randn(2, 3, 1, 4)
+    cache = build_cache(
+        kmeans_algorithm="ksubspaces",
+        ksubspaces_rank=1,
+        kmeans_per_head=True,
+    )
 
     run_roundtrip(cache, prefill_keys, decode_keys)
 

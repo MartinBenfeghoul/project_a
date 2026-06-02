@@ -95,6 +95,8 @@ def main(args):
         "kmeans_n_iter": args.kmeans_n_iter,
         "kmeans_init": args.kmeans_init,
         "kmeans_dtype": args.kmeans_dtype,
+        "kmeans_algorithm": args.kmeans_algorithm,
+        "ksubspaces_rank": args.ksubspaces_rank,
         "kmeans_avg_heads": args.kmeans_avg_heads,
         "kmeans_per_head": args.kmeans_per_head,
         "layer_group_size": args.xkv_layer_group_size,
@@ -345,6 +347,13 @@ def parse_args():
         default=None,
     )
     parser.add_argument("--kmeans_n_iter", type=int, default=3)
+    parser.add_argument(
+        "--kmeans_algorithm",
+        type=str,
+        default="kmeans",
+        choices=["kmeans", "ksubspaces"],
+    )
+    parser.add_argument("--ksubspaces_rank", type=int, default=1)
     parser.add_argument(
         "--kmeans_init",
         type=str,

@@ -62,6 +62,8 @@ KEY_CONFIGS = [
     "xkv_layer_group_size",
     "kmeans_cluster_size",
     "kmeans_n_iter",
+    "kmeans_algorithm",
+    "ksubspaces_rank",
     "kmeans_init",
     "kmeans_dtype",
     "kmeans_avg_heads",

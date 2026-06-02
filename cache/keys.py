@@ -1,6 +1,7 @@
 import math
 import time
 import warnings
+from functools import partial
 from typing import Any
 
 import torch
@@ -19,6 +20,7 @@ from utils.segmentation import (
     group_keys_by_cluster,
     group_sequences_by_cluster,
     kmeans_cluster_sequences,
+    ksubspaces_cluster_sequences,
     restore_grouped_keys_order,
     restore_grouped_sequences_order,
 )
@@ -95,6 +97,52 @@ def _scatter_eta_from_grouped(
         denom = float(frob_sq.item())
         eta_values[batch_idx] = (
             float(scatter.item()) / denom if denom > 0 else 0.0
+        )
+    return eta_values
+
+
+def _subspace_eta_from_grouped(
+    grouped_features: torch.Tensor,
+    segment_ranges: list[list[tuple[int, int]]],
+    subspace_rank: int,
+) -> torch.Tensor:
+    if grouped_features.dim() != 3:
+        raise ValueError(
+            "Expected grouped_features with shape [batch, seq_len, dim]."
+        )
+    if len(segment_ranges) != grouped_features.size(0):
+        raise ValueError("segment_ranges must have one entry per batch item.")
+    if subspace_rank < 0:
+        raise ValueError("subspace_rank must be non-negative.")
+
+    eta_values = torch.zeros(
+        grouped_features.size(0),
+        dtype=torch.float32,
+        device=grouped_features.device,
+    )
+    for batch_idx, batch_ranges in enumerate(segment_ranges):
+        batch_features = grouped_features[batch_idx].to(dtype=torch.float32)
+        if batch_features.size(0) == 0:
+            continue
+
+        frob_sq = batch_features.pow(2).sum()
+        residual = batch_features.new_zeros(())
+        for start_idx, end_idx in batch_ranges:
+            cluster = batch_features[start_idx:end_idx]
+            if cluster.numel() == 0:
+                continue
+
+            centered = cluster - cluster.mean(dim=0, keepdim=True)
+            total = centered.pow(2).sum()
+            if subspace_rank > 0 and cluster.size(0) > 1:
+                singular_values = torch.linalg.svdvals(centered)
+                rank = min(subspace_rank, singular_values.size(0))
+                total = total - singular_values[:rank].pow(2).sum()
+            residual = residual + total.clamp_min(0)
+
+        denom = float(frob_sq.item())
+        eta_values[batch_idx] = (
+            float(residual.item()) / denom if denom > 0 else 0.0
         )
     return eta_values
 
@@ -941,11 +989,19 @@ class KMeansMixin:
         kmeans_n_iter: int = 8,
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
+        kmeans_algorithm: str = "kmeans",
+        ksubspaces_rank: int = 1,
     ):
         if n_clusters <= 0:
             raise ValueError("n_clusters must be positive.")
         if kmeans_cluster_size is not None and kmeans_cluster_size <= 0:
             raise ValueError("kmeans_cluster_size must be positive.")
+        if kmeans_algorithm not in {"kmeans", "ksubspaces"}:
+            raise ValueError(
+                "kmeans_algorithm must be one of 'kmeans' or 'ksubspaces'."
+            )
+        if ksubspaces_rank < 0:
+            raise ValueError("ksubspaces_rank must be non-negative.")
         if isinstance(kmeans_dtype, str):
             try:
                 kmeans_dtype = getattr(torch, kmeans_dtype)
@@ -960,6 +1016,24 @@ class KMeansMixin:
         self.kmeans_n = kmeans_n_iter
         self.kmeans_init = kmeans_init
         self.kmeans_dtype = kmeans_dtype
+        self.kmeans_algorithm = kmeans_algorithm
+        self.ksubspaces_rank = ksubspaces_rank
+        cluster_kwargs = {
+            "n_iter": max(1, self.kmeans_n),
+            "kmeans_init": self.kmeans_init,
+            "dtype": self.kmeans_dtype,
+        }
+        if self.kmeans_algorithm == "kmeans":
+            self._cluster_sequences = partial(
+                kmeans_cluster_sequences,
+                **cluster_kwargs,
+            )
+        else:
+            self._cluster_sequences = partial(
+                ksubspaces_cluster_sequences,
+                subspace_rank=self.ksubspaces_rank,
+                **cluster_kwargs,
+            )
 
     def _get_cluster_count(self, seq_len: int) -> int:
         if self.kmeans_cluster_size is not None:
@@ -967,6 +1041,19 @@ class KMeansMixin:
         else:
             cluster_count = self.n_clusters
         return max(1, min(cluster_count, seq_len))
+
+    def _cluster_eta(
+        self,
+        grouped_features: torch.Tensor,
+        segment_ranges: list[list[tuple[int, int]]],
+    ) -> torch.Tensor:
+        if self.kmeans_algorithm == "ksubspaces":
+            return _subspace_eta_from_grouped(
+                grouped_features,
+                segment_ranges,
+                self.ksubspaces_rank,
+            )
+        return _scatter_eta_from_grouped(grouped_features, segment_ranges)
 
 
 class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
@@ -978,6 +1065,8 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
         kmeans_n_iter: int = 8,
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
+        kmeans_algorithm: str = "kmeans",
+        ksubspaces_rank: int = 1,
         kmeans_avg_heads: bool = False,
         kmeans_per_head: bool = True,
         **kwargs,
@@ -989,6 +1078,8 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
             kmeans_n_iter=kmeans_n_iter,
             kmeans_init=kmeans_init,
             kmeans_dtype=kmeans_dtype,
+            kmeans_algorithm=kmeans_algorithm,
+            ksubspaces_rank=ksubspaces_rank,
         )
         self.kmeans_avg_heads = kmeans_avg_heads
         self.kmeans_per_head = kmeans_per_head
@@ -1024,13 +1115,7 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
                 batch_size * num_heads, seq_len, head_dim
             )
             cluster_count = self._get_cluster_count(seq_len)
-            assignments = kmeans_cluster_sequences(
-                flat_prefix,
-                n_clusters=cluster_count,
-                n_iter=max(1, self.kmeans_n),
-                kmeans_init=self.kmeans_init,
-                dtype=self.kmeans_dtype,
-            )
+            assignments = self._cluster_sequences(flat_prefix, cluster_count)
             grouped_prefix, _, inverse_permutation = group_sequences_by_cluster(
                 flat_prefix, assignments
             )
@@ -1043,7 +1128,7 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
                 assignments.reshape(batch_size, num_heads, seq_len),
                 inverse_permutation.reshape(batch_size, num_heads, seq_len),
                 segment_ranges,
-                _scatter_eta_from_grouped(
+                self._cluster_eta(
                     grouped_prefix,
                     segment_ranges,
                 ).reshape(batch_size, num_heads),
@@ -1056,13 +1141,7 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
                 batch_size, seq_len, -1
             )
         cluster_count = self._get_cluster_count(seq_len)
-        assignments = kmeans_cluster_sequences(
-            token_features,
-            n_clusters=cluster_count,
-            n_iter=max(1, self.kmeans_n),
-            kmeans_init=self.kmeans_init,
-            dtype=self.kmeans_dtype,
-        )
+        assignments = self._cluster_sequences(token_features, cluster_count)
         grouped_features, _, _ = group_sequences_by_cluster(
             token_features, assignments
         )
@@ -1078,7 +1157,7 @@ class KMeansLRKCache(KMeansMixin, DecomposedKeysCache):
             assignments,
             inverse_permutation,
             segment_ranges,
-            _scatter_eta_from_grouped(grouped_features, segment_ranges),
+            self._cluster_eta(grouped_features, segment_ranges),
         )
 
     def _decompose_keys(
@@ -1324,6 +1403,8 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
         kmeans_n_iter: int = 8,
         kmeans_init: str = "infllm",
         kmeans_dtype: torch.dtype | str = torch.float32,
+        kmeans_algorithm: str = "kmeans",
+        ksubspaces_rank: int = 1,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -1333,6 +1414,8 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
             kmeans_n_iter=kmeans_n_iter,
             kmeans_init=kmeans_init,
             kmeans_dtype=kmeans_dtype,
+            kmeans_algorithm=kmeans_algorithm,
+            ksubspaces_rank=ksubspaces_rank,
         )
 
     def _cluster_group_prefix(self, group_prefix):
@@ -1349,13 +1432,7 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
             )
 
         cluster_count = self._get_cluster_count(seq_len)
-        assignments = kmeans_cluster_sequences(
-            group_prefix,
-            n_clusters=cluster_count,
-            n_iter=max(1, self.kmeans_n),
-            kmeans_init=self.kmeans_init,
-            dtype=self.kmeans_dtype,
-        )
+        assignments = self._cluster_sequences(group_prefix, cluster_count)
         grouped_prefix, _, inverse_permutation = group_sequences_by_cluster(
             group_prefix, assignments
         )
@@ -1367,7 +1444,7 @@ class KMeansXKVKeysCache(KMeansMixin, XKVKeysCache):
             grouped_prefix,
             inverse_permutation,
             segment_ranges,
-            _scatter_eta_from_grouped(grouped_prefix, segment_ranges),
+            self._cluster_eta(grouped_prefix, segment_ranges),
         )
 
     def _decompose_keys(self, layer_idx, cache_kwargs=None):

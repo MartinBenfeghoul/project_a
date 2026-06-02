@@ -123,6 +123,119 @@ def kmeans_cluster_sequences(
     return labels
 
 
+def _fit_subspaces(
+    features: torch.Tensor,
+    labels: torch.Tensor,
+    centers: torch.Tensor,
+    bases: torch.Tensor,
+    subspace_rank: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    new_centers = centers.clone()
+    new_bases = torch.zeros_like(bases)
+    for batch_idx in range(features.size(0)):
+        for cluster_idx in range(centers.size(1)):
+            cluster = features[batch_idx, labels[batch_idx] == cluster_idx]
+            if cluster.numel() == 0:
+                new_bases[batch_idx, cluster_idx] = bases[
+                    batch_idx, cluster_idx
+                ]
+                continue
+
+            center = cluster.mean(dim=0)
+            new_centers[batch_idx, cluster_idx] = center
+            if subspace_rank == 0 or cluster.size(0) <= 1:
+                continue
+
+            centered = cluster - center
+            _, _, vh = torch.linalg.svd(centered, full_matrices=False)
+            rank = min(subspace_rank, vh.size(0))
+            new_bases[batch_idx, cluster_idx, :, :rank] = vh[:rank].T
+    return new_centers, new_bases
+
+
+def _subspace_distances(
+    features: torch.Tensor,
+    centers: torch.Tensor,
+    bases: torch.Tensor,
+) -> torch.Tensor:
+    distances = features.new_empty(
+        features.size(0), features.size(1), centers.size(1)
+    )
+    for cluster_idx in range(centers.size(1)):
+        residual = features - centers[:, cluster_idx].unsqueeze(1)
+        distance = residual.square().sum(dim=-1)
+        if bases.size(-1) > 0:
+            projection = torch.bmm(residual, bases[:, cluster_idx])
+            distance = distance - projection.square().sum(dim=-1)
+        distances[:, :, cluster_idx] = distance.clamp_min(0)
+    return distances
+
+
+def ksubspaces_cluster_sequences(
+    features: torch.Tensor,
+    n_clusters: int,
+    n_iter: int = 8,
+    kmeans_init: str = "infllm",
+    dtype: torch.dtype = torch.float32,
+    subspace_rank: int = 1,
+) -> torch.Tensor:
+    """Cluster per-sequence token features with a small batched K-subspaces loop."""
+    if features.dim() != 3:
+        raise ValueError(
+            "ksubspaces_cluster_sequences expects features with shape "
+            "[batch, seq_len, feature_dim]."
+        )
+    if subspace_rank < 0:
+        raise ValueError("subspace_rank must be non-negative.")
+
+    batch_size, seq_len, feature_dim = features.shape
+    if seq_len == 0:
+        return torch.empty(
+            batch_size, 0, dtype=torch.long, device=features.device
+        )
+
+    effective_clusters = max(1, min(int(n_clusters), seq_len))
+    if effective_clusters == 1:
+        return torch.zeros(
+            batch_size, seq_len, dtype=torch.long, device=features.device
+        )
+
+    work_features = features.to(dtype=dtype)
+    try:
+        init_fn = KMEANS_INIT_METHODS[kmeans_init]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown kmeans init method: {kmeans_init}. "
+            f"Available methods: {sorted(KMEANS_INIT_METHODS)}"
+        ) from exc
+
+    centers = init_fn(work_features, effective_clusters)
+    labels = torch.cdist(work_features, centers).argmin(dim=-1)
+    effective_rank = min(int(subspace_rank), feature_dim)
+    bases = work_features.new_zeros(
+        batch_size, effective_clusters, feature_dim, effective_rank
+    )
+
+    for _ in range(n_iter):
+        centers, bases = _fit_subspaces(
+            work_features,
+            labels,
+            centers,
+            bases,
+            effective_rank,
+        )
+        new_labels = _subspace_distances(
+            work_features,
+            centers,
+            bases,
+        ).argmin(dim=-1)
+        if torch.equal(new_labels, labels):
+            break
+        labels = new_labels
+
+    return labels
+
+
 def build_cluster_segment_ranges(
     cluster_assignments: torch.Tensor,
     n_clusters: int | None = None,

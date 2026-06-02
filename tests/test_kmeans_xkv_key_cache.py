@@ -6,17 +6,19 @@ from utils.turboquant import is_quantised_factor
 
 
 def build_cache(**kwargs):
-    return KMeansXKVKeysCache(
-        decomposition_method="svd",
-        rank_selection="energy",
-        energy_threshold=1.0,
-        kmeans_cluster_size=2.0,
-        kmeans_n_iter=4,
-        local_window=0,
-        layer_group_size=2,
-        num_layers=3,
-        **kwargs,
-    )
+    cache_kwargs = {
+        "decomposition_method": "svd",
+        "rank_selection": "energy",
+        "energy_threshold": 1.0,
+        "kmeans_cluster_size": 2.0,
+        "kmeans_n_iter": 4,
+        "local_window": 0,
+        "layer_group_size": 2,
+        "num_layers": 3,
+        "unrope_keys": False,
+    }
+    cache_kwargs.update(kwargs)
+    return KMeansXKVKeysCache(**cache_kwargs)
 
 
 def test_kmeans_xkv_is_registered():
@@ -45,6 +47,34 @@ def test_kmeans_xkv_roundtrip_supports_quantised_factors():
     recon_keys = cache.get_reconstructed_keys_only(0)
     assert recon_keys.shape == prefill_keys[0].shape
     assert torch.isfinite(recon_keys).all()
+
+
+def test_ksubspaces_xkv_roundtrip():
+    torch.manual_seed(3)
+    cache = build_cache(kmeans_algorithm="ksubspaces", ksubspaces_rank=1)
+    prefill_keys = [torch.randn(2, 3, 4, 5) for _ in range(2)]
+    decode_keys = [torch.randn(2, 3, 1, 5) for _ in range(2)]
+
+    for layer_idx, key_states in enumerate(prefill_keys):
+        returned_keys = cache.update(key_states, layer_idx, cache_kwargs={})
+        torch.testing.assert_close(returned_keys, key_states)
+
+    cache.update_events()
+    cache_position = torch.tensor([prefill_keys[0].size(-2)], dtype=torch.long)
+
+    for layer_idx, key_states in enumerate(decode_keys):
+        recon_keys = cache.update(
+            key_states,
+            layer_idx,
+            cache_kwargs={"cache_position": cache_position},
+        )
+        expected_keys = torch.cat([prefill_keys[layer_idx], key_states], dim=-2)
+        torch.testing.assert_close(
+            recon_keys,
+            expected_keys,
+            atol=1e-4,
+            rtol=1e-4,
+        )
 
 
 def test_kmeans_xkv_waits_for_group_end_before_decomposing():
