@@ -99,5 +99,4 @@ class CompressedCacheHFLM(HFLM):
                 pad_token_id=self.tokenizer.pad_token_id,
                 **generation_kwargs,
             )
-        self._remember_value_mlps(cache)
         return output
