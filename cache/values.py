@@ -1,5 +1,5 @@
 from .base import SingleTensorCache, SingleTensorDynamicLayer
-from torch.optim import Adam, AdamW, SGD, LBFGS
+from torch.optim import Adam, AdamW, SGD
 from torch.nn.functional import mse_loss
 import torch
 from model.mlp import MLP
@@ -15,7 +15,7 @@ from utils.turboquant import init_compressor
 
 LOSS_FUNC = {"mse": mse_loss}
 
-OPTIMIZER = {"adam": Adam, "adamw": AdamW, "sgd": SGD, "lbfgs": LBFGS}
+OPTIMIZER = {"adam": Adam, "adamw": AdamW, "sgd": SGD}
 
 
 def _eager_train_step(mlp, keys, values, loss_func):
@@ -23,11 +23,6 @@ def _eager_train_step(mlp, keys, values, loss_func):
     loss = loss_func(v_hat, values)
     loss.backward()
     return loss.detach()
-
-
-@torch.compile(dynamic=True)
-def _compiled_train_step(mlp, keys, values, loss_func):
-    return _eager_train_step(mlp, keys, values, loss_func)
 
 
 class MLPValueLayer(SingleTensorDynamicLayer):
@@ -46,20 +41,14 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         learned_init: LearnedLayerInit | None = None,
         un_rope: bool = False,
         global_compression: bool = False,
-        normalise_keys: bool = False,
         use_residual: bool = False,
         intermediate_activation: str = "relu",
         W_linear_init: torch.Tensor | None = None,
         linear_only: bool = False,
-        early_stopping_tol: float | None = None,
         freeze_W_linear: bool = True,
-        zero_init_mlp_last_layer: bool = False,
-        input_layernorm: bool = False,
-        warm_start_mlp: MLP | None = None,
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
-        key_l2_error_weight: float = 0.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -79,15 +68,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.learned_init = learned_init or LearnedLayerInit()
 
         self.un_rope = un_rope
-        self.normalise_keys = normalise_keys
         self.use_residual = use_residual
         self.W_linear_init = W_linear_init
         self.linear_only = linear_only
-        self.early_stopping_tol = early_stopping_tol
         self.freeze_W_linear = freeze_W_linear
-        self.zero_init_mlp_last_layer = zero_init_mlp_last_layer
-        self.input_layernorm = input_layernorm
-        self.warm_start_mlp = warm_start_mlp
         self.intermediate_activation = intermediate_activation
 
         self.mlp = None
@@ -104,17 +88,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self._num_params = None
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
-        self.key_l2_error_weight = key_l2_error_weight
         self.compressor = None
         self.mlp_training_history = []
-
-    def _normalise_keys(self, keys: torch.Tensor) -> torch.Tensor:
-        if not self.normalise_keys:
-            return keys
-        if self.prefill:
-            self.key_mean = keys.mean(dim=2, keepdim=True)
-            self.key_std = keys.std(dim=2, keepdim=True).clamp(min=1e-6)
-        return (keys - self.key_mean) / self.key_std
 
     def lazy_initialization(self, value_states: torch.Tensor) -> None:
 
@@ -158,8 +133,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 use_residual=self.use_residual,
                 per_head_residual=per_head_residual,
                 intermediate_activation=self.intermediate_activation,
-                zero_init_last_layer=self.zero_init_mlp_last_layer,
-                input_layernorm=self.input_layernorm,
             ).to(device=value_states.device, dtype=value_states.dtype)
 
             self._num_params = sum(p.numel() for p in self.mlp.parameters())
@@ -174,15 +147,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                             device=value_states.device, dtype=value_states.dtype
                         )
                     )
-
-            if self.warm_start_mlp is not None:
-                self._apply_warm_start_mlp()
-
-    def _apply_warm_start_mlp(self) -> None:
-        current_params = dict(self.mlp.named_parameters())
-        with torch.no_grad():
-            for name, param in self.warm_start_mlp.named_parameters():
-                current_params[name].copy_(param)
 
     def _encode_residuals(self, residuals):
         if self.compressor is None:
@@ -214,7 +178,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
     def train_mlp(
         self,
         keys: torch.Tensor,
-        use_compiled_train_step: bool = True,
     ) -> None:
         self.mlp_training_history = []
         if self.linear_only:
@@ -232,7 +195,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     learned_init=self.learned_init,
                     use_residual=self.use_residual,
                     freeze_W_linear=self.freeze_W_linear,
-                    early_stopping_tol=self.early_stopping_tol,
                 )
                 with torch.no_grad():
                     self.recon_mse = self.loss_func(
@@ -250,53 +212,19 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     for name, p in self.mlp.named_parameters()
                     if not (self.freeze_W_linear and name == "W_linear")
                 ]
-                loss_val = float("inf")
-                train_step = (
-                    _compiled_train_step
-                    if use_compiled_train_step
-                    else _eager_train_step
-                )
-                if self.optimizer_cls is LBFGS:
-                    optimizer = LBFGS(all_params, lr=self.lr, max_iter=20, history_size=10)
+                use_fused = self.optimizer_cls is Adam and torch.cuda.is_available()
+                optimizer = self.optimizer_cls(all_params, lr=self.lr, fused=use_fused)
+                for epoch_idx in range(self.num_epochs):
+                    optimizer.zero_grad()
+                    # keys/values shape: [num_sequences, num_head, num_token, head_dim]
+                    loss_val = _eager_train_step(
+                        self.mlp, keys, values, self.loss_func
+                    ).item()
+                    optimizer.step()
+                    self.mlp_training_history.append(
+                        {"epoch": epoch_idx + 1, "value_recon_mse": loss_val}
+                    )
 
-                    def closure():
-                        optimizer.zero_grad()
-                        return train_step(
-                            self.mlp, keys, values, self.loss_func
-                        )
-
-                    for epoch_idx in range(self.num_epochs):
-                        loss = optimizer.step(closure)
-                        loss_val = loss.item()
-                        self.mlp_training_history.append(
-                            {"epoch": epoch_idx + 1, "value_recon_mse": loss_val}
-                        )
-                        if (
-                            self.early_stopping_tol is not None
-                            and loss_val < self.early_stopping_tol
-                        ):
-                            break
-                else:
-                    use_fused = self.optimizer_cls is Adam and torch.cuda.is_available()
-                    optimizer = self.optimizer_cls(all_params, lr=self.lr, fused=use_fused)
-                    prev_loss = float("inf")
-                    for epoch_idx in range(self.num_epochs):
-                        optimizer.zero_grad()
-                        # keys/values shape: [num_sequences, num_head, num_token, head_dim]
-                        loss_val = train_step(
-                            self.mlp, keys, values, self.loss_func
-                        ).item()
-                        optimizer.step()
-                        self.mlp_training_history.append(
-                            {"epoch": epoch_idx + 1, "value_recon_mse": loss_val}
-                        )
-                        improvement = (prev_loss - loss_val) / (prev_loss + 1e-8)
-                        if (
-                            self.early_stopping_tol is not None
-                            and 0 <= improvement < self.early_stopping_tol
-                        ):
-                            break
-                        prev_loss = loss_val
                 optimizer.zero_grad(set_to_none=True)
                 self.recon_mse = loss_val
 
@@ -333,29 +261,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         n_deltas = max(0, min(n_deltas, b * h * t))
         self.target_perc = 100 * (1 - (n_deltas / (b * h * t)))
 
-    def _score_errors(
-        self,
-        errors: torch.Tensor,
-        importance: torch.Tensor | None = None,
-        keys: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if self.key_l2_error_weight > 0:
-            key_l2 = keys.norm(p=2, dim=-1).to(
-                device=errors.device, dtype=errors.dtype
-            )
-            norm_scale = key_l2.mean(dim=(1, 2), keepdim=True).clamp(min=1e-8)
-            errors = errors * (norm_scale / key_l2.clamp(min=1e-8)).pow(self.key_l2_error_weight)
-
-        if importance is None:
-            return errors
-
-        importance = importance.to(device=errors.device, dtype=errors.dtype)
-
-        err_scale = errors.mean(dim=(1, 2), keepdim=True)
-        imp_scale = importance.mean(dim=(1, 2), keepdim=True)
-        return (errors / err_scale) + (importance / imp_scale)
-
-    def compress(self, keys: torch.Tensor, value_importance=None) -> None:
+    def compress(self, keys: torch.Tensor) -> None:
         self._B, self._H, self._T, _ = keys.shape
 
         if self.linear_only:
@@ -374,8 +280,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             dim=-1
         )
         self.compressed_len = self.tensor.shape[2]
-
-        errors = self._score_errors(errors, value_importance, keys=keys)
 
         if self.global_compression:
             self.errors = errors
@@ -443,7 +347,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self,
         value_states: torch.Tensor,
         cache_kwargs: dict[str, Any] | None = None,
-        use_compiled_train_step: bool = True,
     ) -> torch.Tensor:
 
         if cache_kwargs is None or "keys" not in cache_kwargs:
@@ -459,20 +362,13 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             )
         else:
             keys_for_mlp = keys
-        keys_for_mlp = self._normalise_keys(keys_for_mlp)
         values = super().update(value_states)
 
         if self.prefill:
             if self.target_cr and not self.linear_only:
                 self.compute_new_perc(keys_for_mlp)
-            self.train_mlp(
-                keys_for_mlp,
-                use_compiled_train_step=use_compiled_train_step,
-            )
-            self.compress(
-                keys_for_mlp,
-                value_importance=cache_kwargs.get("value_importance"),
-            )
+            self.train_mlp(keys_for_mlp)
+            self.compress(keys_for_mlp)
             self.prefill = False
             return values
         elif self.is_compressed:
@@ -533,22 +429,14 @@ class MLPValueCache(SingleTensorCache):
         un_rope: bool = False,
         rope_theta: float = 500_000.0,
         global_compression: bool = False,
-        normalise_keys: bool = False,
         use_residual: bool = False,
         W_linear_per_layer: list[torch.Tensor] | None = None,
         intermediate_activation: str = "relu",
         linear_only: bool = False,
-        early_stopping_tol: float | None = None,
         freeze_W_linear: bool = True,
-        zero_init_mlp_last_layer: bool = False,
-        prev_layer_init: bool = False,
-        prev_sample_init: bool = False,
-        previous_sample_mlps: list[MLP | None] | None = None,
-        input_layernorm: bool = False,
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
-        key_l2_error_weight: float = 0.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -574,29 +462,17 @@ class MLPValueCache(SingleTensorCache):
         self.un_rope = un_rope
         self.rope_theta = rope_theta
         self.global_compression = global_compression
-        self.normalise_keys = normalise_keys
         self.use_residual = use_residual
         self.W_linear_per_layer = W_linear_per_layer
         self.intermediate_activation = intermediate_activation
         self.linear_only = linear_only
-        self.early_stopping_tol = early_stopping_tol
         self.freeze_W_linear = freeze_W_linear
-        self.zero_init_mlp_last_layer = zero_init_mlp_last_layer
-        self.prev_layer_init = prev_layer_init
-        self.prev_sample_init = prev_sample_init
-        self.previous_sample_mlps = previous_sample_mlps
-        self.input_layernorm = input_layernorm
 
         if use_residual and W_linear_per_layer is not None:
             if not un_rope:
                 raise ValueError(
                     "use_residual with W_linear_per_layer initialisation requires un_rope=True."
                 )
-            if normalise_keys:
-                raise ValueError(
-                    "use_residual with W_linear_per_layer init is incompatible with normalise_keys=True."
-                )
-
         if linear_only:
             if W_linear_per_layer is None:
                 raise ValueError(
@@ -604,10 +480,6 @@ class MLPValueCache(SingleTensorCache):
                 )
             if not un_rope:
                 raise ValueError("linear_only requires un_rope=True.")
-            if normalise_keys:
-                raise ValueError(
-                    "linear_only is incompatible with normalise_keys=True."
-                )
             if global_compression:
                 raise ValueError(
                     "linear_only is incompatible with global_compression."
@@ -617,7 +489,6 @@ class MLPValueCache(SingleTensorCache):
         self.target_cr = target_cr
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
-        self.key_l2_error_weight = key_l2_error_weight
         self.mlp_log_events = []
 
         if meta_weights_path is not None and value_mlp_weights_path is not None:
@@ -664,7 +535,6 @@ class MLPValueCache(SingleTensorCache):
             un_rope=self.un_rope,
             rope_theta=self.rope_theta,
             global_compression=self.global_compression,
-            normalise_keys=self.normalise_keys,
             use_residual=self.use_residual,
             W_linear_init=(
                 self.W_linear_per_layer[layer_idx]
@@ -673,40 +543,11 @@ class MLPValueCache(SingleTensorCache):
             ),
             intermediate_activation=self.intermediate_activation,
             linear_only=self.linear_only,
-            early_stopping_tol=self.early_stopping_tol,
             freeze_W_linear=self.freeze_W_linear,
-            zero_init_mlp_last_layer=self.zero_init_mlp_last_layer,
-            input_layernorm=self.input_layernorm,
-            warm_start_mlp=self._warm_start_mlp(layer_idx),
             target_cr=self.target_cr,
             turboquant_residuals=self.turboquant_residuals,
             compressor_bits=self.compressor_bits,
-            key_l2_error_weight=self.key_l2_error_weight,
         )
-
-    def _warm_start_mlp(self, layer_idx: int) -> MLP | None:
-        if self._has_previous_sample_mlp(layer_idx):
-            return self.previous_sample_mlps[layer_idx]
-        return self._previous_layer_mlp(layer_idx)
-
-    def _has_previous_sample_mlp(self, layer_idx: int) -> bool:
-        return (
-            self.prev_sample_init
-            and self.previous_sample_mlps is not None
-            and layer_idx < len(self.previous_sample_mlps)
-            and self.previous_sample_mlps[layer_idx] is not None
-        )
-
-    def _previous_layer_mlp(self, layer_idx: int) -> MLP | None:
-        if not self.prev_layer_init or layer_idx == 0:
-            return None
-        return getattr(self.layers[layer_idx - 1], "mlp", None)
-
-    def get_layer_mlps(self) -> list[MLP | None]:
-        return [
-            getattr(layer, "mlp", None)
-            for layer in self.layers
-        ]
 
     def _run_global_compression(self):
         all_errors = torch.cat(
@@ -747,14 +588,12 @@ class MLPValueCache(SingleTensorCache):
         value_states: torch.Tensor,
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
-        use_compiled_train_step: bool = True,
     ) -> torch.Tensor:
         self._ensure_layers(layer_idx)
         layer = self.layers[layer_idx]
         values = layer.update(
             value_states=value_states,
             cache_kwargs=cache_kwargs,
-            use_compiled_train_step=use_compiled_train_step,
         )
         self._collect_layer_training_history(
             layer_idx, value_states, cache_kwargs
@@ -775,7 +614,6 @@ class MLPValueCache(SingleTensorCache):
                 value_states,
                 layer_idx,
                 cache_kwargs,
-                use_compiled_train_step=False,
             )
             for layer_idx, value_states, cache_kwargs in updates
         }

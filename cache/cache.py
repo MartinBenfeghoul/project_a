@@ -193,13 +193,7 @@ class CompressedCache:
         if self._cache_context:
             cache_kwargs = {**self._cache_context, **cache_kwargs}
         if layer_idx in self._temp_value_importance:
-            value_importance = self._temp_value_importance.pop(layer_idx)
-            if keep_positions is not None:
-                value_importance = value_importance.index_select(
-                    -1, keep_positions.to(device=value_importance.device)
-                )
-            if self.eviction_keep_ratio == 1.0:
-                cache_kwargs["value_importance"] = value_importance
+            self._temp_value_importance.pop(layer_idx)
         value_group_bounds = self._value_update_group_bounds(layer_idx)
         if (
             value_group_bounds is not None

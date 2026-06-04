@@ -24,8 +24,6 @@ class MLP(nn.Module):
         intermediate_activation: str = "relu",
         use_residual: bool = False,
         per_head_residual: bool = False,
-        zero_init_last_layer: bool = False,
-        input_layernorm: bool = False,
     ):
         super().__init__()
 
@@ -36,7 +34,6 @@ class MLP(nn.Module):
         self.batch_size = batch_size
         self.use_residual = use_residual
         self.per_head_residual = per_head_residual
-        self.input_layernorm = nn.LayerNorm(head_dim) if input_layernorm else None
 
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
@@ -67,10 +64,6 @@ class MLP(nn.Module):
             self.biases.append(b)
             curr_dim = out_dim
 
-        if zero_init_last_layer:
-            nn.init.zeros_(self.weights[-1])
-            nn.init.zeros_(self.biases[-1])
-
         if use_residual:
             if per_head_residual:
                 self.W_linear = nn.Parameter(
@@ -83,8 +76,6 @@ class MLP(nn.Module):
 
     def forward(self, x):
         # x: [B, H, T, D]
-        if self.input_layernorm is not None:
-            x = self.input_layernorm(x)
         x_in = x
         for i in range(self.num_layers):
             w = self.weights[i]

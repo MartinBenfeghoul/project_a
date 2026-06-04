@@ -1,3 +1,4 @@
+import math
 import time
 
 import numpy as np
@@ -98,10 +99,6 @@ def generate_run_name(config):
         f"seq{t.seq_len}_"
         f"steps{t.inner_steps}_"
         f"mlr{t.meta_lr}_"
-        f"ilr{t.inner_lr}_"
-        f"learnlr{t.get('learn_inner_lr', False)}_"
-        f"learnperc{t.get('learn_target_perc', False)}_"
-        f"gradaccum{t.grad_accum_steps}"
     )
 
 

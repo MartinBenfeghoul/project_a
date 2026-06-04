@@ -28,27 +28,17 @@ class CompressedCacheHFLM(HFLM):
         self._eviction_keep_ratio = eviction_keep_ratio
         self._adjust_key_value_comp_ratio = adjust_key_value_comp_ratio
         self._logger = logger
-        self._previous_value_mlps = None
 
     def _make_cache(self, cache_context=None):
-        value_cache_kwargs = dict(self._value_cache_kwargs)
-        if value_cache_kwargs.get("prev_sample_init"):
-            value_cache_kwargs["previous_sample_mlps"] = self._previous_value_mlps
         return CompressedCache(
             config=self.model.config,
             key_cache_kwargs=self._key_cache_kwargs,
-            value_cache_kwargs=value_cache_kwargs,
+            value_cache_kwargs=self._value_cache_kwargs,
             adjust_key_value_comp_ratio=self._adjust_key_value_comp_ratio,
             cache_context=cache_context,
             eviction_keep_ratio=self._eviction_keep_ratio,
             verbose=False,
         )
-
-    def _remember_value_mlps(self, cache):
-        if self._value_cache_kwargs.get("prev_sample_init"):
-            get_mlps = getattr(cache.value_cache, "get_layer_mlps", None)
-            if callable(get_mlps):
-                self._previous_value_mlps = get_mlps()
 
     def generate_until(self, requests, disable_tqdm=False):
         self._current_task_name = requests[0].task_name if requests else None
@@ -73,7 +63,6 @@ class CompressedCacheHFLM(HFLM):
                 ).logits
             cache = self._make_cache()
             output = self.model(inps, past_key_values=cache)
-            self._remember_value_mlps(cache)
             return output.logits
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
