@@ -35,6 +35,18 @@ SEQ_LENGTH_LABELS = {
     10000: "10k",
 }
 PLOTS = ["heatmap", "needle"]
+CLUSTERING_METRIC_PLOTS = (
+    ("eta", "eta (bound)"),
+    ("relative_low_rank_recon_error", "relative reconstruction error"),
+)
+CLUSTERING_METRIC_COLORS = {
+    "eta": "tab:blue",
+    "relative_low_rank_recon_error": "tab:orange",
+}
+CLUSTERING_SET_STYLES = {
+    "configured clusters": {"linestyle": "-", "marker": "o"},
+    "n_clusters=1": {"linestyle": "--", "marker": "s"},
+}
 
 
 def load_results(results_file: str | Path):
@@ -1420,6 +1432,298 @@ def run_analysis_case(
     }
 
 
+def _metric_plot_frame(
+    records: list[dict[str, Any]],
+    *,
+    metric_scope: str,
+    group_columns: tuple[str, ...],
+):
+    if pd is None:
+        raise ImportError("pandas is required to plot clustering metrics.")
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        return df
+
+    metric_columns = [name for name, _ in CLUSTERING_METRIC_PLOTS]
+    df = df[df["metric_scope"].eq(metric_scope)].copy()
+    for column in group_columns:
+        df = df[df[column].notna()]
+
+    if df.empty:
+        return df
+
+    return (
+        df.groupby(list(group_columns), as_index=False)
+        .agg({column: "mean" for column in metric_columns})
+        .sort_values(list(group_columns))
+    )
+
+
+def _set_sparse_tick_labels(
+    ax,
+    labels: list[str],
+    *,
+    axis: str,
+    max_ticks: int = 16,
+) -> None:
+    import math
+
+    if not labels:
+        return
+
+    tick_positions = list(range(len(labels)))
+    if len(labels) > max_ticks:
+        step = math.ceil(len(labels) / max_ticks)
+        tick_positions = tick_positions[::step]
+        if tick_positions[-1] != len(labels) - 1:
+            tick_positions.append(len(labels) - 1)
+
+    tick_labels = [labels[idx] for idx in tick_positions]
+    if axis == "x":
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels, rotation=45, ha="right")
+    else:
+        ax.set_yticks(tick_positions)
+        ax.set_yticklabels(tick_labels)
+
+
+def _line_style_kwargs(row_label: str, metric_name: str) -> dict[str, Any]:
+    style = {
+        "color": CLUSTERING_METRIC_COLORS[metric_name],
+        **CLUSTERING_SET_STYLES.get(
+            row_label,
+            CLUSTERING_SET_STYLES["configured clusters"],
+        ),
+    }
+    return style
+
+
+def _plot_lrk_head_metrics(
+    metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    title: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    frame_sets = []
+    for label, records in metric_sets:
+        df = _metric_plot_frame(
+            records,
+            metric_scope="head",
+            group_columns=("layer_idx", "head_idx"),
+        )
+        if not df.empty:
+            df = df.sort_values(["layer_idx", "head_idx"]).reset_index(
+                drop=True
+            )
+            frame_sets.append((label, df))
+
+    if not frame_sets:
+        return
+
+    base_df = frame_sets[0][1]
+    max_layers = max(df["layer_idx"].nunique() for _, df in frame_sets)
+    max_points = max(len(df) for _, df in frame_sets)
+    fig_width = max(9.0, min(16.0, 6.0 + 0.02 * max_points))
+    fig_height = max(3.5, min(8.0, 2.4 + 0.05 * max_layers))
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    for row_label, df in frame_sets:
+        x_positions = list(range(len(df)))
+        for metric_name, metric_label in CLUSTERING_METRIC_PLOTS:
+            style = _line_style_kwargs(row_label, metric_name)
+            ax.plot(
+                x_positions,
+                df[metric_name],
+                **style,
+                markersize=2,
+                linewidth=1,
+                label=f"{row_label}: {metric_label}",
+            )
+
+    x_labels = [
+        f"L{int(row.layer_idx)} H{int(row.head_idx)}"
+        for row in base_df.itertuples()
+    ]
+    ax.set_xlabel("Layer/head")
+    ax.set_ylabel("Metric value")
+    ax.grid(True, alpha=0.25)
+    ax.legend(ncol=2)
+    _set_sparse_tick_labels(
+        ax,
+        x_labels,
+        axis="x",
+        max_ticks=min(18, max(8, max_layers)),
+    )
+
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    plt.show()
+
+
+def _plot_lrk_layer_mean_metrics(
+    metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    title: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    frame_sets = []
+    for label, records in metric_sets:
+        df = _metric_plot_frame(
+            records,
+            metric_scope="head",
+            group_columns=("layer_idx", "head_idx"),
+        )
+        if df.empty:
+            continue
+
+        metric_aggs = {}
+        for metric_name, _ in CLUSTERING_METRIC_PLOTS:
+            metric_aggs[metric_name] = ["mean", "std"]
+        layer_df = df.groupby("layer_idx", as_index=False).agg(metric_aggs)
+        layer_df.columns = [
+            "_".join(item).rstrip("_")
+            for item in layer_df.columns.to_flat_index()
+        ]
+        layer_df = layer_df.fillna(0.0).sort_values("layer_idx")
+        frame_sets.append((label, layer_df))
+
+    if not frame_sets:
+        return
+
+    base_df = frame_sets[0][1]
+    max_layers = max(len(df) for _, df in frame_sets)
+    fig_width = max(8.0, min(14.0, 5.0 + 0.25 * max_layers))
+    fig, ax = plt.subplots(figsize=(fig_width, 3.8))
+
+    for row_label, df in frame_sets:
+        x_positions = list(range(len(df)))
+        for metric_name, metric_label in CLUSTERING_METRIC_PLOTS:
+            style = _line_style_kwargs(row_label, metric_name)
+            mean = df[f"{metric_name}_mean"].to_numpy(dtype=float)
+            std = df[f"{metric_name}_std"].to_numpy(dtype=float)
+            ax.plot(
+                x_positions,
+                mean,
+                **style,
+                markersize=4,
+                linewidth=1.5,
+                label=f"{row_label}: {metric_label}",
+            )
+            ax.fill_between(
+                x_positions,
+                mean - std,
+                mean + std,
+                color=style["color"],
+                alpha=0.12,
+                linewidth=0,
+            )
+
+    x_labels = [f"L{int(row.layer_idx)}" for row in base_df.itertuples()]
+    ax.set_xlabel("Layer")
+    ax.set_ylabel("Metric value")
+    ax.grid(True, alpha=0.25)
+    ax.legend(ncol=2)
+    _set_sparse_tick_labels(
+        ax,
+        x_labels,
+        axis="x",
+        max_ticks=18,
+    )
+
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    plt.show()
+
+
+def _plot_xkv_group_metrics(
+    metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    title: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    frame_sets = []
+    for label, records in metric_sets:
+        df = _metric_plot_frame(
+            records,
+            metric_scope="group",
+            group_columns=("group_start_layer", "group_last_layer"),
+        )
+        if not df.empty:
+            frame_sets.append((label, df))
+
+    if not frame_sets:
+        return
+
+    base_df = frame_sets[0][1]
+    max_groups = max(len(df) for _, df in frame_sets)
+    fig_width = max(8.0, min(14.0, 5.0 + 0.35 * max_groups))
+    fig, ax = plt.subplots(figsize=(fig_width, 3.8))
+
+    for row_label, df in frame_sets:
+        x_positions = list(range(len(df)))
+        for metric_name, metric_label in CLUSTERING_METRIC_PLOTS:
+            style = _line_style_kwargs(row_label, metric_name)
+            ax.plot(
+                x_positions,
+                df[metric_name],
+                **style,
+                markersize=4,
+                linewidth=1.5,
+                label=f"{row_label}: {metric_label}",
+            )
+
+    group_labels = [
+        f"{int(row.group_start_layer)}-{int(row.group_last_layer)}"
+        for row in base_df.itertuples()
+    ]
+    ax.set_xlabel("Layer group")
+    ax.set_ylabel("Metric value")
+    ax.grid(True, alpha=0.25)
+    ax.legend(ncol=2)
+    _set_sparse_tick_labels(
+        ax,
+        group_labels,
+        axis="x",
+        max_ticks=12,
+    )
+
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    plt.show()
+
+
+def _plot_case_metrics(case_result: dict[str, Any]) -> None:
+    case_name = case_result["case_name"]
+    lrk_metric_sets = [
+        ("configured clusters", case_result["lrk_results"]),
+        ("n_clusters=1", case_result["lrk_results_n1"]),
+    ]
+    xkv_metric_sets = [
+        ("configured clusters", case_result["xkv_results"]),
+        ("n_clusters=1", case_result["xkv_results_n1"]),
+    ]
+
+    _plot_lrk_head_metrics(
+        lrk_metric_sets,
+        title=f"{case_name}: LRK per-head metrics",
+    )
+    _plot_lrk_layer_mean_metrics(
+        lrk_metric_sets,
+        title=f"{case_name}: LRK per-layer mean/std across heads",
+    )
+    _plot_xkv_group_metrics(
+        xkv_metric_sets,
+        title=f"{case_name}: xKV per-layer group metrics",
+    )
+
+
 def display_case_result(
     case_result: dict[str, Any],
     *,
@@ -1431,6 +1735,8 @@ def display_case_result(
         display(case_result["summary_df"])
     else:
         print(case_result["summary_rows"])
+
+    _plot_case_metrics(case_result)
 
     if not show_detail_tables:
         return
