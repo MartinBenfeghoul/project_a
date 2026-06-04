@@ -18,13 +18,6 @@ LOSS_FUNC = {"mse": mse_loss}
 OPTIMIZER = {"adam": Adam, "adamw": AdamW, "sgd": SGD}
 
 
-def _eager_train_step(mlp, keys, values, loss_func):
-    v_hat = mlp(keys)
-    loss = loss_func(v_hat, values)
-    loss.backward()
-    return loss.detach()
-
-
 class MLPValueLayer(SingleTensorDynamicLayer):
     def __init__(
         self,
@@ -217,10 +210,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 for epoch_idx in range(self.num_epochs):
                     optimizer.zero_grad()
                     # keys/values shape: [num_sequences, num_head, num_token, head_dim]
-                    loss_val = _eager_train_step(
-                        self.mlp, keys, values, self.loss_func
-                    ).item()
+                    v_hat = self.mlp(keys)
+                    loss = self.loss_func(v_hat, values)
+                    loss.backward()
                     optimizer.step()
+                    loss_val = loss.detach()
                     self.mlp_training_history.append(
                         {"epoch": epoch_idx + 1, "value_recon_mse": loss_val}
                     )
