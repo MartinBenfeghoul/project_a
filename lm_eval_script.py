@@ -182,7 +182,7 @@ def main(args):
         adjust_key_value_comp_ratio=args.adjust_key_value_comp_ratio,
         pretrained=model,
         tokenizer=tokenizer,
-        max_length=args.max_length,
+        max_length=args.max_seq_lengths,
         truncation=False,
         trust_remote_code=True,
     )
@@ -297,7 +297,6 @@ def parse_args():
         default=None,
         help="Sequence lengths for RULER tasks.",
     )
-    parser.add_argument("--max_length", type=int, default=None, help="Maximum input sequence length in tokens.")
     parser.add_argument("--dump_full_kv_dir", type=str, default=None)
     parser.add_argument("--log_efficiency_metrics", action="store_true")
     parser.add_argument("--use_wandb", action="store_true")
