@@ -36,17 +36,18 @@ SEQ_LENGTH_LABELS = {
 }
 PLOTS = ["heatmap", "needle"]
 CLUSTERING_METRIC_PLOTS = (
-    ("eta", "eta (bound)"),
-    ("relative_low_rank_recon_error", "relative reconstruction error"),
+    ("eta", "bound"),
+    ("relative_low_rank_recon_error", "error"),
 )
 CLUSTERING_METRIC_COLORS = {
     "eta": "tab:blue",
     "relative_low_rank_recon_error": "tab:orange",
 }
 CLUSTERING_SET_STYLES = {
-    "configured clusters": {"linestyle": "-", "marker": "o"},
-    "n_clusters=1": {"linestyle": "--", "marker": "s"},
+    "Clustered": {"linestyle": "-", "marker": "o"},
+    "Unclustered": {"linestyle": "--", "marker": "s"},
 }
+CLUSTERING_PLOT_FIGSIZE = (10, 6)
 
 
 def load_results(results_file: str | Path):
@@ -1469,6 +1470,7 @@ def _set_sparse_tick_labels(
     *,
     axis: str,
     max_ticks: int = 16,
+    font_size: int | float = 11,
 ) -> None:
     import math
 
@@ -1485,10 +1487,31 @@ def _set_sparse_tick_labels(
     tick_labels = [labels[idx] for idx in tick_positions]
     if axis == "x":
         ax.set_xticks(tick_positions)
-        ax.set_xticklabels(tick_labels, rotation=45, ha="right")
+        ax.set_xticklabels(
+            tick_labels,
+            rotation=45,
+            ha="right",
+            fontsize=font_size,
+        )
     else:
         ax.set_yticks(tick_positions)
-        ax.set_yticklabels(tick_labels)
+        ax.set_yticklabels(tick_labels, fontsize=font_size)
+
+
+def _apply_paper_axis_style(ax, font_size: int | float) -> None:
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", labelsize=font_size)
+
+
+def _place_external_legend(ax, font_size: int | float) -> None:
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=2,
+        fontsize=font_size,
+        frameon=False,
+    )
 
 
 def _line_style_kwargs(row_label: str, metric_name: str) -> dict[str, Any]:
@@ -1496,7 +1519,7 @@ def _line_style_kwargs(row_label: str, metric_name: str) -> dict[str, Any]:
         "color": CLUSTERING_METRIC_COLORS[metric_name],
         **CLUSTERING_SET_STYLES.get(
             row_label,
-            CLUSTERING_SET_STYLES["configured clusters"],
+            CLUSTERING_SET_STYLES["Clustered"],
         ),
     }
     return style
@@ -1505,7 +1528,8 @@ def _line_style_kwargs(row_label: str, metric_name: str) -> dict[str, Any]:
 def _plot_lrk_head_metrics(
     metric_sets: list[tuple[str, list[dict[str, Any]]]],
     *,
-    title: str,
+    font_size: int | float,
+    figsize: tuple[float, float],
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -1527,10 +1551,7 @@ def _plot_lrk_head_metrics(
 
     base_df = frame_sets[0][1]
     max_layers = max(df["layer_idx"].nunique() for _, df in frame_sets)
-    max_points = max(len(df) for _, df in frame_sets)
-    fig_width = max(9.0, min(16.0, 6.0 + 0.02 * max_points))
-    fig_height = max(3.5, min(8.0, 2.4 + 0.05 * max_layers))
-    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig, ax = plt.subplots(figsize=figsize)
 
     for row_label, df in frame_sets:
         x_positions = list(range(len(df)))
@@ -1549,26 +1570,28 @@ def _plot_lrk_head_metrics(
         f"L{int(row.layer_idx)} H{int(row.head_idx)}"
         for row in base_df.itertuples()
     ]
-    ax.set_xlabel("Layer/head")
-    ax.set_ylabel("Metric value")
+    ax.set_xlabel("Layer/head", fontsize=font_size)
+    ax.set_ylabel("Metric value", fontsize=font_size)
     ax.grid(True, alpha=0.25)
-    ax.legend(ncol=2)
+    _place_external_legend(ax, font_size)
     _set_sparse_tick_labels(
         ax,
         x_labels,
         axis="x",
         max_ticks=min(18, max(8, max_layers)),
+        font_size=font_size,
     )
+    _apply_paper_axis_style(ax, font_size)
 
-    fig.suptitle(title)
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
 
 
 def _plot_lrk_layer_mean_metrics(
     metric_sets: list[tuple[str, list[dict[str, Any]]]],
     *,
-    title: str,
+    font_size: int | float,
+    figsize: tuple[float, float],
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -1597,9 +1620,7 @@ def _plot_lrk_layer_mean_metrics(
         return
 
     base_df = frame_sets[0][1]
-    max_layers = max(len(df) for _, df in frame_sets)
-    fig_width = max(8.0, min(14.0, 5.0 + 0.25 * max_layers))
-    fig, ax = plt.subplots(figsize=(fig_width, 3.8))
+    fig, ax = plt.subplots(figsize=figsize)
 
     for row_label, df in frame_sets:
         x_positions = list(range(len(df)))
@@ -1625,26 +1646,28 @@ def _plot_lrk_layer_mean_metrics(
             )
 
     x_labels = [f"L{int(row.layer_idx)}" for row in base_df.itertuples()]
-    ax.set_xlabel("Layer")
-    ax.set_ylabel("Metric value")
+    ax.set_xlabel("Layer", fontsize=font_size)
+    ax.set_ylabel("Metric value", fontsize=font_size)
     ax.grid(True, alpha=0.25)
-    ax.legend(ncol=2)
+    _place_external_legend(ax, font_size)
     _set_sparse_tick_labels(
         ax,
         x_labels,
         axis="x",
         max_ticks=18,
+        font_size=font_size,
     )
+    _apply_paper_axis_style(ax, font_size)
 
-    fig.suptitle(title)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
 
 
 def _plot_xkv_group_metrics(
     metric_sets: list[tuple[str, list[dict[str, Any]]]],
     *,
-    title: str,
+    font_size: int | float,
+    figsize: tuple[float, float],
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -1662,9 +1685,7 @@ def _plot_xkv_group_metrics(
         return
 
     base_df = frame_sets[0][1]
-    max_groups = max(len(df) for _, df in frame_sets)
-    fig_width = max(8.0, min(14.0, 5.0 + 0.35 * max_groups))
-    fig, ax = plt.subplots(figsize=(fig_width, 3.8))
+    fig, ax = plt.subplots(figsize=figsize)
 
     for row_label, df in frame_sets:
         x_positions = list(range(len(df)))
@@ -1683,44 +1704,52 @@ def _plot_xkv_group_metrics(
         f"{int(row.group_start_layer)}-{int(row.group_last_layer)}"
         for row in base_df.itertuples()
     ]
-    ax.set_xlabel("Layer group")
-    ax.set_ylabel("Metric value")
+    ax.set_xlabel("Layer group", fontsize=font_size)
+    ax.set_ylabel("Metric value", fontsize=font_size)
     ax.grid(True, alpha=0.25)
-    ax.legend(ncol=2)
+    _place_external_legend(ax, font_size)
     _set_sparse_tick_labels(
         ax,
         group_labels,
         axis="x",
         max_ticks=12,
+        font_size=font_size,
     )
+    _apply_paper_axis_style(ax, font_size)
 
-    fig.suptitle(title)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
 
 
-def _plot_case_metrics(case_result: dict[str, Any]) -> None:
-    case_name = case_result["case_name"]
+def _plot_case_metrics(
+    case_result: dict[str, Any],
+    *,
+    font_size: int | float,
+    figsize: tuple[float, float],
+) -> None:
     lrk_metric_sets = [
-        ("configured clusters", case_result["lrk_results"]),
-        ("n_clusters=1", case_result["lrk_results_n1"]),
+        ("Clustered", case_result["lrk_results"]),
+        ("Unclustered", case_result["lrk_results_n1"]),
     ]
     xkv_metric_sets = [
-        ("configured clusters", case_result["xkv_results"]),
-        ("n_clusters=1", case_result["xkv_results_n1"]),
+        ("Clustered", case_result["xkv_results"]),
+        ("Unclustered", case_result["xkv_results_n1"]),
     ]
 
     _plot_lrk_head_metrics(
         lrk_metric_sets,
-        title=f"{case_name}: LRK per-head metrics",
+        font_size=font_size,
+        figsize=figsize,
     )
     _plot_lrk_layer_mean_metrics(
         lrk_metric_sets,
-        title=f"{case_name}: LRK per-layer mean/std across heads",
+        font_size=font_size,
+        figsize=figsize,
     )
     _plot_xkv_group_metrics(
         xkv_metric_sets,
-        title=f"{case_name}: xKV per-layer group metrics",
+        font_size=font_size,
+        figsize=figsize,
     )
 
 
@@ -1728,6 +1757,8 @@ def display_case_result(
     case_result: dict[str, Any],
     *,
     show_detail_tables: bool = False,
+    plot_font_size: int | float = 11,
+    plot_figsize: tuple[float, float] = CLUSTERING_PLOT_FIGSIZE,
 ) -> None:
     from IPython.display import display
 
@@ -1736,7 +1767,11 @@ def display_case_result(
     else:
         print(case_result["summary_rows"])
 
-    _plot_case_metrics(case_result)
+    _plot_case_metrics(
+        case_result,
+        font_size=plot_font_size,
+        figsize=plot_figsize,
+    )
 
     if not show_detail_tables:
         return
