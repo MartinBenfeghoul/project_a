@@ -36,12 +36,16 @@ SEQ_LENGTH_LABELS = {
 }
 PLOTS = ["heatmap", "needle"]
 CLUSTERING_METRIC_PLOTS = (
-    ("eta", "bound"),
+    ("relative_low_rank_recon_error_bound", "bound"),
     ("relative_low_rank_recon_error", "error"),
 )
 CLUSTERING_METRIC_COLORS = {
-    "eta": "tab:blue",
+    "relative_low_rank_recon_error_bound": "tab:blue",
     "relative_low_rank_recon_error": "tab:orange",
+}
+CLUSTERING_DIFFERENCE_COLORS = {
+    "Clustered": "tab:green",
+    "Unclustered": "tab:red",
 }
 CLUSTERING_SET_STYLES = {
     "Clustered": {"linestyle": "-", "marker": "o"},
@@ -1449,6 +1453,9 @@ def _metric_plot_frame(
     if df.empty:
         return df
 
+    df["relative_low_rank_recon_error_bound"] = (
+        df["eta"].clip(lower=0.0).pow(0.5)
+    )
     metric_columns = [name for name, _ in CLUSTERING_METRIC_PLOTS]
     df = df[df["metric_scope"].eq(metric_scope)].copy()
     for column in group_columns:
@@ -1514,6 +1521,25 @@ def _place_external_legend(ax, font_size: int | float) -> None:
     )
 
 
+def _make_plot_axes(
+    figsize: tuple[float, float],
+    show_difference: bool,
+):
+    import matplotlib.pyplot as plt
+
+    if not show_difference:
+        fig, ax = plt.subplots(figsize=figsize)
+        return fig, ax, None
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=figsize,
+        gridspec_kw={"width_ratios": [2, 1]},
+    )
+    return fig, axes[0], axes[1]
+
+
 def _line_style_kwargs(row_label: str, metric_name: str) -> dict[str, Any]:
     style = {
         "color": CLUSTERING_METRIC_COLORS[metric_name],
@@ -1525,11 +1551,52 @@ def _line_style_kwargs(row_label: str, metric_name: str) -> dict[str, Any]:
     return style
 
 
+def _difference_style_kwargs(row_label: str) -> dict[str, Any]:
+    style = {
+        "color": CLUSTERING_DIFFERENCE_COLORS[row_label],
+        **CLUSTERING_SET_STYLES.get(
+            row_label,
+            CLUSTERING_SET_STYLES["Clustered"],
+        ),
+    }
+    return style
+
+
+def _plot_bound_error_difference(
+    ax,
+    frame_sets,
+    *,
+    x_positions: list[int],
+    font_size: int | float,
+) -> None:
+    for row_label, df in frame_sets:
+        difference = (
+            df["relative_low_rank_recon_error_bound"]
+            - df["relative_low_rank_recon_error"]
+        )
+        ax.plot(
+            x_positions,
+            difference,
+            **_difference_style_kwargs(row_label),
+            markersize=4,
+            linewidth=1.5,
+            label=f"{row_label}: bound - error",
+        )
+
+    ax.axhline(0.0, color="0.35", linewidth=1, alpha=0.8)
+    ax.set_xlabel("Layer/head", fontsize=font_size)
+    ax.set_ylabel("Bound - error", fontsize=font_size)
+    ax.grid(True, alpha=0.25)
+    _place_external_legend(ax, font_size)
+    _apply_paper_axis_style(ax, font_size)
+
+
 def _plot_lrk_head_metrics(
     metric_sets: list[tuple[str, list[dict[str, Any]]]],
     *,
     font_size: int | float,
     figsize: tuple[float, float],
+    show_difference: bool,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -1551,7 +1618,8 @@ def _plot_lrk_head_metrics(
 
     base_df = frame_sets[0][1]
     max_layers = max(df["layer_idx"].nunique() for _, df in frame_sets)
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax, diff_ax = _make_plot_axes(figsize, show_difference)
+    diff_positions = list(range(len(base_df)))
 
     for row_label, df in frame_sets:
         x_positions = list(range(len(df)))
@@ -1583,6 +1651,22 @@ def _plot_lrk_head_metrics(
     )
     _apply_paper_axis_style(ax, font_size)
 
+    if diff_ax is not None:
+        _plot_bound_error_difference(
+            diff_ax,
+            frame_sets,
+            x_positions=diff_positions,
+            font_size=font_size,
+        )
+        diff_ax.set_xlabel("Layer/head", fontsize=font_size)
+        _set_sparse_tick_labels(
+            diff_ax,
+            x_labels,
+            axis="x",
+            max_ticks=min(10, max(6, max_layers)),
+            font_size=font_size,
+        )
+
     fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
 
@@ -1592,6 +1676,7 @@ def _plot_lrk_layer_mean_metrics(
     *,
     font_size: int | float,
     figsize: tuple[float, float],
+    show_difference: bool,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -1620,10 +1705,22 @@ def _plot_lrk_layer_mean_metrics(
         return
 
     base_df = frame_sets[0][1]
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax, diff_ax = _make_plot_axes(figsize, show_difference)
+    difference_frame_sets = []
 
     for row_label, df in frame_sets:
         x_positions = list(range(len(df)))
+        difference_df = pd.DataFrame(
+            {
+                "relative_low_rank_recon_error_bound": df[
+                    "relative_low_rank_recon_error_bound_mean"
+                ],
+                "relative_low_rank_recon_error": df[
+                    "relative_low_rank_recon_error_mean"
+                ],
+            }
+        )
+        difference_frame_sets.append((row_label, difference_df))
         for metric_name, metric_label in CLUSTERING_METRIC_PLOTS:
             style = _line_style_kwargs(row_label, metric_name)
             mean = df[f"{metric_name}_mean"].to_numpy(dtype=float)
@@ -1659,6 +1756,22 @@ def _plot_lrk_layer_mean_metrics(
     )
     _apply_paper_axis_style(ax, font_size)
 
+    if diff_ax is not None:
+        _plot_bound_error_difference(
+            diff_ax,
+            difference_frame_sets,
+            x_positions=list(range(len(base_df))),
+            font_size=font_size,
+        )
+        diff_ax.set_xlabel("Layer", fontsize=font_size)
+        _set_sparse_tick_labels(
+            diff_ax,
+            x_labels,
+            axis="x",
+            max_ticks=10,
+            font_size=font_size,
+        )
+
     fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
 
@@ -1668,6 +1781,7 @@ def _plot_xkv_group_metrics(
     *,
     font_size: int | float,
     figsize: tuple[float, float],
+    show_difference: bool,
 ) -> None:
     import matplotlib.pyplot as plt
 
@@ -1685,7 +1799,8 @@ def _plot_xkv_group_metrics(
         return
 
     base_df = frame_sets[0][1]
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax, diff_ax = _make_plot_axes(figsize, show_difference)
+    diff_positions = list(range(len(base_df)))
 
     for row_label, df in frame_sets:
         x_positions = list(range(len(df)))
@@ -1717,6 +1832,22 @@ def _plot_xkv_group_metrics(
     )
     _apply_paper_axis_style(ax, font_size)
 
+    if diff_ax is not None:
+        _plot_bound_error_difference(
+            diff_ax,
+            frame_sets,
+            x_positions=diff_positions,
+            font_size=font_size,
+        )
+        diff_ax.set_xlabel("Layer group", fontsize=font_size)
+        _set_sparse_tick_labels(
+            diff_ax,
+            group_labels,
+            axis="x",
+            max_ticks=8,
+            font_size=font_size,
+        )
+
     fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
 
@@ -1726,6 +1857,7 @@ def _plot_case_metrics(
     *,
     font_size: int | float,
     figsize: tuple[float, float],
+    show_difference: bool,
 ) -> None:
     lrk_metric_sets = [
         ("Clustered", case_result["lrk_results"]),
@@ -1740,16 +1872,19 @@ def _plot_case_metrics(
         lrk_metric_sets,
         font_size=font_size,
         figsize=figsize,
+        show_difference=show_difference,
     )
     _plot_lrk_layer_mean_metrics(
         lrk_metric_sets,
         font_size=font_size,
         figsize=figsize,
+        show_difference=show_difference,
     )
     _plot_xkv_group_metrics(
         xkv_metric_sets,
         font_size=font_size,
         figsize=figsize,
+        show_difference=show_difference,
     )
 
 
@@ -1759,6 +1894,7 @@ def display_case_result(
     show_detail_tables: bool = False,
     plot_font_size: int | float = 11,
     plot_figsize: tuple[float, float] = CLUSTERING_PLOT_FIGSIZE,
+    show_bound_error_difference: bool = False,
 ) -> None:
     from IPython.display import display
 
@@ -1771,6 +1907,7 @@ def display_case_result(
         case_result,
         font_size=plot_font_size,
         figsize=plot_figsize,
+        show_difference=show_bound_error_difference,
     )
 
     if not show_detail_tables:
