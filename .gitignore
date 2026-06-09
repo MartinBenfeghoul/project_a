@@ -12,6 +12,7 @@ checkpoints/*
 *.json
 *.jsonl
 *.png
+*.svg
 *.pdf
 .env
 

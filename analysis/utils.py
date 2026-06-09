@@ -1598,7 +1598,7 @@ def _plot_lrk_head_metrics(
     font_size: int | float,
     figsize: tuple[float, float],
     show_difference: bool,
-) -> None:
+) -> Any | None:
     import matplotlib.pyplot as plt
 
     frame_sets = []
@@ -1640,7 +1640,7 @@ def _plot_lrk_head_metrics(
         for row in base_df.itertuples()
     ]
     ax.set_xlabel("Layer/head", fontsize=font_size)
-    ax.set_ylabel("Metric value", fontsize=font_size)
+    ax.set_ylabel("Error", fontsize=font_size)
     ax.grid(True, alpha=0.25)
     _place_external_legend(ax, font_size)
     _set_sparse_tick_labels(
@@ -1670,6 +1670,7 @@ def _plot_lrk_head_metrics(
 
     fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
+    return fig
 
 
 def _plot_lrk_layer_mean_metrics(
@@ -1678,7 +1679,7 @@ def _plot_lrk_layer_mean_metrics(
     font_size: int | float,
     figsize: tuple[float, float],
     show_difference: bool,
-) -> None:
+) -> Any | None:
     import matplotlib.pyplot as plt
 
     frame_sets = []
@@ -1745,7 +1746,7 @@ def _plot_lrk_layer_mean_metrics(
 
     x_labels = [f"L{int(row.layer_idx)}" for row in base_df.itertuples()]
     ax.set_xlabel("Layer", fontsize=font_size)
-    ax.set_ylabel("Metric value", fontsize=font_size)
+    ax.set_ylabel("Error", fontsize=font_size)
     ax.grid(True, alpha=0.25)
     _place_external_legend(ax, font_size)
     _set_sparse_tick_labels(
@@ -1775,6 +1776,7 @@ def _plot_lrk_layer_mean_metrics(
 
     fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
+    return fig
 
 
 def _plot_xkv_group_metrics(
@@ -1783,7 +1785,7 @@ def _plot_xkv_group_metrics(
     font_size: int | float,
     figsize: tuple[float, float],
     show_difference: bool,
-) -> None:
+) -> Any | None:
     import matplotlib.pyplot as plt
 
     frame_sets = []
@@ -1821,7 +1823,7 @@ def _plot_xkv_group_metrics(
         for row in base_df.itertuples()
     ]
     ax.set_xlabel("Layer group", fontsize=font_size)
-    ax.set_ylabel("Metric value", fontsize=font_size)
+    ax.set_ylabel("Error", fontsize=font_size)
     ax.grid(True, alpha=0.25)
     _place_external_legend(ax, font_size)
     _set_sparse_tick_labels(
@@ -1851,6 +1853,7 @@ def _plot_xkv_group_metrics(
 
     fig.tight_layout(rect=(0, 0, 1, 0.86))
     plt.show()
+    return fig
 
 
 def _plot_case_metrics(
@@ -1859,7 +1862,7 @@ def _plot_case_metrics(
     font_size: int | float,
     figsize: tuple[float, float],
     show_difference: bool,
-) -> None:
+) -> list[Any | None]:
     lrk_metric_sets = [
         ("Clustered", case_result["lrk_results"]),
         ("Unclustered", case_result["lrk_results_n1"]),
@@ -1869,24 +1872,27 @@ def _plot_case_metrics(
         ("Unclustered", case_result["xkv_results_n1"]),
     ]
 
-    _plot_lrk_head_metrics(
-        lrk_metric_sets,
-        font_size=font_size,
-        figsize=figsize,
-        show_difference=show_difference,
-    )
-    _plot_lrk_layer_mean_metrics(
-        lrk_metric_sets,
-        font_size=font_size,
-        figsize=figsize,
-        show_difference=show_difference,
-    )
-    _plot_xkv_group_metrics(
-        xkv_metric_sets,
-        font_size=font_size,
-        figsize=figsize,
-        show_difference=show_difference,
-    )
+    figures = [
+        _plot_lrk_head_metrics(
+            lrk_metric_sets,
+            font_size=font_size,
+            figsize=figsize,
+            show_difference=show_difference,
+        ),
+        _plot_lrk_layer_mean_metrics(
+            lrk_metric_sets,
+            font_size=font_size,
+            figsize=figsize,
+            show_difference=show_difference,
+        ),
+        _plot_xkv_group_metrics(
+            xkv_metric_sets,
+            font_size=font_size,
+            figsize=figsize,
+            show_difference=show_difference,
+        ),
+    ]
+    return figures
 
 
 def display_case_result(
@@ -1896,7 +1902,7 @@ def display_case_result(
     plot_font_size: int | float = 11,
     plot_figsize: tuple[float, float] = CLUSTERING_PLOT_FIGSIZE,
     show_bound_error_difference: bool = False,
-) -> None:
+) -> list[Any | None]:
     from IPython.display import display
 
     if case_result["summary_df"] is not None:
@@ -1904,7 +1910,7 @@ def display_case_result(
     else:
         print(case_result["summary_rows"])
 
-    _plot_case_metrics(
+    figures = _plot_case_metrics(
         case_result,
         font_size=plot_font_size,
         figsize=plot_figsize,
@@ -1912,16 +1918,17 @@ def display_case_result(
     )
 
     if not show_detail_tables:
-        return
+        return figures
 
     if case_result["summary_df"] is not None:
         display(case_result["lrk_df"])
         display(case_result["xkv_df"])
         display(case_result["lrk_df_n1"])
         display(case_result["xkv_df_n1"])
-        return
+        return figures
 
     print("First LRK result:", case_result["lrk_results"][:1])
     print("First xKV result:", case_result["xkv_results"][:1])
     print("First LRK n=1 result:", case_result["lrk_results_n1"][:1])
     print("First xKV n=1 result:", case_result["xkv_results_n1"][:1])
+    return figures
