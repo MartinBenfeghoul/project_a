@@ -1531,11 +1531,12 @@ def _make_plot_axes(
         fig, ax = plt.subplots(figsize=figsize)
         return fig, ax, None
 
+    stacked_figsize = (figsize[0], figsize[1] * 1.5)
     fig, axes = plt.subplots(
-        1,
         2,
-        figsize=figsize,
-        gridspec_kw={"width_ratios": [2, 1]},
+        1,
+        figsize=stacked_figsize,
+        gridspec_kw={"height_ratios": [1, 1]},
     )
     return fig, axes[0], axes[1]
 
@@ -1562,7 +1563,7 @@ def _difference_style_kwargs(row_label: str) -> dict[str, Any]:
     return style
 
 
-def _plot_bound_error_difference(
+def _plot_bound_error_ratio(
     ax,
     frame_sets,
     *,
@@ -1570,22 +1571,22 @@ def _plot_bound_error_difference(
     font_size: int | float,
 ) -> None:
     for row_label, df in frame_sets:
-        difference = (
+        ratio = (
             df["relative_low_rank_recon_error_bound"]
-            - df["relative_low_rank_recon_error"]
+            / df["relative_low_rank_recon_error"].clip(lower=1e-12)
         )
         ax.plot(
             x_positions,
-            difference,
+            ratio,
             **_difference_style_kwargs(row_label),
             markersize=4,
             linewidth=1.5,
-            label=f"{row_label}: bound - error",
+            label=f"{row_label}: bound / error",
         )
 
-    ax.axhline(0.0, color="0.35", linewidth=1, alpha=0.8)
+    ax.axhline(1.0, color="0.35", linewidth=1, alpha=0.8)
     ax.set_xlabel("Layer/head", fontsize=font_size)
-    ax.set_ylabel("Bound - error", fontsize=font_size)
+    ax.set_ylabel("Bound / error", fontsize=font_size)
     ax.grid(True, alpha=0.25)
     _place_external_legend(ax, font_size)
     _apply_paper_axis_style(ax, font_size)
@@ -1652,7 +1653,7 @@ def _plot_lrk_head_metrics(
     _apply_paper_axis_style(ax, font_size)
 
     if diff_ax is not None:
-        _plot_bound_error_difference(
+        _plot_bound_error_ratio(
             diff_ax,
             frame_sets,
             x_positions=diff_positions,
@@ -1757,7 +1758,7 @@ def _plot_lrk_layer_mean_metrics(
     _apply_paper_axis_style(ax, font_size)
 
     if diff_ax is not None:
-        _plot_bound_error_difference(
+        _plot_bound_error_ratio(
             diff_ax,
             difference_frame_sets,
             x_positions=list(range(len(base_df))),
@@ -1833,7 +1834,7 @@ def _plot_xkv_group_metrics(
     _apply_paper_axis_style(ax, font_size)
 
     if diff_ax is not None:
-        _plot_bound_error_difference(
+        _plot_bound_error_ratio(
             diff_ax,
             frame_sets,
             x_positions=diff_positions,
