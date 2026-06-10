@@ -32,8 +32,15 @@ from utils import (
 GEN_KWARGS = {
     "do_sample": False,
     "use_cache": True,
-    "logits_to_keep": 0,
+    "logits_to_keep": 1,
 }
+
+
+def get_gen_kwargs(args):
+    gen_kwargs = dict(GEN_KWARGS)
+    if args.k_cache_type == "surprise_lr":
+        gen_kwargs["logits_to_keep"] = 0
+    return gen_kwargs
 
 
 def get_tasks(tasks, print_tasks=True):
@@ -199,7 +206,7 @@ def main(args):
 
     results = evaluator.simple_evaluate(
         model=lm,
-        gen_kwargs=GEN_KWARGS,
+        gen_kwargs=get_gen_kwargs(args),
         tasks=args.tasks,
         num_fewshot=0,
         batch_size=1,

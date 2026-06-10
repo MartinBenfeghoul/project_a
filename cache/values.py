@@ -131,7 +131,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             self._num_params = sum(p.numel() for p in self.mlp.parameters())
 
             if self.learned_init.has_weights:
-                self.mlp.load_state_dict(self.learned_init.weights)
+                weights = self.learned_init.weights
+                if not self.use_residual and "W_linear" in weights:
+                    weights = {k: v for k, v in weights.items() if k != "W_linear"}
+                self.mlp.load_state_dict(weights)
 
             if self.use_residual and self.W_linear_init is not None:
                 with torch.no_grad():
@@ -214,7 +217,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     loss = self.loss_func(v_hat, values)
                     loss.backward()
                     optimizer.step()
-                    loss_val = loss.detach()
+                    loss_val = loss.detach().item()
                     self.mlp_training_history.append(
                         {"epoch": epoch_idx + 1, "value_recon_mse": loss_val}
                     )
