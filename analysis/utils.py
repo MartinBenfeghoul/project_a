@@ -24,7 +24,13 @@ from utils.segmentation import (
     kmeans_cluster_sequences,
 )
 
-HIDDEN_COLUMNS = ("batch_idx", "seq_len", "compressed_len")
+HIDDEN_COLUMNS = (
+    "batch_idx",
+    "seq_len",
+    "compressed_len",
+    "spectral_tail_curves",
+    "spectral_tail_raw_curves",
+)
 SEQ_LENGTH_BUCKETS = [500, 1000, 2000, 4000, 8000, 10000]
 SEQ_LENGTH_LABELS = {
     500: "500",
@@ -594,9 +600,61 @@ def _low_rank_recon_metrics(
     return metrics
 
 
+def _spectral_tail_metrics(
+    grouped_tensor: torch.Tensor,
+    segment_ranges: list[list[tuple[int, int]]],
+    *,
+    cluster_axis: str,
+    num_points: int = 101,
+) -> list[dict[str, Any]]:
+    _validate_cluster_axis(cluster_axis)
+    tensor_to_decompose = (
+        grouped_tensor
+        if cluster_axis == "rows"
+        else grouped_tensor.transpose(-2, -1).contiguous()
+    )
+    metrics = []
+    for batch_idx, batch_ranges in enumerate(segment_ranges):
+        curves = []
+        raw_curves = []
+        for start_idx, end_idx in batch_ranges:
+            segment = tensor_to_decompose[
+                batch_idx, ..., start_idx:end_idx, :
+            ]
+            singular_values = torch.linalg.svdvals(
+                segment.to(dtype=torch.float32).contiguous()
+            ).reshape(-1, min(segment.size(-2), segment.size(-1)))
+            for spectrum in singular_values:
+                energy = spectrum.square()
+                total = energy.sum()
+                if total <= 0:
+                    curves.append([0.0] * num_points)
+                    raw_curves.append([0.0] * (energy.numel() + 1))
+                    continue
+                tail = torch.cat(
+                    (energy.flip(0).cumsum(0).flip(0), energy.new_zeros(1))
+                )
+                tail = 100 * tail / total
+                raw_curves.append(tail.cpu().tolist())
+                curve = torch.nn.functional.interpolate(
+                    tail.view(1, 1, -1),
+                    size=num_points,
+                    mode="linear",
+                    align_corners=True,
+                ).view(-1)
+                curves.append(curve.cpu().tolist())
+        metrics.append(
+            {
+                "spectral_tail_curves": curves,
+                "spectral_tail_raw_curves": raw_curves,
+            }
+        )
+    return metrics
+
+
 def _merge_metric_lists(
-    *metric_lists: list[dict[str, float]],
-) -> list[dict[str, float]]:
+    *metric_lists: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     return [
         {
             key: value
@@ -758,7 +816,16 @@ def analyze_kmeans_lrk(
                 grouped_target,
                 reconstructed,
             )
-            metrics = _merge_metric_lists(scatter_metrics, recon_metrics)
+            spectral_metrics = _spectral_tail_metrics(
+                grouped_target,
+                segment_ranges,
+                cluster_axis=cluster_axis,
+            )
+            metrics = _merge_metric_lists(
+                scatter_metrics,
+                recon_metrics,
+                spectral_metrics,
+            )
             for flat_idx, metric in enumerate(metrics):
                 batch_idx = flat_idx // num_heads
                 head_idx = flat_idx % num_heads
@@ -824,9 +891,15 @@ def analyze_kmeans_lrk(
                 grouped_target,
                 reconstructed,
             )
+            layer_spectral_metrics = _spectral_tail_metrics(
+                grouped_target,
+                segment_ranges,
+                cluster_axis=cluster_axis,
+            )
             layer_metrics = _merge_metric_lists(
                 scatter_metrics,
                 layer_recon_metrics,
+                layer_spectral_metrics,
             )
             for batch_idx, metric in enumerate(layer_metrics):
                 results.append(
@@ -902,9 +975,15 @@ def analyze_kmeans_lrk(
             grouped_target,
             reconstructed,
         )
+        layer_spectral_metrics = _spectral_tail_metrics(
+            grouped_target,
+            segment_ranges,
+            cluster_axis=cluster_axis,
+        )
         layer_metrics = _merge_metric_lists(
             scatter_metrics,
             layer_recon_metrics,
+            layer_spectral_metrics,
         )
         for batch_idx, metric in enumerate(layer_metrics):
             results.append(
@@ -1153,9 +1232,15 @@ def analyze_kmeans_xkv(
             grouped_target,
             reconstructed_group,
         )
+        group_spectral_metrics = _spectral_tail_metrics(
+            grouped_target,
+            segment_ranges,
+            cluster_axis=cluster_axis,
+        )
         group_metrics = _merge_metric_lists(
             group_scatter_metrics,
             group_recon_metrics,
+            group_spectral_metrics,
         )
         for batch_idx, metric in enumerate(group_metrics):
             results.append(
@@ -1512,10 +1597,13 @@ def _apply_paper_axis_style(ax, font_size: int | float) -> None:
 
 
 def _place_external_legend(ax, font_size: int | float) -> None:
+    handles, labels = ax.get_legend_handles_labels()
     ax.legend(
+        handles,
+        labels,
         loc="lower center",
-        bbox_to_anchor=(0.5, 1.02),
-        ncol=2,
+        bbox_to_anchor=(0.5, 1.05),
+        ncol=len(labels),
         fontsize=font_size,
         frameon=False,
     )
@@ -1668,7 +1756,7 @@ def _plot_lrk_head_metrics(
             font_size=font_size,
         )
 
-    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
     plt.show()
     return fig
 
@@ -1740,7 +1828,7 @@ def _plot_lrk_layer_mean_metrics(
                 mean - std,
                 mean + std,
                 color=style["color"],
-                alpha=0.12,
+                alpha=0.25,
                 linewidth=0,
             )
 
@@ -1774,7 +1862,7 @@ def _plot_lrk_layer_mean_metrics(
             font_size=font_size,
         )
 
-    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
     plt.show()
     return fig
 
@@ -1851,7 +1939,303 @@ def _plot_xkv_group_metrics(
             font_size=font_size,
         )
 
-    fig.tight_layout(rect=(0, 0, 1, 0.86))
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    plt.show()
+    return fig
+
+
+def _plot_combined_lrk_xkv_metrics(
+    lrk_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    xkv_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    font_size: int | float,
+    figsize: tuple[float, float],
+) -> Any | None:
+    import matplotlib.pyplot as plt
+
+    lrk_frame_sets = []
+    for label, records in lrk_metric_sets:
+        df = _metric_plot_frame(
+            records,
+            metric_scope="head",
+            group_columns=("layer_idx", "head_idx"),
+        )
+        if not df.empty:
+            df = df.sort_values(["layer_idx", "head_idx"]).reset_index(
+                drop=True
+            )
+            lrk_frame_sets.append((label, df))
+
+    xkv_frame_sets = []
+    for label, records in xkv_metric_sets:
+        df = _metric_plot_frame(
+            records,
+            metric_scope="group",
+            group_columns=("group_start_layer", "group_last_layer"),
+        )
+        if not df.empty:
+            xkv_frame_sets.append((label, df))
+
+    if not lrk_frame_sets or not xkv_frame_sets:
+        return
+
+    fig = plt.figure(figsize=figsize)
+    grid = fig.add_gridspec(
+        2,
+        3,
+        height_ratios=(1, 1),
+        width_ratios=(1, 1, 1),
+    )
+    lrk_ax = fig.add_subplot(grid[0, :])
+    xkv_ax = fig.add_subplot(grid[1, :2])
+    table_ax = fig.add_subplot(grid[1, 2])
+    tick_font_size = max(font_size - 2, 8)
+
+    for row_label, df in lrk_frame_sets:
+        x_positions = list(range(len(df)))
+        for metric_name, metric_label in CLUSTERING_METRIC_PLOTS:
+            lrk_ax.plot(
+                x_positions,
+                df[metric_name],
+                **_line_style_kwargs(row_label, metric_name),
+                markersize=2,
+                linewidth=1,
+                label=f"{row_label}: {metric_label}",
+            )
+
+    lrk_base_df = lrk_frame_sets[0][1]
+    lrk_labels = [
+        f"L{int(row.layer_idx)} H{int(row.head_idx)}"
+        for row in lrk_base_df.itertuples()
+    ]
+    max_layers = max(
+        df["layer_idx"].nunique() for _, df in lrk_frame_sets
+    )
+    lrk_ax.set_xlabel("Layer/head", fontsize=font_size)
+    lrk_ax.set_ylabel("Error", fontsize=font_size)
+    lrk_ax.grid(True, alpha=0.25)
+    _set_sparse_tick_labels(
+        lrk_ax,
+        lrk_labels,
+        axis="x",
+        max_ticks=min(18, max(8, max_layers)),
+        font_size=tick_font_size,
+    )
+    _apply_paper_axis_style(lrk_ax, tick_font_size)
+
+    for row_label, df in xkv_frame_sets:
+        x_positions = list(range(len(df)))
+        for metric_name, metric_label in CLUSTERING_METRIC_PLOTS:
+            xkv_ax.plot(
+                x_positions,
+                df[metric_name],
+                **_line_style_kwargs(row_label, metric_name),
+                markersize=4,
+                linewidth=1.5,
+                label=f"{row_label}: {metric_label}",
+            )
+
+    xkv_base_df = xkv_frame_sets[0][1]
+    group_labels = [
+        f"{int(row.group_start_layer)}-{int(row.group_last_layer)}"
+        for row in xkv_base_df.itertuples()
+    ]
+    xkv_ax.set_xlabel("Layer group", fontsize=font_size)
+    xkv_ax.set_ylabel("Error", fontsize=font_size)
+    xkv_ax.grid(True, alpha=0.25)
+    _set_sparse_tick_labels(
+        xkv_ax,
+        group_labels,
+        axis="x",
+        max_ticks=12,
+        font_size=tick_font_size,
+    )
+    _apply_paper_axis_style(xkv_ax, tick_font_size)
+
+    correlation_rows = []
+    for plot_label, frame_sets in (
+        ("PH", lrk_frame_sets),
+        ("xKV", xkv_frame_sets),
+    ):
+        for row_label, df in frame_sets:
+            bound = df[
+                "relative_low_rank_recon_error_bound"
+            ]
+            error = df["relative_low_rank_recon_error"]
+            pearson = bound.corr(error, method="pearson")
+            spearman = bound.corr(error, method="spearman")
+            pair_label = {
+                "Clustered": "Clust.",
+                "Unclustered": "Unclust.",
+            }.get(row_label, row_label)
+            correlation_rows.append(
+                (
+                    plot_label,
+                    pair_label,
+                    f"{pearson:.2f}",
+                    f"{spearman:.2f}",
+                )
+            )
+
+    table_ax.axis("off")
+    correlation_table = table_ax.table(
+        cellText=correlation_rows,
+        colLabels=("Plot", "Pair", "Pearson", "Spearman"),
+        cellLoc="center",
+        colLoc="center",
+        colWidths=(0.14, 0.26, 0.30, 0.30),
+        loc="center",
+    )
+    correlation_table.auto_set_font_size(False)
+    correlation_table.set_fontsize(tick_font_size)
+    correlation_table.scale(1, 2.53125)
+
+    handles, labels = lrk_ax.get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.99),
+        ncol=len(labels),
+        fontsize=font_size,
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.89))
+    plt.show()
+    return fig
+
+
+def _spectral_curves(
+    records: list[dict[str, Any]],
+    *,
+    metric_scopes: tuple[str, ...],
+) -> torch.Tensor | None:
+    for metric_scope in metric_scopes:
+        curves = [
+            curve
+            for record in records
+            if record["metric_scope"] == metric_scope
+            for curve in record.get("spectral_tail_curves", [])
+        ]
+        if curves:
+            return torch.tensor(curves, dtype=torch.float32)
+    return None
+
+
+def _plot_spectral_tails(
+    lrk_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    xkv_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    font_size: int | float,
+    figsize: tuple[float, float],
+) -> Any | None:
+    import matplotlib.pyplot as plt
+
+    plot_specs = (
+        ("PH", lrk_metric_sets, ("head", "layer")),
+        ("xKV", xkv_metric_sets, ("group",)),
+    )
+    fig, axes = plt.subplots(2, 2, figsize=figsize, sharey=True)
+    plotted = False
+    for ax, (title, metric_sets, metric_scopes) in zip(
+        axes[0], plot_specs, strict=True
+    ):
+        for label, records in metric_sets:
+            curves = _spectral_curves(
+                records,
+                metric_scopes=metric_scopes,
+            )
+            if curves is None:
+                continue
+            plotted = True
+            x_values = torch.linspace(0, 100, curves.size(1)).numpy()
+            mean = curves.mean(dim=0)
+            median = curves.median(dim=0).values
+            color = CLUSTERING_DIFFERENCE_COLORS[label]
+            ax.plot(
+                x_values,
+                mean.clamp_min(1e-6).numpy(),
+                color=color,
+                linestyle="-",
+                linewidth=1.5,
+                label=f"{label} mean",
+            )
+            ax.plot(
+                x_values,
+                median.clamp_min(1e-6).numpy(),
+                color=color,
+                linestyle="--",
+                linewidth=1.5,
+                label=f"{label} median",
+            )
+            if curves.size(0) > 1:
+                std = curves.std(dim=0, unbiased=False)
+                ax.fill_between(
+                    x_values,
+                    (mean - std).clamp(min=1e-6, max=100).numpy(),
+                    (mean + std).clamp(min=1e-6, max=100).numpy(),
+                    color=color,
+                    alpha=0.25,
+                    linewidth=0,
+                )
+
+        ax.set_title(title, fontsize=font_size)
+        ax.set_xlabel("Relative rank (%)", fontsize=font_size)
+        ax.set_yscale("log")
+        ax.grid(True, alpha=0.25)
+        _apply_paper_axis_style(ax, font_size)
+
+    for ax, (title, metric_sets, metric_scopes) in zip(
+        axes[1], plot_specs, strict=True
+    ):
+        for label, records in metric_sets:
+            curves = []
+            for metric_scope in metric_scopes:
+                curves = [
+                    curve
+                    for record in records
+                    if record["metric_scope"] == metric_scope
+                    for curve in record.get(
+                        "spectral_tail_raw_curves", []
+                    )
+                ]
+                if curves:
+                    break
+            color = CLUSTERING_DIFFERENCE_COLORS[label]
+            for curve_idx, curve in enumerate(curves):
+                plotted = True
+                ax.plot(
+                    range(len(curve)),
+                    torch.tensor(curve).clamp_min(1e-6).numpy(),
+                    color=color,
+                    linestyle=CLUSTERING_SET_STYLES[label]["linestyle"],
+                    linewidth=1,
+                    alpha=0.35 if label == "Clustered" else 0.6,
+                    label=label if curve_idx == 0 else None,
+                )
+
+        ax.set_xlabel("Rank", fontsize=font_size)
+        ax.set_yscale("log")
+        ax.grid(True, alpha=0.25)
+        _apply_paper_axis_style(ax, font_size)
+
+    if not plotted:
+        plt.close(fig)
+        return None
+
+    axes[0, 0].set_ylabel("Spectral tail mass (%)", fontsize=font_size)
+    axes[1, 0].set_ylabel("Spectral tail mass (%)", fontsize=font_size)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=len(labels),
+        fontsize=font_size,
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
     plt.show()
     return fig
 
@@ -1861,6 +2245,8 @@ def _plot_case_metrics(
     *,
     font_size: int | float,
     figsize: tuple[float, float],
+    combined_figsize: tuple[float, float],
+    spectral_figsize: tuple[float, float],
     show_difference: bool,
 ) -> list[Any | None]:
     lrk_metric_sets = [
@@ -1891,6 +2277,18 @@ def _plot_case_metrics(
             figsize=figsize,
             show_difference=show_difference,
         ),
+        _plot_combined_lrk_xkv_metrics(
+            lrk_metric_sets,
+            xkv_metric_sets,
+            font_size=font_size,
+            figsize=combined_figsize,
+        ),
+        _plot_spectral_tails(
+            lrk_metric_sets,
+            xkv_metric_sets,
+            font_size=font_size,
+            figsize=spectral_figsize,
+        ),
     ]
     return figures
 
@@ -1901,6 +2299,8 @@ def display_case_result(
     show_detail_tables: bool = False,
     plot_font_size: int | float = 11,
     plot_figsize: tuple[float, float] = CLUSTERING_PLOT_FIGSIZE,
+    combined_plot_figsize: tuple[float, float] = (10, 12),
+    spectral_plot_figsize: tuple[float, float] = (10, 10),
     show_bound_error_difference: bool = False,
 ) -> list[Any | None]:
     from IPython.display import display
@@ -1914,6 +2314,8 @@ def display_case_result(
         case_result,
         font_size=plot_font_size,
         figsize=plot_figsize,
+        combined_figsize=combined_plot_figsize,
+        spectral_figsize=spectral_plot_figsize,
         show_difference=show_bound_error_difference,
     )
 
