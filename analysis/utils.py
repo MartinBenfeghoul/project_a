@@ -334,7 +334,21 @@ def load_kv_dump(
     kv_dump_path = Path(kv_dump_path)
     kvs = torch.load(kv_dump_path)
     raw_keys = kvs["keys"]
-    rope_theta = float(kvs.get("rope_theta", default_rope_theta))
+    rope_theta = kvs.get("rope_theta")
+    if rope_theta is None and kvs.get("model_name"):
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(
+            kvs["model_name"],
+            local_files_only=True,
+        )
+        rope_theta = getattr(config, "rope_theta", None)
+        if rope_theta is None:
+            rope_parameters = getattr(config, "rope_parameters", None) or {}
+            rope_theta = rope_parameters.get("rope_theta")
+    rope_theta = float(
+        default_rope_theta if rope_theta is None else rope_theta
+    )
     keys = (
         unrope_dumped_keys(raw_keys, rope_theta)
         if unrope_keys_on_load
