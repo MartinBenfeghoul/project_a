@@ -6,7 +6,7 @@
 
 set -e
 
-CLI_PATH="/tmp/${USER}-vscode_cli"
+CLI_PATH="$HOME/tmp/${USER}-vscode_cli"
 echo "CLI_PATH: ${CLI_PATH}"
 
 # Install the VS Code CLI command if it doesn't exist
