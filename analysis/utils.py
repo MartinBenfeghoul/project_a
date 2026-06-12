@@ -2136,23 +2136,16 @@ def _spectral_curves(
     return None
 
 
-def _plot_spectral_tails(
-    lrk_metric_sets: list[tuple[str, list[dict[str, Any]]]],
-    xkv_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+def _plot_relative_spectral_tail_axes(
+    axes: Any,
+    plot_specs: tuple[Any, ...],
     *,
     font_size: int | float,
-    figsize: tuple[float, float],
-) -> Any | None:
-    import matplotlib.pyplot as plt
-
-    plot_specs = (
-        ("PH", lrk_metric_sets, ("head", "layer")),
-        ("xKV", xkv_metric_sets, ("group",)),
-    )
-    fig, axes = plt.subplots(2, 2, figsize=figsize, sharey=True)
+    ylim: tuple[float, float] | None,
+) -> bool:
     plotted = False
     for ax, (title, metric_sets, metric_scopes) in zip(
-        axes[0], plot_specs, strict=True
+        axes, plot_specs, strict=True
     ):
         for label, records in metric_sets:
             curves = _spectral_curves(
@@ -2195,9 +2188,160 @@ def _plot_spectral_tails(
 
         ax.set_title(title, fontsize=font_size)
         ax.set_xlabel("Relative rank (%)", fontsize=font_size)
-        ax.set_yscale("log")
+        if ylim is not None:
+            ax.set_ylim(*ylim)
         ax.grid(True, alpha=0.25)
         _apply_paper_axis_style(ax, font_size)
+    return plotted
+
+
+def _plot_relative_spectral_tails(
+    lrk_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    xkv_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    font_size: int | float,
+    figsize: tuple[float, float],
+    ylim: tuple[float, float] | None,
+) -> Any | None:
+    import matplotlib.pyplot as plt
+
+    plot_specs = (
+        ("Per-head", lrk_metric_sets, ("head", "layer")),
+        ("xKV", xkv_metric_sets, ("group",)),
+    )
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
+    plotted = _plot_relative_spectral_tail_axes(
+        axes,
+        plot_specs,
+        font_size=font_size,
+        ylim=ylim,
+    )
+    if not plotted:
+        plt.close(fig)
+        return None
+
+    axes[0].set_ylabel("Spectral tail mass (%)", fontsize=font_size)
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=len(labels),
+        fontsize=font_size,
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.9))
+    plt.show()
+    return fig
+
+
+def plot_combined_relative_spectral_tails(
+    keys_result: dict[str, Any],
+    values_result: dict[str, Any],
+    *,
+    font_size: int | float = 11,
+    figsize: tuple[float, float] = (10, 10),
+    values_ylim: tuple[float, float] | None = None,
+) -> Any | None:
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 2, figsize=figsize, sharey="row")
+    plotted = False
+    row_plot_specs = []
+    for row_axes, case_result in (
+        (axes[0], keys_result),
+        (axes[1], values_result),
+    ):
+        lrk_metric_sets = [
+            ("Clustered", case_result["lrk_results"]),
+            ("Unclustered", case_result["lrk_results_n1"]),
+        ]
+        xkv_metric_sets = [
+            ("Clustered", case_result["xkv_results"]),
+            ("Unclustered", case_result["xkv_results_n1"]),
+        ]
+        plot_specs = (
+            ("Per-head", lrk_metric_sets, ("head", "layer")),
+            ("xKV", xkv_metric_sets, ("group",)),
+        )
+        row_plot_specs.append(plot_specs)
+        plotted |= _plot_relative_spectral_tail_axes(
+            row_axes,
+            plot_specs,
+            font_size=font_size,
+            ylim=values_ylim,
+        )
+
+    if not plotted:
+        plt.close(fig)
+        return None
+
+    axes[0, 0].set_ylabel(
+        "Keys\nSpectral tail mass (%)", fontsize=font_size
+    )
+    axes[1, 0].set_ylabel(
+        "Values\nSpectral tail mass (%)", fontsize=font_size
+    )
+    inset_axes = [
+        ax.inset_axes((0.47, 0.42, 0.5, 0.5)) for ax in axes[0]
+    ]
+    _plot_relative_spectral_tail_axes(
+        inset_axes,
+        row_plot_specs[0],
+        font_size=max(font_size - 4, 8),
+        ylim=(0, 30),
+    )
+    for inset_ax in inset_axes:
+        inset_ax.set_xlim(0, 20)
+        inset_ax.set_title("")
+        inset_ax.set_xlabel("")
+        inset_ax.grid(False)
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.02),
+        ncol=len(labels),
+        fontsize=font_size,
+        frameon=False,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    plt.show()
+    return fig
+
+
+def _plot_spectral_tails(
+    lrk_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    xkv_metric_sets: list[tuple[str, list[dict[str, Any]]]],
+    *,
+    font_size: int | float,
+    figsize: tuple[float, float],
+    ylim: tuple[float, float] | None,
+) -> Any | None:
+    import matplotlib.pyplot as plt
+
+    plot_specs = (
+        ("Per-head", lrk_metric_sets, ("head", "layer")),
+        ("xKV", xkv_metric_sets, ("group",)),
+    )
+    fig, axes = plt.subplots(2, 2, figsize=figsize, sharey=True)
+    plotted = _plot_relative_spectral_tail_axes(
+        axes[0],
+        plot_specs,
+        font_size=font_size,
+        ylim=None,
+    )
+
+    log_ylim = ylim
+    if log_ylim is not None and log_ylim[0] <= 0:
+        log_ylim = (1e-6, log_ylim[1])
+    for ax in axes[0]:
+        ax.set_yscale("log")
+        if log_ylim is not None:
+            ax.set_ylim(*log_ylim)
 
     for ax, (title, metric_sets, metric_scopes) in zip(
         axes[1], plot_specs, strict=True
@@ -2230,6 +2374,8 @@ def _plot_spectral_tails(
 
         ax.set_xlabel("Rank", fontsize=font_size)
         ax.set_yscale("log")
+        if log_ylim is not None:
+            ax.set_ylim(*log_ylim)
         ax.grid(True, alpha=0.25)
         _apply_paper_axis_style(ax, font_size)
 
@@ -2260,7 +2406,9 @@ def _plot_case_metrics(
     font_size: int | float,
     figsize: tuple[float, float],
     combined_figsize: tuple[float, float],
+    relative_spectral_figsize: tuple[float, float],
     spectral_figsize: tuple[float, float],
+    spectral_ylim: tuple[float, float] | None,
     show_difference: bool,
 ) -> list[Any | None]:
     lrk_metric_sets = [
@@ -2297,11 +2445,19 @@ def _plot_case_metrics(
             font_size=font_size,
             figsize=combined_figsize,
         ),
+        _plot_relative_spectral_tails(
+            lrk_metric_sets,
+            xkv_metric_sets,
+            font_size=font_size,
+            figsize=relative_spectral_figsize,
+            ylim=spectral_ylim,
+        ),
         _plot_spectral_tails(
             lrk_metric_sets,
             xkv_metric_sets,
             font_size=font_size,
             figsize=spectral_figsize,
+            ylim=spectral_ylim,
         ),
     ]
     return figures
@@ -2314,7 +2470,9 @@ def display_case_result(
     plot_font_size: int | float = 11,
     plot_figsize: tuple[float, float] = CLUSTERING_PLOT_FIGSIZE,
     combined_plot_figsize: tuple[float, float] = (10, 12),
+    relative_spectral_plot_figsize: tuple[float, float] = (10, 5),
     spectral_plot_figsize: tuple[float, float] = (10, 10),
+    spectral_ylim: tuple[float, float] | None = None,
     show_bound_error_difference: bool = False,
 ) -> list[Any | None]:
     from IPython.display import display
@@ -2329,7 +2487,9 @@ def display_case_result(
         font_size=plot_font_size,
         figsize=plot_figsize,
         combined_figsize=combined_plot_figsize,
+        relative_spectral_figsize=relative_spectral_plot_figsize,
         spectral_figsize=spectral_plot_figsize,
+        spectral_ylim=spectral_ylim,
         show_difference=show_bound_error_difference,
     )
 
