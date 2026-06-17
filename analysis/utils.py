@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from utils.matrix_decomposition import (
     DECOMP_METHODS,
     decompose_grouped_xkv_to_segment_store,
     decompose_to_segment_store,
+    find_rank_wrt_cr,
     reconstruct_segments,
 )
 from utils.rope import compute_rope_cos_sin, inverse_rope
@@ -346,9 +348,7 @@ def load_kv_dump(
         if rope_theta is None:
             rope_parameters = getattr(config, "rope_parameters", None) or {}
             rope_theta = rope_parameters.get("rope_theta")
-    rope_theta = float(
-        default_rope_theta if rope_theta is None else rope_theta
-    )
+    rope_theta = float(default_rope_theta if rope_theta is None else rope_theta)
     keys = (
         unrope_dumped_keys(raw_keys, rope_theta)
         if unrope_keys_on_load
@@ -632,9 +632,7 @@ def _spectral_tail_metrics(
         curves = []
         raw_curves = []
         for start_idx, end_idx in batch_ranges:
-            segment = tensor_to_decompose[
-                batch_idx, ..., start_idx:end_idx, :
-            ]
+            segment = tensor_to_decompose[batch_idx, ..., start_idx:end_idx, :]
             singular_values = torch.linalg.svdvals(
                 segment.to(dtype=torch.float32).contiguous()
             ).reshape(-1, min(segment.size(-2), segment.size(-1)))
@@ -1536,6 +1534,904 @@ def run_analysis_case(
     }
 
 
+ALIGNMENT_MARKER_MAP = {
+    ("K", "per_head"): "o",
+    ("V", "per_head"): "^",
+    ("K", "xkv"): "s",
+    ("V", "xkv"): "D",
+}
+
+
+def _split_by_labels(X: torch.Tensor, labels: torch.Tensor) -> list[torch.Tensor]:
+    return [X[labels == label] for label in labels.unique(sorted=True)]
+
+
+def _rank_for_comp_ratio(X: torch.Tensor, comp_ratio: float) -> int:
+    return find_rank_wrt_cr(comp_ratio, X.size(0), X.size(1))
+
+
+def _top_right_basis(
+    X: torch.Tensor,
+    rank: int,
+    center: bool = True,
+) -> torch.Tensor:
+    X = X.to(dtype=torch.float32)
+    if center:
+        X = X - X.mean(dim=0, keepdim=True)
+    _, _, Vh = torch.linalg.svd(X.contiguous(), full_matrices=False)
+    rank = min(rank, Vh.size(0))
+    return Vh[:rank].T.contiguous()
+
+
+def subspace_alignment_from_matrices(
+    Xs: list[torch.Tensor],
+    rank: int,
+) -> float:
+    Xs = [X for X in Xs if X.size(0) > 0]
+    if len(Xs) < 2:
+        return math.nan
+
+    bases = [_top_right_basis(X, rank) for X in Xs]
+    weights = [X.size(0) for X in Xs]
+    numerator = torch.zeros((), device=Xs[0].device, dtype=torch.float32)
+    denominator = 0
+
+    for i in range(len(Xs)):
+        for j in range(i + 1, len(Xs)):
+            pair_rank = min(bases[i].size(1), bases[j].size(1))
+            if pair_rank == 0:
+                continue
+            pair_alignment = (
+                bases[i][:, :pair_rank].T @ bases[j][:, :pair_rank]
+            ).pow(2).sum() / pair_rank
+            weight = weights[i] * weights[j]
+            numerator = numerator + weight * pair_alignment
+            denominator += weight
+
+    if denominator == 0:
+        return math.nan
+    return float((numerator / denominator).item())
+
+
+def _centroid_separation(Xs: list[torch.Tensor]) -> float:
+    Xs = [X.to(dtype=torch.float32) for X in Xs if X.size(0) > 0]
+    if not Xs:
+        return math.nan
+
+    X = torch.cat(Xs, dim=0)
+    global_mean = X.mean(dim=0, keepdim=True)
+    total = (X - global_mean).pow(2).sum()
+    if total <= 0:
+        return 0.0
+
+    between = torch.zeros((), device=X.device, dtype=torch.float32)
+    for Xc in Xs:
+        cluster_mean = Xc.mean(dim=0, keepdim=True)
+        between = (
+            between + Xc.size(0) * (cluster_mean - global_mean).pow(2).sum()
+        )
+    return float((between / total).item())
+
+
+def _tail_energy_at_rank(X: torch.Tensor, rank: int) -> torch.Tensor:
+    singular_values = torch.linalg.svdvals(
+        X.to(dtype=torch.float32).contiguous()
+    )
+    rank = min(rank, singular_values.numel())
+    return singular_values[rank:].pow(2).sum()
+
+
+def _spectral_tail_delta(
+    X: torch.Tensor,
+    Xs: list[torch.Tensor],
+    comp_ratio: float,
+) -> float:
+    X = X.to(dtype=torch.float32)
+    denom = X.pow(2).sum()
+    if denom <= 0:
+        return 0.0
+
+    clustered_tail = torch.zeros((), device=X.device, dtype=torch.float32)
+    for Xc in Xs:
+        if Xc.size(0) == 0:
+            continue
+        clustered_tail = clustered_tail + _tail_energy_at_rank(
+            Xc,
+            _rank_for_comp_ratio(Xc, comp_ratio),
+        )
+
+    global_tail = _tail_energy_at_rank(X, _rank_for_comp_ratio(X, comp_ratio))
+    return float(((global_tail - clustered_tail) / denom).item())
+
+
+def partition_alignment_diagnostics(
+    X: torch.Tensor,
+    labels: torch.Tensor,
+    comp_ratio: float,
+) -> dict[str, float | int]:
+    Xs = _split_by_labels(X, labels)
+    rank = _rank_for_comp_ratio(X, comp_ratio)
+    return {
+        "A_align": subspace_alignment_from_matrices(Xs, rank),
+        "B_sep": _centroid_separation(Xs),
+        "delta_tail": _spectral_tail_delta(X, Xs, comp_ratio),
+        "rank": rank,
+        "cluster_count": len(Xs),
+    }
+
+
+def _kmeans_labels_from_cfg(
+    features: torch.Tensor,
+    kmeans_cfg: dict[str, Any],
+) -> torch.Tensor:
+    cluster_count = _get_cluster_count(
+        features.size(1),
+        kmeans_cfg["n_clusters"],
+        kmeans_cluster_size=kmeans_cfg.get("kmeans_cluster_size"),
+    )
+    return kmeans_cluster_sequences(
+        features,
+        n_clusters=cluster_count,
+        n_iter=max(1, kmeans_cfg["kmeans_n_iter"]),
+        kmeans_init=kmeans_cfg["kmeans_init"],
+        dtype=_resolve_kmeans_dtype(kmeans_cfg["kmeans_dtype"]),
+    )
+
+
+def collect_per_head_partition_diagnostics(
+    tensor: torch.Tensor,
+    *,
+    cache_name: str,
+    kmeans_cfg: dict[str, Any],
+    comp_ratio: float,
+    prefix_end: int | None = None,
+    local_window: int = 0,
+) -> list[dict[str, Any]]:
+    tensor = _ensure_layer_batched_tensor(tensor)
+    rows = []
+
+    with torch.no_grad():
+        for layer_idx in range(tensor.size(0)):
+            prefix, _ = _select_prefix(
+                tensor[layer_idx],
+                prefix_end=prefix_end,
+                local_window=local_window,
+            )
+            batch_size, num_heads, seq_len, head_dim = prefix.shape
+            features = prefix.reshape(batch_size * num_heads, seq_len, head_dim)
+            labels = _kmeans_labels_from_cfg(features, kmeans_cfg)
+
+            for flat_idx in range(features.size(0)):
+                batch_idx = flat_idx // num_heads
+                head_idx = flat_idx % num_heads
+                metrics = partition_alignment_diagnostics(
+                    features[flat_idx],
+                    labels[flat_idx],
+                    comp_ratio,
+                )
+                rows.append(
+                    {
+                        "diagnostic": "cluster_partition",
+                        "scope": "per_head",
+                        "cache": cache_name,
+                        "layer_idx": layer_idx,
+                        "batch_idx": batch_idx,
+                        "head_idx": head_idx,
+                        "group_start_layer": None,
+                        "group_last_layer": None,
+                        "seq_len": seq_len,
+                        "feature_dim": head_dim,
+                        **metrics,
+                    }
+                )
+
+    return rows
+
+
+def collect_xkv_partition_diagnostics(
+    tensor: torch.Tensor,
+    *,
+    cache_name: str,
+    kmeans_cfg: dict[str, Any],
+    comp_ratio: float,
+    layer_group_size: int,
+    num_layers: int | None = None,
+    prefix_end: int | None = None,
+    local_window: int = 0,
+) -> list[dict[str, Any]]:
+    tensor = _ensure_layer_batched_tensor(tensor)
+    if num_layers is None:
+        num_layers = tensor.size(0)
+    rows = []
+
+    with torch.no_grad():
+        for group_start in range(0, num_layers, layer_group_size):
+            group_last = min(group_start + layer_group_size, num_layers) - 1
+            prefix_layers = []
+            for layer_idx in range(group_start, group_last + 1):
+                prefix, _ = _select_prefix(
+                    tensor[layer_idx],
+                    prefix_end=prefix_end,
+                    local_window=local_window,
+                )
+                prefix_layers.append(
+                    prefix.transpose(1, 2).reshape(
+                        prefix.size(0),
+                        prefix.size(-2),
+                        -1,
+                    )
+                )
+
+            seq_lens = {prefix.size(1) for prefix in prefix_layers}
+            if len(seq_lens) != 1:
+                raise ValueError(
+                    "All layers in an xKV group must share the same prefix "
+                    "length."
+                )
+
+            features = torch.cat(prefix_layers, dim=-1)
+            labels = _kmeans_labels_from_cfg(features, kmeans_cfg)
+            for batch_idx in range(features.size(0)):
+                metrics = partition_alignment_diagnostics(
+                    features[batch_idx],
+                    labels[batch_idx],
+                    comp_ratio,
+                )
+                rows.append(
+                    {
+                        "diagnostic": "cluster_partition",
+                        "scope": "xkv",
+                        "cache": cache_name,
+                        "layer_idx": group_last,
+                        "batch_idx": batch_idx,
+                        "head_idx": None,
+                        "group_start_layer": group_start,
+                        "group_last_layer": group_last,
+                        "seq_len": features.size(1),
+                        "feature_dim": features.size(2),
+                        **metrics,
+                    }
+                )
+
+    return rows
+
+
+def collect_cross_layer_pooling_diagnostics(
+    tensor: torch.Tensor,
+    *,
+    cache_name: str,
+    comp_ratio: float,
+    layer_group_size: int,
+    num_layers: int | None = None,
+    prefix_end: int | None = None,
+    local_window: int = 0,
+) -> list[dict[str, Any]]:
+    tensor = _ensure_layer_batched_tensor(tensor)
+    if num_layers is None:
+        num_layers = tensor.size(0)
+    rows = []
+
+    with torch.no_grad():
+        for group_start in range(0, num_layers, layer_group_size):
+            group_last = min(group_start + layer_group_size, num_layers) - 1
+            layer_prefixes = [
+                _select_prefix(
+                    tensor[layer_idx],
+                    prefix_end=prefix_end,
+                    local_window=local_window,
+                )[0]
+                for layer_idx in range(group_start, group_last + 1)
+            ]
+            batch_size, num_heads, seq_len, head_dim = layer_prefixes[0].shape
+
+            for batch_idx in range(batch_size):
+                pooled_layer_matrices = [
+                    prefix[batch_idx]
+                    .transpose(0, 1)
+                    .reshape(seq_len, num_heads * head_dim)
+                    for prefix in layer_prefixes
+                ]
+                pooled_rank = _rank_for_comp_ratio(
+                    pooled_layer_matrices[0],
+                    comp_ratio,
+                )
+                rows.append(
+                    {
+                        "diagnostic": "cross_layer_pooling",
+                        "scope": "xkv_layer_matrix",
+                        "cache": cache_name,
+                        "batch_idx": batch_idx,
+                        "head_idx": None,
+                        "group_start_layer": group_start,
+                        "group_last_layer": group_last,
+                        "seq_len": seq_len,
+                        "feature_dim": num_heads * head_dim,
+                        "rank": pooled_rank,
+                        "A_align": subspace_alignment_from_matrices(
+                            pooled_layer_matrices,
+                            pooled_rank,
+                        ),
+                        "B_sep": math.nan,
+                        "delta_tail": math.nan,
+                        "cluster_count": len(pooled_layer_matrices),
+                    }
+                )
+
+                for head_idx in range(num_heads):
+                    head_matrices = [
+                        prefix[batch_idx, head_idx]
+                        for prefix in layer_prefixes
+                    ]
+                    head_rank = _rank_for_comp_ratio(
+                        head_matrices[0],
+                        comp_ratio,
+                    )
+                    rows.append(
+                        {
+                            "diagnostic": "cross_layer_pooling",
+                            "scope": "xkv_same_head",
+                            "cache": cache_name,
+                            "batch_idx": batch_idx,
+                            "head_idx": head_idx,
+                            "group_start_layer": group_start,
+                            "group_last_layer": group_last,
+                            "seq_len": seq_len,
+                            "feature_dim": head_dim,
+                            "rank": head_rank,
+                            "A_align": subspace_alignment_from_matrices(
+                                head_matrices,
+                                head_rank,
+                            ),
+                            "B_sep": math.nan,
+                            "delta_tail": math.nan,
+                            "cluster_count": len(head_matrices),
+                        }
+                    )
+
+    return rows
+
+
+def collect_alignment_diagnostics(
+    tensors: dict[str, torch.Tensor],
+    *,
+    kmeans_cfg: dict[str, Any],
+    comp_ratio: float,
+    layer_group_size: int,
+    num_layers: int | None = None,
+    prefix_end: int | None = None,
+    local_window: int = 0,
+):
+    if pd is None:
+        raise ImportError("pandas is required to collect alignment diagnostics.")
+
+    rows = []
+    for cache_name, tensor in tensors.items():
+        rows.extend(
+            collect_per_head_partition_diagnostics(
+                tensor,
+                cache_name=cache_name,
+                kmeans_cfg=kmeans_cfg,
+                comp_ratio=comp_ratio,
+                prefix_end=prefix_end,
+                local_window=local_window,
+            )
+        )
+        rows.extend(
+            collect_xkv_partition_diagnostics(
+                tensor,
+                cache_name=cache_name,
+                kmeans_cfg=kmeans_cfg,
+                comp_ratio=comp_ratio,
+                layer_group_size=layer_group_size,
+                num_layers=num_layers,
+                prefix_end=prefix_end,
+                local_window=local_window,
+            )
+        )
+        rows.extend(
+            collect_cross_layer_pooling_diagnostics(
+                tensor,
+                cache_name=cache_name,
+                comp_ratio=comp_ratio,
+                layer_group_size=layer_group_size,
+                num_layers=num_layers,
+                prefix_end=prefix_end,
+                local_window=local_window,
+            )
+        )
+
+    return pd.DataFrame(rows)
+
+
+def summarize_alignment_diagnostics(alignment_df):
+    return (
+        alignment_df.groupby(["diagnostic", "scope", "cache"], dropna=False)
+        .agg(
+            n=("A_align", "count"),
+            A_align_mean=("A_align", "mean"),
+            A_align_median=("A_align", "median"),
+            B_sep_mean=("B_sep", "mean"),
+            B_sep_median=("B_sep", "median"),
+            delta_tail_mean=("delta_tail", "mean"),
+            delta_tail_median=("delta_tail", "median"),
+        )
+        .reset_index()
+    )
+
+
+def _cluster_partition_frame(alignment_df):
+    return alignment_df[alignment_df["diagnostic"].eq("cluster_partition")]
+
+
+def plot_alignment_tail_delta(
+    alignment_df,
+    *,
+    figsize: tuple[float, float] = (7, 5),
+    font_size: int | float = 12,
+) -> Any:
+    import matplotlib.pyplot as plt
+
+    plot_df = _cluster_partition_frame(alignment_df)
+    colors = {"per_head": "tab:blue", "xkv": "tab:orange"}
+    markers = {"K": "o", "V": "^"}
+
+    fig, ax = plt.subplots(figsize=figsize)
+    for (scope, cache), group_df in plot_df.groupby(["scope", "cache"]):
+        ax.scatter(
+            group_df["A_align"],
+            group_df["delta_tail"],
+            label=f"{scope} {cache}",
+            c=colors.get(scope, "tab:gray"),
+            marker=markers.get(cache, "o"),
+            alpha=0.75,
+            edgecolors="none",
+        )
+
+    ax.axhline(0.0, color="black", linewidth=1, linestyle="--")
+    ax.set_xlabel("Subspace alignment A", fontsize=font_size)
+    ax.set_ylabel("Delta tail: global - clustered", fontsize=font_size)
+    ax.legend(frameon=False, fontsize=font_size - 1)
+    ax.tick_params(labelsize=font_size - 1)
+    fig.tight_layout()
+    return fig
+
+
+def plot_alignment_centroid_delta(
+    alignment_df,
+    *,
+    figsize: tuple[float, float] = (7, 5),
+) -> Any:
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import TwoSlopeNorm
+
+    cluster_df = _cluster_partition_frame(alignment_df)
+    fig, ax = plt.subplots(figsize=figsize)
+    max_abs_delta = cluster_df["delta_tail"].abs().max()
+    if max_abs_delta <= 0:
+        max_abs_delta = 1.0
+    norm = TwoSlopeNorm(
+        vmin=-max_abs_delta,
+        vcenter=0.0,
+        vmax=max_abs_delta,
+    )
+    for (cache, scope), group_df in cluster_df.groupby(["cache", "scope"]):
+        ax.scatter(
+            group_df["A_align"],
+            group_df["B_sep"],
+            c=group_df["delta_tail"],
+            cmap="coolwarm",
+            norm=norm,
+            marker=ALIGNMENT_MARKER_MAP[(cache, scope)],
+            alpha=0.75,
+            edgecolors="none",
+            label=f"{cache} {scope}",
+        )
+
+    sm = plt.cm.ScalarMappable(cmap="coolwarm", norm=norm)
+    sm.set_array([])
+    ax.set(xlabel="Subspace alignment A", ylabel="Centroid separation B")
+    ax.legend(frameon=False)
+    fig.colorbar(sm, ax=ax, label="Delta tail: global - clustered")
+    fig.tight_layout()
+    return fig
+
+
+def plot_centroid_tail_delta(
+    alignment_df,
+    *,
+    figsize: tuple[float, float] = (7, 5),
+) -> Any:
+    import matplotlib.pyplot as plt
+
+    cluster_df = _cluster_partition_frame(alignment_df)
+    fig, ax = plt.subplots(figsize=figsize)
+    for (cache, scope), group_df in cluster_df.groupby(["cache", "scope"]):
+        ax.scatter(
+            group_df["B_sep"],
+            group_df["delta_tail"],
+            marker=ALIGNMENT_MARKER_MAP[(cache, scope)],
+            alpha=0.75,
+            edgecolors="none",
+            label=f"{cache} {scope}",
+        )
+    ax.axhline(0.0, color="black", linewidth=1, linestyle="--")
+    ax.set(
+        xlabel="Centroid separation B",
+        ylabel="Delta tail: global - clustered",
+    )
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def _head_representations_for_cka(
+    tensor: torch.Tensor,
+    prefix_end: int | None = None,
+    local_window: int = 0,
+) -> tuple[torch.Tensor, list[str], int, int]:
+    tensor = _select_prefix(
+        tensor,
+        prefix_end=prefix_end,
+        local_window=local_window,
+    )[0]
+    if tensor.dim() == 4:
+        num_layers, num_heads, seq_len, head_dim = tensor.shape
+        reps = tensor.reshape(num_layers * num_heads, seq_len, head_dim)
+    elif tensor.dim() == 5:
+        num_layers, batch_size, num_heads, seq_len, head_dim = tensor.shape
+        reps = tensor.permute(0, 2, 1, 3, 4).reshape(
+            num_layers * num_heads,
+            batch_size * seq_len,
+            head_dim,
+        )
+    else:
+        raise ValueError(
+            "Expected tensor with shape [layers, heads, seq, dim] or "
+            "[layers, batch, heads, seq, dim]."
+        )
+
+    labels = [
+        f"L{layer}H{head}"
+        for layer in range(num_layers)
+        for head in range(num_heads)
+    ]
+    return reps, labels, num_layers, num_heads
+
+
+def _layer_representations_for_cka(
+    tensor: torch.Tensor,
+    prefix_end: int | None = None,
+    local_window: int = 0,
+) -> tuple[torch.Tensor, list[str]]:
+    tensor = _select_prefix(
+        tensor,
+        prefix_end=prefix_end,
+        local_window=local_window,
+    )[0]
+    if tensor.dim() == 4:
+        num_layers, num_heads, seq_len, head_dim = tensor.shape
+        reps = tensor.permute(0, 2, 1, 3).reshape(
+            num_layers,
+            seq_len,
+            num_heads * head_dim,
+        )
+    elif tensor.dim() == 5:
+        num_layers, batch_size, num_heads, seq_len, head_dim = tensor.shape
+        reps = tensor.permute(0, 1, 3, 2, 4).reshape(
+            num_layers,
+            batch_size * seq_len,
+            num_heads * head_dim,
+        )
+    else:
+        raise ValueError(
+            "Expected tensor with shape [layers, heads, seq, dim] or "
+            "[layers, batch, heads, seq, dim]."
+        )
+
+    return reps, [f"L{layer}" for layer in range(num_layers)]
+
+
+def linear_cka_matrix(reps: torch.Tensor) -> torch.Tensor:
+    reps = reps.to(dtype=torch.float32)
+    reps = reps - reps.mean(dim=1, keepdim=True)
+    num_reps, _, feature_dim = reps.shape
+    norms = torch.empty(num_reps, device=reps.device, dtype=torch.float32)
+    for idx in range(num_reps):
+        cov = reps[idx].T @ reps[idx]
+        norms[idx] = cov.pow(2).sum().sqrt().clamp_min(1e-12)
+
+    cka = torch.empty(
+        num_reps,
+        num_reps,
+        device=reps.device,
+        dtype=torch.float32,
+    )
+    block_size = max(1, min(16, 2_000_000 // max(1, feature_dim * feature_dim)))
+    for start_i in range(0, num_reps, block_size):
+        stop_i = min(start_i + block_size, num_reps)
+        Xi = reps[start_i:stop_i]
+        for start_j in range(start_i, num_reps, block_size):
+            stop_j = min(start_j + block_size, num_reps)
+            Xj = reps[start_j:stop_j]
+            cross_cov = torch.einsum("itd,jte->ijde", Xi, Xj)
+            values = cross_cov.pow(2).sum(dim=(-1, -2)) / (
+                norms[start_i:stop_i, None] * norms[None, start_j:stop_j]
+            )
+            cka[start_i:stop_i, start_j:stop_j] = values
+            if start_i != start_j:
+                cka[start_j:stop_j, start_i:stop_i] = values.T
+
+    return cka.clamp(0.0, 1.0).cpu()
+
+
+def collect_head_cka(
+    tensors: dict[str, torch.Tensor],
+    *,
+    prefix_end: int | None = None,
+    local_window: int = 0,
+) -> tuple[dict[str, torch.Tensor], list[str], int, int]:
+    cka_by_cache = {}
+    head_labels = None
+    num_layers = None
+    num_heads = None
+
+    with torch.no_grad():
+        for cache_name, tensor in tensors.items():
+            reps, labels, cache_num_layers, cache_num_heads = (
+                _head_representations_for_cka(
+                    tensor,
+                    prefix_end=prefix_end,
+                    local_window=local_window,
+                )
+            )
+            cka_by_cache[cache_name] = linear_cka_matrix(reps)
+            if head_labels is None:
+                head_labels = labels
+                num_layers = cache_num_layers
+                num_heads = cache_num_heads
+            elif (
+                labels != head_labels
+                or cache_num_layers != num_layers
+                or cache_num_heads != num_heads
+            ):
+                raise ValueError(
+                    "All tensors must have matching layer/head dimensions."
+                )
+
+    return cka_by_cache, head_labels, num_layers, num_heads
+
+
+def collect_layer_cka(
+    tensors: dict[str, torch.Tensor],
+    *,
+    prefix_end: int | None = None,
+    local_window: int = 0,
+) -> tuple[dict[str, torch.Tensor], list[str]]:
+    cka_by_cache = {}
+    layer_labels = None
+
+    with torch.no_grad():
+        for cache_name, tensor in tensors.items():
+            reps, labels = _layer_representations_for_cka(
+                tensor,
+                prefix_end=prefix_end,
+                local_window=local_window,
+            )
+            cka_by_cache[cache_name] = linear_cka_matrix(reps)
+            if layer_labels is None:
+                layer_labels = labels
+            elif labels != layer_labels:
+                raise ValueError("All tensors must have matching layers.")
+
+    return cka_by_cache, layer_labels
+
+
+def _cka_mean_std(values: torch.Tensor) -> dict[str, float | int]:
+    values = values.detach().cpu().to(dtype=torch.float32)
+    if values.numel() == 0:
+        return {
+            "n_pairs": 0,
+            "CKA_mean": math.nan,
+            "CKA_std": math.nan,
+        }
+    return {
+        "n_pairs": int(values.numel()),
+        "CKA_mean": float(values.mean().item()),
+        "CKA_std": float(values.std(unbiased=False).item()),
+    }
+
+
+def _sort_cka_summary_by_mean(summary, cache_order: list[str]):
+    summary = summary.copy()
+    summary["_cache_order"] = summary["cache"].map(
+        {cache_name: idx for idx, cache_name in enumerate(cache_order)}
+    )
+    return (
+        summary.sort_values(
+            ["_cache_order", "CKA_mean"],
+            ascending=[True, False],
+            na_position="last",
+        )
+        .drop(columns="_cache_order")
+        .reset_index(drop=True)
+    )
+
+
+def summarize_head_cka(
+    cka_by_cache: dict[str, torch.Tensor],
+    *,
+    num_layers: int,
+    num_heads: int,
+    layer_group_size: int,
+    sort_by_cka_mean: bool = False,
+):
+    if pd is None:
+        raise ImportError("pandas is required to summarize CKA metrics.")
+
+    pair_idx = torch.triu_indices(
+        num_layers * num_heads,
+        num_layers * num_heads,
+        offset=1,
+    )
+    layers = pair_idx // num_heads
+    heads = pair_idx % num_heads
+    groups = layers // layer_group_size
+    same_head = heads[0].eq(heads[1])
+    same_group = groups[0].eq(groups[1])
+    masks = {
+        "all heads": torch.ones(pair_idx.size(1), dtype=torch.bool),
+        "same layer": layers[0].eq(layers[1]),
+        "different layer": layers[0].ne(layers[1]),
+        "same xKV group": same_group,
+        "different xKV group": same_group.logical_not(),
+        "same head index": same_head,
+        "same head index, same xKV group": same_head & same_group,
+        "same head index, different xKV group": (
+            same_head & same_group.logical_not()
+        ),
+    }
+
+    rows = []
+    for cache_name, cka in cka_by_cache.items():
+        cka = cka.detach().cpu()
+        for setting, mask in masks.items():
+            rows.append(
+                {
+                    "cache": cache_name,
+                    "setting": setting,
+                    **_cka_mean_std(
+                        cka[pair_idx[0, mask], pair_idx[1, mask]]
+                    ),
+                }
+            )
+    summary = pd.DataFrame(rows)
+    if sort_by_cka_mean:
+        summary = _sort_cka_summary_by_mean(
+            summary,
+            cache_order=list(cka_by_cache),
+        )
+    return summary
+
+
+def summarize_layer_cka(
+    cka_by_cache: dict[str, torch.Tensor],
+    *,
+    num_layers: int,
+    layer_group_size: int,
+    sort_by_cka_mean: bool = False,
+):
+    if pd is None:
+        raise ImportError("pandas is required to summarize CKA metrics.")
+
+    pair_idx = torch.triu_indices(num_layers, num_layers, offset=1)
+    groups = pair_idx // layer_group_size
+    masks = {
+        "all layers": torch.ones(pair_idx.size(1), dtype=torch.bool),
+        "same xKV group": groups[0].eq(groups[1]),
+        "different xKV group": groups[0].ne(groups[1]),
+    }
+
+    rows = []
+    for cache_name, cka in cka_by_cache.items():
+        cka = cka.detach().cpu()
+        for setting, mask in masks.items():
+            rows.append(
+                {
+                    "cache": cache_name,
+                    "setting": setting,
+                    **_cka_mean_std(
+                        cka[pair_idx[0, mask], pair_idx[1, mask]]
+                    ),
+                }
+            )
+    summary = pd.DataFrame(rows)
+    if sort_by_cka_mean:
+        summary = _sort_cka_summary_by_mean(
+            summary,
+            cache_order=list(cka_by_cache),
+        )
+    return summary
+
+
+def plot_head_cka_heatmaps(
+    cka_by_cache: dict[str, torch.Tensor],
+    *,
+    num_layers: int,
+    num_heads: int,
+    figsize: tuple[float, float] = (13, 6),
+) -> Any:
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(
+        1,
+        len(cka_by_cache),
+        figsize=figsize,
+        squeeze=False,
+    )
+    layer_centers = [
+        layer * num_heads + (num_heads - 1) / 2
+        for layer in range(num_layers)
+    ]
+    layer_boundaries = [
+        layer * num_heads - 0.5 for layer in range(1, num_layers)
+    ]
+    for ax, (cache_name, cka) in zip(axes.flat, cka_by_cache.items()):
+        im = ax.imshow(
+            cka.detach().cpu().numpy(),
+            vmin=0.0,
+            vmax=1.0,
+            cmap="viridis",
+            interpolation="nearest",
+        )
+        ax.set_title(f"{cache_name} head CKA")
+        ax.set_xlabel("Layer")
+        ax.set_ylabel("Layer")
+        ax.set_xticks(layer_centers)
+        ax.set_yticks(layer_centers)
+        ax.set_xticklabels(range(num_layers), rotation=90, fontsize=7)
+        ax.set_yticklabels(range(num_layers), fontsize=7)
+        for boundary in layer_boundaries:
+            ax.axhline(boundary, color="white", linewidth=0.25, alpha=0.5)
+            ax.axvline(boundary, color="white", linewidth=0.25, alpha=0.5)
+
+    fig.colorbar(im, ax=axes.ravel().tolist(), label="Linear CKA")
+    return fig
+
+
+def plot_layer_cka_heatmaps(
+    cka_by_cache: dict[str, torch.Tensor],
+    *,
+    layer_labels: list[str],
+    figsize: tuple[float, float] = (11, 5),
+) -> Any:
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(
+        1,
+        len(cka_by_cache),
+        figsize=figsize,
+        squeeze=False,
+    )
+    for ax, (cache_name, cka) in zip(axes.flat, cka_by_cache.items()):
+        im = ax.imshow(
+            cka.detach().cpu().numpy(),
+            vmin=0.0,
+            vmax=1.0,
+            cmap="viridis",
+            interpolation="nearest",
+        )
+        ax.set_title(f"{cache_name} layer CKA")
+        ax.set_xlabel("Layer")
+        ax.set_ylabel("Layer")
+        ax.set_xticks(range(len(layer_labels)))
+        ax.set_yticks(range(len(layer_labels)))
+        ax.set_xticklabels(layer_labels, rotation=90, fontsize=7)
+        ax.set_yticklabels(layer_labels, fontsize=7)
+
+    fig.colorbar(im, ax=axes.ravel().tolist(), label="Linear CKA")
+    return fig
+
+
 def _metric_plot_frame(
     records: list[dict[str, Any]],
     *,
@@ -1673,10 +2569,9 @@ def _plot_bound_error_ratio(
     font_size: int | float,
 ) -> None:
     for row_label, df in frame_sets:
-        ratio = (
-            df["relative_low_rank_recon_error_bound"]
-            / df["relative_low_rank_recon_error"].clip(lower=1e-12)
-        )
+        ratio = df["relative_low_rank_recon_error_bound"] / df[
+            "relative_low_rank_recon_error"
+        ].clip(lower=1e-12)
         ax.plot(
             x_positions,
             ratio,
@@ -2022,9 +2917,7 @@ def _plot_combined_lrk_xkv_metrics(
         f"L{int(row.layer_idx)} H{int(row.head_idx)}"
         for row in lrk_base_df.itertuples()
     ]
-    max_layers = max(
-        df["layer_idx"].nunique() for _, df in lrk_frame_sets
-    )
+    max_layers = max(df["layer_idx"].nunique() for _, df in lrk_frame_sets)
     lrk_ax.set_xlabel("Layer/head", fontsize=font_size)
     lrk_ax.set_ylabel("Error", fontsize=font_size)
     lrk_ax.grid(True, alpha=0.25)
@@ -2072,9 +2965,7 @@ def _plot_combined_lrk_xkv_metrics(
         ("xKV", xkv_frame_sets),
     ):
         for row_label, df in frame_sets:
-            bound = df[
-                "relative_low_rank_recon_error_bound"
-            ]
+            bound = df["relative_low_rank_recon_error_bound"]
             error = df["relative_low_rank_recon_error"]
             pearson = bound.corr(error, method="pearson")
             spearman = bound.corr(error, method="spearman")
@@ -2277,15 +3168,9 @@ def plot_combined_relative_spectral_tails(
         plt.close(fig)
         return None
 
-    axes[0, 0].set_ylabel(
-        "Keys\nSpectral tail mass (%)", fontsize=font_size
-    )
-    axes[1, 0].set_ylabel(
-        "Values\nSpectral tail mass (%)", fontsize=font_size
-    )
-    inset_axes = [
-        ax.inset_axes((0.47, 0.42, 0.5, 0.5)) for ax in axes[0]
-    ]
+    axes[0, 0].set_ylabel("Keys\nSpectral tail mass (%)", fontsize=font_size)
+    axes[1, 0].set_ylabel("Values\nSpectral tail mass (%)", fontsize=font_size)
+    inset_axes = [ax.inset_axes((0.47, 0.42, 0.5, 0.5)) for ax in axes[0]]
     _plot_relative_spectral_tail_axes(
         inset_axes,
         row_plot_specs[0],
@@ -2353,9 +3238,7 @@ def _plot_spectral_tails(
                     curve
                     for record in records
                     if record["metric_scope"] == metric_scope
-                    for curve in record.get(
-                        "spectral_tail_raw_curves", []
-                    )
+                    for curve in record.get("spectral_tail_raw_curves", [])
                 ]
                 if curves:
                     break
