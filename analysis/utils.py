@@ -53,10 +53,12 @@ CLUSTERING_METRIC_COLORS = {
 }
 CLUSTERING_DIFFERENCE_COLORS = {
     "Clustered": "tab:green",
+    "Random": "tab:purple",
     "Unclustered": "tab:red",
 }
 CLUSTERING_SET_STYLES = {
     "Clustered": {"linestyle": "-", "marker": "o"},
+    "Random": {"linestyle": "-.", "marker": "^"},
     "Unclustered": {"linestyle": "--", "marker": "s"},
 }
 CLUSTERING_PLOT_FIGSIZE = (10, 6)
@@ -437,6 +439,25 @@ def _group_features_and_ranges(
     return grouped_features, segment_ranges
 
 
+def _random_cluster_assignments(
+    batch_size: int,
+    item_count: int,
+    cluster_count: int,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    if item_count == 0:
+        return torch.empty(batch_size, 0, dtype=torch.long, device=device)
+
+    labels = torch.arange(item_count, device=device) % cluster_count
+    return torch.stack(
+        [
+            labels[torch.randperm(item_count, device=device)]
+            for _ in range(batch_size)
+        ]
+    )
+
+
 def _cluster_items_and_ranges(
     features: torch.Tensor,
     n_clusters: int,
@@ -446,6 +467,7 @@ def _cluster_items_and_ranges(
     *,
     kmeans_cluster_size: int | None = None,
     cluster_axis: str = "rows",
+    random_assignments: bool = False,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -464,13 +486,21 @@ def _cluster_items_and_ranges(
         n_clusters,
         kmeans_cluster_size=kmeans_cluster_size,
     )
-    assignments = kmeans_cluster_sequences(
-        item_matrix,
-        n_clusters=cluster_count,
-        n_iter=max(1, kmeans_n_iter),
-        kmeans_init=kmeans_init,
-        dtype=kmeans_dtype,
-    )
+    if random_assignments:
+        assignments = _random_cluster_assignments(
+            item_matrix.size(0),
+            item_matrix.size(1),
+            cluster_count,
+            device=item_matrix.device,
+        )
+    else:
+        assignments = kmeans_cluster_sequences(
+            item_matrix,
+            n_clusters=cluster_count,
+            n_iter=max(1, kmeans_n_iter),
+            kmeans_init=kmeans_init,
+            dtype=kmeans_dtype,
+        )
     grouped_items, segment_ranges = _group_features_and_ranges(
         item_matrix,
         assignments,
@@ -756,6 +786,7 @@ def analyze_kmeans_lrk(
     decomp_n_iter: int = 3,
     decomp_lr: float = 1e-2,
     cluster_axis: str = "rows",
+    random_assignments: bool = False,
 ) -> list[dict[str, Any]]:
     tensor = _ensure_layer_batched_tensor(tensor)
     kmeans_dtype = _resolve_kmeans_dtype(kmeans_dtype)
@@ -805,6 +836,7 @@ def analyze_kmeans_lrk(
                 kmeans_dtype,
                 kmeans_cluster_size=kmeans_cluster_size,
                 cluster_axis=cluster_axis,
+                random_assignments=random_assignments,
             )
             if cluster_axis == "rows":
                 grouped_target = grouped_items
@@ -881,6 +913,7 @@ def analyze_kmeans_lrk(
             kmeans_dtype,
             kmeans_cluster_size=kmeans_cluster_size,
             cluster_axis=cluster_axis,
+            random_assignments=random_assignments,
         )
 
         if cluster_axis == "rows":
@@ -1122,6 +1155,7 @@ def analyze_kmeans_xkv(
     decomp_n_iter: int = 3,
     decomp_lr: float = 1e-2,
     cluster_axis: str = "rows",
+    random_assignments: bool = False,
 ) -> list[dict[str, Any]]:
     tensor = _ensure_layer_batched_tensor(tensor)
     kmeans_dtype = _resolve_kmeans_dtype(kmeans_dtype)
@@ -1198,6 +1232,7 @@ def analyze_kmeans_xkv(
             kmeans_dtype,
             kmeans_cluster_size=kmeans_cluster_size,
             cluster_axis=cluster_axis,
+            random_assignments=random_assignments,
         )
 
         if cluster_axis == "rows":
@@ -1404,14 +1439,28 @@ def _build_case_summary_rows(
     lrk_records_n1: list[dict[str, Any]],
     xkv_records_n1: list[dict[str, Any]],
     *,
+    lrk_random_records: list[dict[str, Any]] | None = None,
+    xkv_random_records: list[dict[str, Any]] | None = None,
     lrk_df=None,
     xkv_df=None,
     lrk_df_n1=None,
     xkv_df_n1=None,
+    lrk_random_df=None,
+    xkv_random_df=None,
 ) -> list[dict[str, Any]]:
     summary_inputs = [
         (f"{tensor_name}_lrk_{cluster_axis}", lrk_records, lrk_df),
         (f"{tensor_name}_xkv_{cluster_axis}", xkv_records, xkv_df),
+        (
+            f"{tensor_name}_lrk_{cluster_axis}_random",
+            lrk_random_records,
+            lrk_random_df,
+        ),
+        (
+            f"{tensor_name}_xkv_{cluster_axis}_random",
+            xkv_random_records,
+            xkv_random_df,
+        ),
         (
             f"{tensor_name}_lrk_{cluster_axis}_n_clusters_1",
             lrk_records_n1,
@@ -1425,6 +1474,8 @@ def _build_case_summary_rows(
     ]
     summary_rows = []
     for label, records, df in summary_inputs:
+        if records is None and df is None:
+            continue
         if df is not None:
             summary_rows.append(_summary_from_frame(label, df))
         else:
@@ -1446,6 +1497,7 @@ def run_analysis_case(
     xkv_layer_group_size: int = 4,
     xkv_num_layers: int | None = None,
     hidden_columns: tuple[str, ...] = HIDDEN_COLUMNS,
+    include_random_clustering: bool = False,
 ) -> dict[str, Any]:
     _validate_cluster_axis(cluster_axis)
 
@@ -1492,6 +1544,32 @@ def run_analysis_case(
         **decomposition_cfg,
     )
 
+    lrk_results_random = None
+    xkv_results_random = None
+    if include_random_clustering:
+        lrk_results_random = analyze_kmeans_lrk(
+            tensor,
+            kmeans_mode=lrk_mode,
+            prefix_end=prefix_end,
+            local_window=local_window,
+            cluster_axis=cluster_axis,
+            include_head_breakdown=include_lrk_head_breakdown,
+            random_assignments=True,
+            **kmeans_cfg,
+            **decomposition_cfg,
+        )
+        xkv_results_random = analyze_kmeans_xkv(
+            tensor,
+            layer_group_size=xkv_layer_group_size,
+            num_layers=xkv_num_layers,
+            prefix_end=prefix_end,
+            local_window=local_window,
+            cluster_axis=cluster_axis,
+            random_assignments=True,
+            **kmeans_cfg,
+            **decomposition_cfg,
+        )
+
     lrk_df = _records_to_frame(lrk_results, hidden_columns=hidden_columns)
     xkv_df = _records_to_frame(xkv_results, hidden_columns=hidden_columns)
     lrk_df_n1 = _records_to_frame(
@@ -1502,6 +1580,16 @@ def run_analysis_case(
         xkv_results_n1,
         hidden_columns=hidden_columns,
     )
+    lrk_df_random = (
+        _records_to_frame(lrk_results_random, hidden_columns=hidden_columns)
+        if lrk_results_random is not None
+        else None
+    )
+    xkv_df_random = (
+        _records_to_frame(xkv_results_random, hidden_columns=hidden_columns)
+        if xkv_results_random is not None
+        else None
+    )
 
     summary_rows = _build_case_summary_rows(
         tensor_name,
@@ -1510,10 +1598,14 @@ def run_analysis_case(
         xkv_results,
         lrk_results_n1,
         xkv_results_n1,
+        lrk_random_records=lrk_results_random,
+        xkv_random_records=xkv_results_random,
         lrk_df=lrk_df,
         xkv_df=xkv_df,
         lrk_df_n1=lrk_df_n1,
         xkv_df_n1=xkv_df_n1,
+        lrk_random_df=lrk_df_random,
+        xkv_random_df=xkv_df_random,
     )
     summary_df = pd.DataFrame(summary_rows) if pd is not None else None
 
@@ -1527,10 +1619,14 @@ def run_analysis_case(
         "xkv_results": xkv_results,
         "lrk_results_n1": lrk_results_n1,
         "xkv_results_n1": xkv_results_n1,
+        "lrk_results_random": lrk_results_random,
+        "xkv_results_random": xkv_results_random,
         "lrk_df": lrk_df,
         "xkv_df": xkv_df,
         "lrk_df_n1": lrk_df_n1,
         "xkv_df_n1": xkv_df_n1,
+        "lrk_df_random": lrk_df_random,
+        "xkv_df_random": xkv_df_random,
     }
 
 
@@ -2971,6 +3067,7 @@ def _plot_combined_lrk_xkv_metrics(
             spearman = bound.corr(error, method="spearman")
             pair_label = {
                 "Clustered": "Clust.",
+                "Random": "Rand.",
                 "Unclustered": "Unclust.",
             }.get(row_label, row_label)
             correlation_rows.append(
@@ -3025,6 +3122,18 @@ def _spectral_curves(
         if curves:
             return torch.tensor(curves, dtype=torch.float32)
     return None
+
+
+def _case_metric_sets(
+    case_result: dict[str, Any],
+    prefix: str,
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    metric_sets = [("Clustered", case_result[f"{prefix}_results"])]
+    random_results = case_result.get(f"{prefix}_results_random")
+    if random_results is not None:
+        metric_sets.append(("Random", random_results))
+    metric_sets.append(("Unclustered", case_result[f"{prefix}_results_n1"]))
+    return metric_sets
 
 
 def _plot_relative_spectral_tail_axes(
@@ -3144,14 +3253,8 @@ def plot_combined_relative_spectral_tails(
         (axes[0], keys_result),
         (axes[1], values_result),
     ):
-        lrk_metric_sets = [
-            ("Clustered", case_result["lrk_results"]),
-            ("Unclustered", case_result["lrk_results_n1"]),
-        ]
-        xkv_metric_sets = [
-            ("Clustered", case_result["xkv_results"]),
-            ("Unclustered", case_result["xkv_results_n1"]),
-        ]
+        lrk_metric_sets = _case_metric_sets(case_result, "lrk")
+        xkv_metric_sets = _case_metric_sets(case_result, "xkv")
         plot_specs = (
             ("Per-head", lrk_metric_sets, ("head", "layer")),
             ("xKV", xkv_metric_sets, ("group",)),
@@ -3294,14 +3397,8 @@ def _plot_case_metrics(
     spectral_ylim: tuple[float, float] | None,
     show_difference: bool,
 ) -> list[Any | None]:
-    lrk_metric_sets = [
-        ("Clustered", case_result["lrk_results"]),
-        ("Unclustered", case_result["lrk_results_n1"]),
-    ]
-    xkv_metric_sets = [
-        ("Clustered", case_result["xkv_results"]),
-        ("Unclustered", case_result["xkv_results_n1"]),
-    ]
+    lrk_metric_sets = _case_metric_sets(case_result, "lrk")
+    xkv_metric_sets = _case_metric_sets(case_result, "xkv")
 
     figures = [
         _plot_lrk_head_metrics(
@@ -3382,6 +3479,10 @@ def display_case_result(
     if case_result["summary_df"] is not None:
         display(case_result["lrk_df"])
         display(case_result["xkv_df"])
+        if case_result.get("lrk_df_random") is not None:
+            display(case_result["lrk_df_random"])
+        if case_result.get("xkv_df_random") is not None:
+            display(case_result["xkv_df_random"])
         display(case_result["lrk_df_n1"])
         display(case_result["xkv_df_n1"])
         return figures
