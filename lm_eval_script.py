@@ -7,7 +7,7 @@ import torch
 
 from lm_eval import evaluator
 from lm_eval.utils import make_table
-from lm_eval.tasks import TaskManager
+from lm_eval.tasks import TaskManager, get_task_dict
 
 from cache import CompressedCacheHFLM
 from model.attention_predictor import (
@@ -27,6 +27,7 @@ from utils import (
     extract_and_save_efficiency_stats,
     log_live_value_mlp_training_wandb,
     init_lm_eval_wandb,
+    filter_tasks_by_min_seq_len
 )
 
 GEN_KWARGS = {
@@ -189,7 +190,7 @@ def main(args):
         adjust_key_value_comp_ratio=args.adjust_key_value_comp_ratio,
         pretrained=model,
         tokenizer=tokenizer,
-        max_length=args.max_seq_lengths,
+        max_length=None,
         truncation=False,
         trust_remote_code=True,
     )
@@ -197,6 +198,13 @@ def main(args):
     if args.max_seq_lengths is not None:
         metadata["max_seq_lengths"] = args.max_seq_lengths
     tm = TaskManager(metadata=metadata)
+
+    eval_tasks = args.tasks
+    if args.min_seq_len is not None:
+        task_dict = get_task_dict(args.tasks, tm)
+        eval_tasks = filter_tasks_by_min_seq_len(
+            task_dict, tokenizer, args.min_seq_len
+        )
 
     if args.log_efficiency_metrics:
         if torch.cuda.is_available():
@@ -207,7 +215,7 @@ def main(args):
     results = evaluator.simple_evaluate(
         model=lm,
         gen_kwargs=get_gen_kwargs(args),
-        tasks=args.tasks,
+        tasks=eval_tasks,
         num_fewshot=0,
         batch_size=1,
         max_batch_size=1,
@@ -303,6 +311,12 @@ def parse_args():
         nargs="+",
         default=None,
         help="Sequence lengths for RULER tasks.",
+    )
+    parser.add_argument(
+        "--min_seq_len",
+        type=int,
+        default=None,
+        help="Only evaluate samples whose prompt is at least this many tokens.",
     )
     parser.add_argument("--dump_full_kv_dir", type=str, default=None)
     parser.add_argument("--log_efficiency_metrics", action="store_true")
