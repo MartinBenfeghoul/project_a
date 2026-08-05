@@ -191,6 +191,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     learned_init=self.learned_init,
                     use_residual=self.use_residual,
                     freeze_W_linear=self.freeze_W_linear,
+                    optimizer_cls=self.optimizer_cls,
                 )
                 with torch.no_grad():
                     self.recon_mse = self.loss_func(

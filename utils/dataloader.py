@@ -22,7 +22,7 @@ def load_data(
         streaming=True,
     )
     if shuffle_buffer_size > 0:
-        ds = ds.shuffle(buffer_size=shuffle_buffer_size)
+        ds = ds.shuffle(buffer_size=shuffle_buffer_size, seed=42)
     return ds
 
 
