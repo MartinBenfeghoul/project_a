@@ -44,5 +44,12 @@ from .meta_learning import (
     LearnedInit,
     LearnedLayerInit,
     adapt_mlp_with_meta_lrs,
+    add_grad,
+    constrain_lrs,
+    expand_lrs,
+    get_rope_theta,
+    inner_loop,
+    prepare_kvs,
+    setup_optimizer,
 )
 from .data_filtering import filter_tasks_by_min_seq_len
