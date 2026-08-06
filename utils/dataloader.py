@@ -1,12 +1,38 @@
+import json
+
 import torch
 
-from datasets import load_dataset
+from datasets import (
+    Features,
+    IterableDataset as HFIterableDataset,
+    Value,
+    load_dataset,
+)
+from datasets.utils.file_utils import xgzip_open
+from huggingface_hub import hf_hub_download
 from torch.utils.data import IterableDataset
+
+
+def _generate_dolma_examples(shards):
+    """Stream Dolma JSONL shards without inferring metadata types."""
+    for shard in shards:
+        with xgzip_open(shard, mode="rt", encoding="utf-8") as f:
+            for line in f:
+                row = json.loads(line)
+                yield {"text": row["text"]}
+
+
+def _load_dolma_shards(data_files):
+    return HFIterableDataset.from_generator(
+        _generate_dolma_examples,
+        features=Features({"text": Value("string")}),
+        gen_kwargs={"shards": data_files},
+    )
 
 
 def load_data(
     dataset_path: str = "HuggingFaceFW/fineweb-edu",
-    subset_name: str = "sample-100BT",
+    subset_name: str | None = "sample-100BT",
     shuffle_buffer_size: int = 10_000,
 ):
     if dataset_path == "example_dataset":
@@ -15,12 +41,23 @@ def load_data(
             {"prompt": "Hello, how are you?"},
             {"prompt": "What is the capital of France?"},
         ]
-    ds = load_dataset(
-        dataset_path,
-        subset_name,
-        split="train",
-        streaming=True,
-    )
+    if dataset_path == "allenai/dolma":
+        version = subset_name or "v1_7"
+        manifest = hf_hub_download(
+            dataset_path,
+            f"urls/{version}.txt",
+            repo_type="dataset",
+        )
+        with open(manifest, encoding="utf-8") as f:
+            data_files = [url.strip() for url in f if url.strip()]
+        ds = _load_dolma_shards(data_files)
+    else:
+        ds = load_dataset(
+            dataset_path,
+            subset_name,
+            split="train",
+            streaming=True,
+        )
     if shuffle_buffer_size > 0:
         ds = ds.shuffle(buffer_size=shuffle_buffer_size, seed=42)
     return ds
