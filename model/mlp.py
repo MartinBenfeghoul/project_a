@@ -29,11 +29,9 @@ class MLP(nn.Module):
 
         self.intermediate_activation = ACTIVATION_FN[intermediate_activation]
         self.num_layers = num_layers
-        self.per_sequence = per_sequence
-        self.num_heads = num_heads
-        self.batch_size = batch_size
-        self.use_residual = use_residual
-        self.per_head_residual = per_head_residual
+        self.residual_eq = None
+
+        batch_dim = batch_size if per_sequence else 1
 
         self.weights = nn.ParameterList()
         self.biases = nn.ParameterList()
@@ -47,32 +45,31 @@ class MLP(nn.Module):
         for i in range(num_layers):
             out_dim = head_dim if i == num_layers - 1 else hidden_dim
 
-            w_shape = (
-                batch_size if per_sequence else 1,
-                num_heads,
-                curr_dim,
-                out_dim,
-            )
-            b_shape = (batch_size if per_sequence else 1, num_heads, 1, out_dim)
-            w = nn.Parameter(torch.zeros(*w_shape))
-            b = nn.Parameter(torch.zeros(*b_shape))
-
+            w = torch.empty(1, num_heads, curr_dim, out_dim)
             nn.init.kaiming_uniform_(w, a=math.sqrt(5))
-            nn.init.zeros_(b)
-
-            self.weights.append(w)
-            self.biases.append(b)
+            self.weights.append(
+                nn.Parameter(w.repeat(batch_dim, 1, 1, 1))
+            )
+            self.biases.append(
+                nn.Parameter(torch.zeros(batch_dim, num_heads, 1, out_dim))
+            )
             curr_dim = out_dim
 
         if use_residual:
-            if per_head_residual:
-                self.W_linear = nn.Parameter(
-                    torch.zeros(num_heads, head_dim, head_dim)
-                )
-            else:
-                self.W_linear = nn.Parameter(
-                    torch.zeros(num_heads, head_dim, num_heads, head_dim)
-                )
+            batch = "b" if per_sequence else ""
+            self.residual_eq = (
+                f"bhtd,{batch}hde->bhte"
+                if per_head_residual
+                else f"bhtd,{batch}hdqe->bqte"
+            )
+            linear_shape = (
+                (num_heads, head_dim, head_dim)
+                if per_head_residual
+                else (num_heads, head_dim, num_heads, head_dim)
+            )
+            if per_sequence:
+                linear_shape = (batch_dim, *linear_shape)
+            self.W_linear = nn.Parameter(torch.zeros(linear_shape))
 
     def forward(self, x):
         # x: [B, H, T, D]
@@ -86,15 +83,7 @@ class MLP(nn.Module):
             if i < self.num_layers - 1:
                 x = self.intermediate_activation(x)
 
-        if self.use_residual:
-            if self.per_head_residual:
-                x = x + torch.einsum("bhtd,hde->bhte", x_in, self.W_linear)
-            else:
-                x = x + torch.einsum("bhtd,hdqe->bqte", x_in, self.W_linear)
-                # equivalent to:
-                # x_in = x_in.permute(0, 2, 1, 3)  # [B, T, H, D]
-                # x_in = x_in.reshape(x_in.shape[0], x_in.shape[1], -1)  # [B, T, H*D]
-                # W_linear = self.W_linear.reshape(self.num_heads * self.head_dim, -1)  # [H*D, H*D]
-                # x = x + torch.matmul(x_in, W_linear)
+        if self.residual_eq is not None:
+            x = x + torch.einsum(self.residual_eq, x_in, self.W_linear)
 
         return x

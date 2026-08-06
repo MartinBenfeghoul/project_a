@@ -61,7 +61,9 @@ class CompressedCacheHFLM(HFLM):
                 return self.model(
                     input_ids=inps, attention_mask=attn_mask, labels=labels
                 ).logits
-            cache = self._make_cache()
+            cache = self._make_cache(
+                {"padding_mask": torch.ones_like(inps, dtype=torch.bool)}
+            )
             output = self.model(inps, past_key_values=cache)
             return output.logits
 
@@ -69,7 +71,10 @@ class CompressedCacheHFLM(HFLM):
         self._logger.recorded_cr = False
         self._logger.recorded_k_timing = False
         task_name = getattr(self, "_current_task_name", None)
-        cache_context = {"task_name": task_name} if task_name is not None else None
+        cache_context = {}
+        if task_name is not None:
+            cache_context["task_name"] = task_name
+        cache_context["padding_mask"] = generation_kwargs["attention_mask"]
         cache = self._make_cache(cache_context)
         generation_kwargs["past_key_values"] = cache
         generation_kwargs["temperature"] = generation_kwargs.get(

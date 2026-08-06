@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import time
+from functools import cache
 from omegaconf import OmegaConf
 import torch
 
@@ -191,6 +192,8 @@ def main(args):
         pretrained=model,
         tokenizer=tokenizer,
         max_length=None,
+        batch_size=args.batch_size,
+        max_batch_size=args.batch_size,
         truncation=False,
         trust_remote_code=True,
     )
@@ -217,8 +220,8 @@ def main(args):
         gen_kwargs=get_gen_kwargs(args),
         tasks=eval_tasks,
         num_fewshot=0,
-        batch_size=1,
-        max_batch_size=1,
+        batch_size=args.batch_size,
+        max_batch_size=args.batch_size,
         device=get_device(lm),
         task_manager=tm,
         limit=args.limit,
@@ -305,6 +308,7 @@ def parse_args():
         default=None,
         help="Max number of samples per task.",
     )
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument(
         "--max_seq_lengths",
         type=int,

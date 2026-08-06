@@ -341,9 +341,11 @@ def eval_benchmark(
     from utils import Logger
 
     target_cr = float(cfg.eval_target_cr)
+    eval_batch_size = int(getattr(cfg, "eval_batch_size", 1))
     print(
         f"Running {benchmark} evaluation (epoch {epoch}, "
-        f"{samples} samples per task, target_cr={target_cr})..."
+        f"{samples} samples per task, target_cr={target_cr}, "
+        f"batch_size={eval_batch_size})..."
     )
 
     logger = Logger()
@@ -366,6 +368,8 @@ def eval_benchmark(
         tokenizer=tokenizer,
         truncation=False,
         trust_remote_code=True,
+        batch_size=eval_batch_size,
+        max_batch_size=eval_batch_size,
     )
 
     results = evaluator.simple_evaluate(
@@ -373,8 +377,8 @@ def eval_benchmark(
         gen_kwargs=GEN_KWARGS,
         tasks=get_tasks([benchmark]),
         num_fewshot=0,
-        batch_size=1,
-        max_batch_size=1,
+        batch_size=eval_batch_size,
+        max_batch_size=eval_batch_size,
         device=get_device(lm),
         task_manager=TaskManager(metadata={"tokenizer": name}),
         limit=samples,
