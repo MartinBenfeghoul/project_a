@@ -42,6 +42,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
+        full_value_residuals: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -81,6 +82,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self._num_params = None
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
+        self.full_value_residuals = full_value_residuals
         self.compressor = None
         self.mlp_training_history = []
 
@@ -401,7 +403,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         if self.global_compression:
             self.errors = errors
             self.valid_positions = valid
-            self.value_residuals = (self.tensor - v_approx).detach()
+            self.value_residuals = (
+                self.tensor.detach()
+                if self.full_value_residuals
+                else (self.tensor - v_approx).detach()
+            )
             self.tensor = self.tensor.new_empty(
                 (*self.tensor.shape[:2], 0, self.tensor.shape[3])
             )
@@ -446,9 +452,12 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             else torch.int64
         )
         self.indices = (b * (self._H * self._T) + h * self._T + t).to(idx_dtype)
-        self.value_residuals = self._encode_residuals(
-            (self.tensor[b, h, t] - v_approx[b, h, t]).detach()
+        stored_values = (
+            self.tensor[b, h, t]
+            if self.full_value_residuals
+            else self.tensor[b, h, t] - v_approx[b, h, t]
         )
+        self.value_residuals = self._encode_residuals(stored_values.detach())
         self.tensor = self.tensor.new_empty(
             (*self.tensor.shape[:2], 0, self.tensor.shape[3])
         )
@@ -467,7 +476,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         b = (self.indices // self._T) // self._H
         h = (self.indices // self._T) % self._H
         if b.numel() > 0:
-            values[b, h, t] += self._decode_residuals()
+            stored_values = self._decode_residuals().to(values.dtype)
+            if self.full_value_residuals:
+                values[b, h, t] = stored_values
+            else:
+                values[b, h, t] += stored_values
         if reset:
             self.tensor = values
             self._reset_residuals()
@@ -601,6 +614,7 @@ class MLPValueCache(SingleTensorCache):
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
+        full_value_residuals: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -635,6 +649,7 @@ class MLPValueCache(SingleTensorCache):
         self.target_cr = target_cr
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
+        self.full_value_residuals = full_value_residuals
         self.mlp_log_events = []
 
         if meta_weights_path is not None and value_mlp_weights_path is not None:
@@ -728,6 +743,7 @@ class MLPValueCache(SingleTensorCache):
             target_cr=self.target_cr,
             turboquant_residuals=self.turboquant_residuals,
             compressor_bits=self.compressor_bits,
+            full_value_residuals=self.full_value_residuals,
         )
 
     def _run_global_compression(self):

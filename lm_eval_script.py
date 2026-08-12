@@ -2,7 +2,6 @@ import os
 import json
 import argparse
 import time
-from functools import cache
 from omegaconf import OmegaConf
 import torch
 
@@ -144,6 +143,7 @@ def main(args):
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
+        "full_value_residuals": args.v_full_value_residuals,
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(
@@ -493,7 +493,13 @@ def parse_args():
         default=2,
         help="Bits per rotated residual coordinate for TurboQuant residual coding.",
     )
-
+    parser.add_argument(
+        "--v_full_value_residuals",
+        action="store_true",
+        help=(
+            "Store retained values as full values instead of reconstruction residuals."
+        ),
+    )
     args = parser.parse_args()
     args = apply_attn_predictor_config(args)
     if args.eviction_keep_ratio < 1 and not args.use_attn_predictor:
