@@ -113,6 +113,40 @@ class RopeLayerMixin:
             return torch.cat([prefix, keys[:, :, prefix_len:]], dim=2)
         return prefix
 
+    def _rope_selected(
+        self,
+        keys: torch.Tensor,
+        positions: torch.Tensor,
+        compressed_len: int,
+        inverse: bool,
+    ) -> torch.Tensor:
+        positions = positions.to(device=keys.device, dtype=torch.long)
+        cos, sin = self._resolve_rope_cos_sin(
+            compressed_len,
+            keys.shape[-1],
+            keys.device,
+            keys.dtype,
+        )
+        batch_size, num_heads = positions.shape[:2]
+        if cos.size(0) == 1 and batch_size > 1:
+            cos = cos.expand(batch_size, -1, -1, -1)
+            sin = sin.expand(batch_size, -1, -1, -1)
+        cos = cos.expand(-1, num_heads, -1, -1)
+        sin = sin.expand(-1, num_heads, -1, -1)
+        gather_idx = positions.clamp(max=compressed_len - 1)[..., None].expand(
+            -1, -1, -1, cos.size(-1)
+        )
+        selected_cos = cos.gather(2, gather_idx)
+        selected_sin = sin.gather(2, gather_idx)
+        transformed = (
+            inverse_rope(keys, selected_cos, selected_sin)
+            if inverse
+            else apply_rope(keys, selected_cos, selected_sin)
+        )
+        return torch.where(
+            (positions < compressed_len)[..., None], transformed, keys
+        )
+
     def _apply_rope(
         self,
         keys: torch.Tensor,
@@ -166,7 +200,7 @@ class SingleTensorDynamicLayer(RopeLayerMixin):
         return self.tensor
 
     def get_seq_length(self) -> int:
-        if not self.is_initialized or self.tensor.numel() == 0:
+        if not self.is_initialized:
             return 0
         return self.seq_len  # custom changes
 

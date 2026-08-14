@@ -69,6 +69,68 @@ def find_rank_wrt_energy(S, energy_threshold):
     return int(k_per.max().item())
 
 
+@torch.no_grad()
+def _xkv_cholqr(Y: torch.Tensor) -> torch.Tensor:
+    """Cholesky-QR low-precision randomised SVD"""
+    Y32 = Y.float()
+    gram = torch.matmul(Y32.mH, Y32)
+    gram = 0.5 * (gram + gram.mH)
+    scale = torch.diagonal(gram, dim1=-2, dim2=-1).mean(
+        dim=-1, keepdim=True
+    ).clamp_min_(1e-12)[..., None]
+    eye = torch.eye(
+        gram.size(-1), device=gram.device, dtype=gram.dtype
+    )
+    eps = 1e-5
+    for _ in range(6):
+        R, info = torch.linalg.cholesky_ex(
+            gram + eps * scale * eye, upper=True
+        )
+        if (info == 0).all():
+            return torch.linalg.solve_triangular(
+                R, Y32, upper=True, left=False
+            ).to(Y.dtype)
+        eps *= 10
+    return torch.linalg.qr(Y32, mode="reduced")[0].to(Y.dtype)
+
+
+@torch.no_grad()
+def randomised_svd(
+    tensor: torch.Tensor,
+    rank: int,
+    n_iter: int = 2,
+    oversample: int = 4,
+):
+    """Randomised SVD with Cholesky-QR orthogonalisation.
+
+    Adapted from abdelfattah-lab/xKV, efficiency/svd/random_cholesky_v6.py
+    """
+    X = tensor.to(torch.bfloat16)
+    m, n = X.shape[-2:]
+    is_wide = m < n
+    if is_wide:
+        X = X.mH
+        m, n = n, m
+
+    q = min(rank + oversample, m, n)
+    random = torch.randn(
+        *X.shape[:-2], n, q, device=X.device, dtype=X.dtype
+    )
+    Q = _xkv_cholqr(torch.matmul(X, random))
+    for _ in range(n_iter):
+        Q = _xkv_cholqr(torch.matmul(X.mH, Q))
+        Q = _xkv_cholqr(torch.matmul(X, Q))
+
+    projected = torch.matmul(Q.mH, X)
+    U_small, S, Vh = torch.linalg.svd(
+        projected.float(), full_matrices=False
+    )
+    U = torch.matmul(Q, U_small.to(Q.dtype))
+    if is_wide:
+        U, Vh = Vh.mH, U.mH
+    return U[..., :rank], S[..., :rank], Vh[..., :rank, :]
+
+
 def _truncate_svd_factors(
     U: torch.Tensor,
     S: torch.Tensor,
@@ -367,6 +429,8 @@ def decompose_grouped_xkv_to_segment_store(
     cr: float = 2.0,
     energy_threshold: float = 0.95,
     dtype: torch.dtype = torch.float32,
+    svd_backend: str = "linalg",
+    n_iter: int = 4,
     quantise_a: bool = False,
     quantise_b: bool = False,
     compressor_bits: int = 4,
@@ -379,10 +443,18 @@ def decompose_grouped_xkv_to_segment_store(
     for batch_idx, batch_ranges in enumerate(segment_ranges):
         for start_idx, end_idx in batch_ranges:
             segment = tensor[batch_idx, ..., start_idx:end_idx, :]
-            U, S, Vh = torch.linalg.svd(
-                segment.to(dtype=dtype).contiguous(),
-                full_matrices=False,
-            )
+            if svd_backend == "cholqr":
+                rank = find_rank_wrt_cr(
+                    cr, segment.size(-2), segment.size(-1)
+                )
+                U, S, Vh = randomised_svd(
+                    segment.contiguous(), rank, n_iter=n_iter
+                )
+            else:
+                U, S, Vh = torch.linalg.svd(
+                    segment.to(dtype=dtype).contiguous(),
+                    full_matrices=False,
+                )
             US, Vh = _truncate_svd_factors(
                 U,
                 S,

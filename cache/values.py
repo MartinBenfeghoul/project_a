@@ -42,7 +42,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
-        full_value_residuals: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -82,7 +81,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self._num_params = None
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
-        self.full_value_residuals = full_value_residuals
         self.compressor = None
         self.mlp_training_history = []
 
@@ -403,11 +401,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         if self.global_compression:
             self.errors = errors
             self.valid_positions = valid
-            self.value_residuals = (
-                self.tensor.detach()
-                if self.full_value_residuals
-                else (self.tensor - v_approx).detach()
-            )
+            self.value_residuals = (self.tensor - v_approx).detach()
             self.tensor = self.tensor.new_empty(
                 (*self.tensor.shape[:2], 0, self.tensor.shape[3])
             )
@@ -452,11 +446,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             else torch.int64
         )
         self.indices = (b * (self._H * self._T) + h * self._T + t).to(idx_dtype)
-        stored_values = (
-            self.tensor[b, h, t]
-            if self.full_value_residuals
-            else self.tensor[b, h, t] - v_approx[b, h, t]
-        )
+        stored_values = self.tensor[b, h, t] - v_approx[b, h, t]
         self.value_residuals = self._encode_residuals(stored_values.detach())
         self.tensor = self.tensor.new_empty(
             (*self.tensor.shape[:2], 0, self.tensor.shape[3])
@@ -477,14 +467,93 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         h = (self.indices // self._T) % self._H
         if b.numel() > 0:
             stored_values = self._decode_residuals().to(values.dtype)
-            if self.full_value_residuals:
-                values[b, h, t] = stored_values
-            else:
-                values[b, h, t] += stored_values
+            values[b, h, t] += stored_values
         if reset:
             self.tensor = values
             self._reset_residuals()
         return values
+
+    @staticmethod
+    def _gather_tokens(
+        tensor: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        return tensor.gather(
+            2, positions[..., None].expand(-1, -1, -1, tensor.size(-1))
+        )
+
+    def append_decode(self, value_states: torch.Tensor) -> None:
+        super().update(value_states)
+
+    def _lookup_stored_rows(
+        self,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Map selected positions to stored value rows and valid matches"""
+        batch_size, num_heads = positions.shape[:2]
+        head_offsets = torch.arange(
+            batch_size * num_heads, device=positions.device
+        ).reshape(batch_size, num_heads, 1)
+        flat_positions = (
+            head_offsets * self._T + positions
+        ).reshape(-1).to(self.indices.dtype)
+        stored_rows = torch.searchsorted(self.indices, flat_positions)
+        valid = stored_rows < self.indices.numel()
+        stored_rows.clamp_(max=self.indices.numel() - 1)
+        valid &= self.indices.index_select(0, stored_rows) == flat_positions
+        valid &= positions.reshape(-1) < self.compressed_len
+        return stored_rows, valid
+
+    def _append_exact_suffix_values(
+        self,
+        values: torch.Tensor,
+        suffix_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Append exact cached values for selected suffix positions."""
+        if suffix_positions.size(-1):
+            suffix_positions = suffix_positions - self.compressed_len
+            suffix_values = self._gather_tokens(self.tensor, suffix_positions)
+            values = torch.cat([values, suffix_values], dim=2)
+        return values
+
+    @torch.no_grad()
+    def retrieve_selected(
+        self,
+        keys: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        positions = positions.to(device=keys.device, dtype=torch.long)
+        prefix_len = positions.size(-1) - self.tensor.size(-2)
+        prefix_positions = positions[..., :prefix_len]
+        selected_keys = keys[..., :prefix_len, :]
+        keys_for_mlp = (
+            self._rope_selected(
+                selected_keys,
+                prefix_positions,
+                self.compressed_len,
+                inverse=True,
+            )
+            if self.un_rope
+            else selected_keys
+        )
+        values = (
+            self._linear_approx(keys_for_mlp)
+            if self.linear_only
+            else self.mlp(keys_for_mlp)
+        )
+
+        if self.indices.numel() > 0:
+            stored_rows, valid = self._lookup_stored_rows(prefix_positions)
+            stored_values = self.value_residuals.index_select(0, stored_rows).to(
+                values.dtype
+            )
+            values_flat = values.reshape(-1, values.size(-1))
+            values_flat.add_(stored_values * valid[:, None])
+
+        return self._append_exact_suffix_values(
+            values,
+            positions[..., prefix_len:],
+        )
 
     def _reset_residuals(self):
         self.is_compressed = False
@@ -614,7 +683,6 @@ class MLPValueCache(SingleTensorCache):
         target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
-        full_value_residuals: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -649,7 +717,6 @@ class MLPValueCache(SingleTensorCache):
         self.target_cr = target_cr
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
-        self.full_value_residuals = full_value_residuals
         self.mlp_log_events = []
 
         if meta_weights_path is not None and value_mlp_weights_path is not None:
@@ -743,7 +810,6 @@ class MLPValueCache(SingleTensorCache):
             target_cr=self.target_cr,
             turboquant_residuals=self.turboquant_residuals,
             compressor_bits=self.compressor_bits,
-            full_value_residuals=self.full_value_residuals,
         )
 
     def _run_global_compression(self):
@@ -779,6 +845,24 @@ class MLPValueCache(SingleTensorCache):
         cache_kwargs: dict[str, Any] | None = None,
     ) -> torch.Tensor:
         return self._update_one(value_states, layer_idx, cache_kwargs)
+
+    def supports_selective_retrieval(self, layer_idx: int) -> bool:
+        return (
+            layer_idx < len(self.layers)
+            and not self.layers[layer_idx].prefill
+            and self.layers[layer_idx].is_compressed
+        )
+
+    def append_decode(self, value_states: torch.Tensor, layer_idx: int) -> None:
+        self.layers[layer_idx].append_decode(value_states)
+
+    def retrieve_selected(
+        self,
+        keys: torch.Tensor,
+        positions: torch.Tensor,
+        layer_idx: int,
+    ) -> torch.Tensor:
+        return self.layers[layer_idx].retrieve_selected(keys, positions)
 
     def _update_one(
         self,

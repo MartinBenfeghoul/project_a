@@ -14,6 +14,7 @@ from model.attention_predictor import (
     get_attn_predictor_hook_handles,
     apply_attn_predictor_config,
 )
+from model.selective_attention import install_selective_attention
 from utils.logging import make_hooks
 from utils import (
     Logger,
@@ -60,6 +61,11 @@ def main(args):
     device = torch.device(device_type)
 
     model, tokenizer = get_model_and_tokenizer(args.model_name, device)
+    selective_handles = (
+        install_selective_attention(model)
+        if args.selective_reconstruction
+        else []
+    )
     logger = Logger()
     logger.prefill_events = []
     logger.decode_events = []
@@ -106,8 +112,10 @@ def main(args):
         "kmeans_avg_heads": args.kmeans_avg_heads,
         "kmeans_per_head": args.kmeans_per_head,
         "layer_group_size": args.xkv_layer_group_size,
+        "xkv_svd_backend": args.xkv_svd_backend,
         "num_layers": num_layers,
         "unrope_keys": args.un_rope,
+        "selective_reconstruction": args.selective_reconstruction,
         "rope_theta": rope_theta,
         "quantise_a": args.k_quantise_a,
         "quantise_b": args.k_quantise_b,
@@ -143,7 +151,6 @@ def main(args):
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
-        "full_value_residuals": args.v_full_value_residuals,
     }
     if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(
@@ -275,7 +282,9 @@ def main(args):
     with open(output_path, "w") as f:
         json.dump(results["results"], f, ensure_ascii=False, indent=4)
     print(f"Results saved to {output_path}")
-    for handle in metric_hook_handles + attn_predictor_hook_handles:
+    for handle in (
+        metric_hook_handles + attn_predictor_hook_handles + selective_handles
+    ):
         handle.remove()
     if use_wandb:
         import wandb
@@ -363,6 +372,12 @@ def parse_args():
         default=2,
         help="Number of adjacent layers to jointly compress when --k_cache_type=xkv.",
     )
+    parser.add_argument(
+        "--xkv_svd_backend",
+        choices=["cholqr", "linalg"],
+        default="cholqr",
+    )
+    parser.add_argument("--selective_reconstruction", action="store_true")
     parser.add_argument(
         "--kmeans_cluster_size",
         type=float,
@@ -492,13 +507,6 @@ def parse_args():
         type=int,
         default=2,
         help="Bits per rotated residual coordinate for TurboQuant residual coding.",
-    )
-    parser.add_argument(
-        "--v_full_value_residuals",
-        action="store_true",
-        help=(
-            "Store retained values as full values instead of reconstruction residuals."
-        ),
     )
     args = parser.parse_args()
     args = apply_attn_predictor_config(args)

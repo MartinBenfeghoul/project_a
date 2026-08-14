@@ -478,6 +478,7 @@ class XKVKeysCache(DecomposedKeysCache):
         *args,
         layer_group_size: int = 2,
         num_layers: int | None = None,
+        xkv_svd_backend: str = "cholqr",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -494,8 +495,11 @@ class XKVKeysCache(DecomposedKeysCache):
 
         self.layer_group_size = layer_group_size
         self.num_layers = num_layers
+        self.xkv_svd_backend = xkv_svd_backend
         self.shared_a = {}
         self.group_metadata = {}
+        self.packed_shared_a = {}
+        self.packed_lr_keys = {}
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
         raise NotImplementedError(
@@ -642,6 +646,29 @@ class XKVKeysCache(DecomposedKeysCache):
                 metadata.update(extra_metadata)
             self.group_metadata[group_layer_idx] = metadata
         self.comp_ratio = self.calc_compression_ratio()
+        if not shared_segments[0]:
+            return
+        # packing avoids looping through batch elements and per-step stacking during decoding
+        self.packed_shared_a[group_last_layer] = torch.stack(
+            [segments[0]["factor"].squeeze(0) for segments in shared_segments]
+        )
+        for batch_idx, segments in enumerate(shared_segments):
+            segments[0]["factor"] = self.packed_shared_a[group_last_layer][
+                batch_idx
+            ].unsqueeze(0)
+        for group_layer_idx, layer_segments in zip(
+            group_layers, per_layer_segments
+        ):
+            self.packed_lr_keys[group_layer_idx] = torch.stack(
+                [
+                    segments[0]["factor"].squeeze(0)
+                    for segments in layer_segments
+                ]
+            )
+            for batch_idx, segments in enumerate(layer_segments):
+                segments[0]["factor"] = self.packed_lr_keys[group_layer_idx][
+                    batch_idx
+                ].unsqueeze(0)
 
     def calc_compression_ratio(self):
         default_ratio = (
@@ -758,6 +785,63 @@ class XKVKeysCache(DecomposedKeysCache):
                 type(self), "decompose", time.perf_counter() - start_time
             )
         return suffix_start
+
+    def append_decode(
+        self,
+        key_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        SingleTensorCache.update(self, key_states, layer_idx, cache_kwargs)
+
+    def supports_selective_retrieval(self, layer_idx: int) -> bool:
+        return layer_idx in self.packed_lr_keys
+
+    @torch.no_grad()
+    def retrieve_selected(
+        self,
+        layer_idx: int,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        metadata = self.group_metadata[layer_idx]
+        group_last = metadata["group_last_layer"]
+
+        shared = self.packed_shared_a[group_last]
+        right = self.packed_lr_keys[layer_idx]
+        suffix = self.layers[layer_idx].tensor
+        prefix_len = positions.size(-1) - suffix.size(-2)
+        prefix_positions = positions[..., :prefix_len]
+        batch_size, num_heads, selected_len = prefix_positions.shape
+        rank = shared.size(-1)
+        head_dim = right.size(-1) // num_heads
+        selected_a = shared[:, None].expand(-1, num_heads, -1, -1).gather(
+            2,
+            prefix_positions[..., None].expand(
+                -1, -1, selected_len, rank
+            ),
+        )
+        right = right.reshape(batch_size, rank, num_heads, head_dim).transpose(
+            1, 2
+        )
+        keys = torch.matmul(selected_a, right)
+        if self.unrope_keys:
+            keys = self.layers[layer_idx]._rope_selected(
+                keys,
+                prefix_positions,
+                metadata["compressed_len"],
+                inverse=False,
+            )
+
+        if suffix.size(-2):
+            suffix_positions = positions[..., prefix_len:] - metadata[
+                "compressed_len"
+            ]
+            suffix_keys = suffix.gather(
+                2,
+                suffix_positions[..., None].expand(-1, -1, -1, suffix.size(-1)),
+            )
+            keys = torch.cat([keys, suffix_keys], dim=2)
+        return keys
 
     def _reconstruct_keys(self, keys, layer_idx):
         if self.log_timing_stats:
