@@ -16,6 +16,7 @@ checkpoints/*
 .env
 
 scripts/lazy_runs
+scripts/nebius
 data/NIAH
 results
 slurm
@@ -26,3 +27,6 @@ CLAUDE.md
 data/*
 figures/*
 torchinductor_*/*
+
+.dockerignore
+Dockerfile
