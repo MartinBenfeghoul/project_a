@@ -2,6 +2,8 @@ import copy
 import math
 import torch
 
+from efficiency import FusedLandmarkScorer
+
 from transformers.cache_utils import (
     Any,
     Iterable,
@@ -73,11 +75,15 @@ class CompressedCache:
             "selective_reconstruction", False
         )
         self.selective_landmarks = {}
+        self.selective_landmark_indices = {}
+        self.selective_landmark_counts = {}
         self.selective_prompt_lens = {}
         self.selective_outliers = {}
         self.selective_exact_positions = {}
         self.selective_exact_keys = {}
         self.selective_exact_values = {}
+        self._selective_bytes = {}
+        self._selective_scorer = FusedLandmarkScorer()
 
         # local import to avoid circular import at module load
         from .keys import KEY_CACHE_CLASSES
@@ -197,6 +203,21 @@ class CompressedCache:
             chunks[..., None] * SELECTIVE_CHUNK_SIZE + offsets
         ).flatten(2)
 
+    def _record_selective_overhead(self, layer_idx: int) -> None:
+        """Cache persistent selective-key bytes and pass them to rank selection"""
+        tensors = (
+            self.selective_landmarks[layer_idx],
+            self.selective_landmark_indices[layer_idx],
+            self.selective_exact_positions[layer_idx],
+            self.selective_outliers[layer_idx],
+            self.selective_exact_keys[layer_idx],
+        )
+        nbytes = sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+        self._selective_bytes[layer_idx] = nbytes
+        record = getattr(self.key_cache, "set_selective_overhead", None)
+        if callable(record):
+            record(layer_idx, nbytes)
+
     def _store_selective_landmarks(
         self,
         layer_idx: int,
@@ -211,6 +232,31 @@ class CompressedCache:
             valid,
             seq_len,
         )
+        local_chunks = self._num_local_chunks(seq_len, landmarks.size(2))
+        eligible = torch.ones(
+            landmarks.shape[:-1], device=landmarks.device, dtype=torch.bool
+        )
+        eligible.scatter_(2, outliers, False)
+        eligible[..., -local_chunks:] = False
+        landmark_count = int(eligible[0, 0].sum().item())
+        landmark_indices = (
+            torch.arange(landmarks.size(2), device=landmarks.device)
+            .reshape(1, 1, -1)
+            .expand_as(eligible)[eligible]
+            .reshape(landmarks.size(0), landmarks.size(1), landmark_count)
+        )
+        landmarks = landmarks.gather(
+            2,
+            landmark_indices[..., None].expand(-1, -1, -1, head_dim),
+        )
+        landmark_padding = (-landmark_count) % 8
+        if landmark_padding:
+            landmarks = torch.nn.functional.pad(
+                landmarks, (0, 0, 0, landmark_padding)
+            )
+            landmark_indices = torch.nn.functional.pad(
+                landmark_indices, (0, landmark_padding)
+            )
         outlier_positions = self._expand_chunk_positions(outliers)
         local_positions = (
             torch.arange(
@@ -224,6 +270,8 @@ class CompressedCache:
         positions = torch.cat([outlier_positions, local_positions], dim=-1)
 
         self.selective_landmarks[layer_idx] = landmarks
+        self.selective_landmark_indices[layer_idx] = landmark_indices
+        self.selective_landmark_counts[layer_idx] = landmark_count
         self.selective_prompt_lens[layer_idx] = seq_len
         self.selective_outliers[layer_idx] = outliers
         gather_idx = positions[..., None].expand(-1, -1, -1, head_dim)
@@ -232,6 +280,7 @@ class CompressedCache:
         self.selective_exact_values[layer_idx] = value_states.gather(
             2, gather_idx
         )
+        self._record_selective_overhead(layer_idx)
 
     def select_positions(
         self,
@@ -245,38 +294,28 @@ class CompressedCache:
         grouped_query = query_states.reshape(
             batch_size, num_kv_heads, num_groups, head_dim
         )
-        grouped_scores = torch.einsum(
-            "bhgd,bhcd->bhgc", grouped_query, landmarks
-        )
-        outliers = self.selective_outliers[layer_idx]
+        landmark_count = self.selective_landmark_counts[layer_idx]
+        scores = self._selective_scorer.score(grouped_query, landmarks)
+        scores = scores[..., :landmark_count]
         prompt_len = self.selective_prompt_lens[layer_idx]
-        grouped_scores.scatter_(
-            -1,
-            outliers.unsqueeze(2).expand(-1, -1, num_groups, -1),
-            -torch.inf,
-        )
-        local_chunks = self._num_local_chunks(
-            prompt_len,
-            landmarks.size(2),
-        )
-        grouped_scores[..., -local_chunks:] = -torch.inf
-        scores = torch.softmax(
-            grouped_scores * (head_dim**-0.5),
-            dim=-1,
-            dtype=torch.float32,
-        ).amax(dim=2)
-
         selected_chunks = math.ceil(
             SELECTIVE_TOKEN_BUDGET / SELECTIVE_CHUNK_SIZE
         )
-        chunks = scores.topk(
-            min(
-                selected_chunks,
-                landmarks.size(2) - outliers.size(-1) - local_chunks,
-            ),
+        selected_indices = scores.topk(
+            min(selected_chunks, landmark_count),
             dim=-1,
             sorted=False,
         ).indices
+        chunks = self.selective_landmark_indices[layer_idx].gather(
+            2, selected_indices
+        )
+        prepare_chunks = getattr(
+            self.key_cache, "prepare_selected_chunks", None
+        )
+        if callable(prepare_chunks):
+            reordered = prepare_chunks(layer_idx, chunks, SELECTIVE_CHUNK_SIZE)
+            if reordered is not None:
+                chunks = reordered
         offsets = torch.arange(SELECTIVE_CHUNK_SIZE, device=scores.device)
         positions = (
             chunks[..., None] * SELECTIVE_CHUNK_SIZE + offsets
@@ -584,15 +623,16 @@ class CompressedCache:
                     for layer_idx, tensor in self.selective_exact_keys.items()
                 )
                 selective_bytes = sum(
+                    self._selective_bytes.get(layer_idx, 0)
+                    for layer_idx in self.selective_exact_keys
+                )
+                selective_bytes += sum(
                     tensor.numel() * tensor.element_size()
-                    for tensors in (
-                        self.selective_landmarks,
-                        self.selective_exact_positions,
-                        self.selective_outliers,
-                        self.selective_exact_keys,
-                        self.selective_exact_values,
-                    )
-                    for tensor in tensors.values()
+                    for tensor in self.selective_exact_values.values()
+                )
+                selective_bytes += self._selective_scorer.nbytes
+                selective_bytes += getattr(
+                    self.key_cache, "selective_reconstruction_nbytes", 0
                 )
                 return (2 * original_key_bytes) / (
                     (2 * original_key_bytes / comp_ratio) + selective_bytes
