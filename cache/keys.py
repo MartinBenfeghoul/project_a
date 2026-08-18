@@ -590,6 +590,7 @@ class XKVKeysCache(DecomposedKeysCache):
         quantise_a = decompose_kwargs.pop("quantise_a")
         quantise_b = decompose_kwargs.pop("quantise_b")
         compressor_bits = decompose_kwargs.pop("compressor_bits")
+        decompose_kwargs["svd_backend"] = self.xkv_svd_backend
         return decompose_kwargs, quantise_a, quantise_b, compressor_bits
 
     def set_selective_overhead(self, layer_idx, nbytes):

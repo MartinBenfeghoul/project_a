@@ -363,13 +363,13 @@ def parse_args():
         choices=["comp_ratio", "energy"],
     )
     parser.add_argument("--k_lr", type=float, default=1e-2)
-    parser.add_argument("--decomp_n_iter", type=int, default=3)
+    parser.add_argument("--decomp_n_iter", type=int, default=4)
     parser.add_argument("--gamma", type=float, default=3.0)
     parser.add_argument("--local_window", type=int, default=0)
     parser.add_argument(
         "--xkv_layer_group_size",
         type=int,
-        default=2,
+        default=4,
         help="Number of adjacent layers to jointly compress when --k_cache_type=xkv.",
     )
     parser.add_argument(
