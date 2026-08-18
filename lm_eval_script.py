@@ -7,7 +7,7 @@ import torch
 
 from lm_eval import evaluator
 from lm_eval.utils import make_table
-from lm_eval.tasks import TaskManager
+from lm_eval.tasks import TaskManager, get_task_dict
 
 from cache import CompressedCacheHFLM
 from model.attention_predictor import (
@@ -27,13 +27,21 @@ from utils import (
     extract_and_save_efficiency_stats,
     log_live_value_mlp_training_wandb,
     init_lm_eval_wandb,
+    filter_tasks_by_min_seq_len
 )
 
 GEN_KWARGS = {
     "do_sample": False,
     "use_cache": True,
-    "logits_to_keep": 0,
+    "logits_to_keep": 1,
 }
+
+
+def get_gen_kwargs(args):
+    gen_kwargs = dict(GEN_KWARGS)
+    if args.k_cache_type == "surprise_lr":
+        gen_kwargs["logits_to_keep"] = 0
+    return gen_kwargs
 
 
 def get_tasks(tasks, print_tasks=True):
@@ -74,7 +82,7 @@ def main(args):
         args.use_wandb = False
         os.makedirs(args.dump_full_kv_dir, exist_ok=True)
 
-    rope_theta = getattr(model.config, "rope_theta", args.rope_theta)
+    rope_theta = getattr(model.config, "rope_theta", 500_000.0)
 
     attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
 
@@ -124,17 +132,14 @@ def main(args):
         "loss_func": args.loss_func,
         "num_epochs": args.num_epochs,
         "meta_weights_path": args.meta_weights_path,
+        "value_mlp_weights_path": args.value_mlp_weights_path,
         "un_rope": args.un_rope,
         "rope_theta": rope_theta,
         "global_compression": args.global_compression,
-        "normalise_keys": args.normalise_keys,
         "use_residual": args.use_residual,
         "intermediate_activation": args.intermediate_activation,
         "linear_only": args.linear_only,
-        "early_stopping_tol": args.early_stopping_tol,
         "freeze_W_linear": args.freeze_W_linear,
-        "zero_init_mlp_last_layer": args.zero_init_mlp_last_layer,
-        "prev_layer_init": args.prev_layer_init,
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
@@ -180,10 +185,12 @@ def main(args):
     lm = CompressedCacheHFLM(
         key_cache_kwargs=key_cache_kwargs,
         value_cache_kwargs=value_cache_kwargs,
+        eviction_keep_ratio=args.eviction_keep_ratio,
         logger=logger,
         adjust_key_value_comp_ratio=args.adjust_key_value_comp_ratio,
         pretrained=model,
         tokenizer=tokenizer,
+        max_length=None,
         truncation=False,
         trust_remote_code=True,
     )
@@ -191,6 +198,13 @@ def main(args):
     if args.max_seq_lengths is not None:
         metadata["max_seq_lengths"] = args.max_seq_lengths
     tm = TaskManager(metadata=metadata)
+
+    eval_tasks = args.tasks
+    if args.min_seq_len is not None:
+        task_dict = get_task_dict(args.tasks, tm)
+        eval_tasks = filter_tasks_by_min_seq_len(
+            task_dict, tokenizer, args.min_seq_len
+        )
 
     if args.log_efficiency_metrics:
         if torch.cuda.is_available():
@@ -200,8 +214,8 @@ def main(args):
 
     results = evaluator.simple_evaluate(
         model=lm,
-        gen_kwargs=GEN_KWARGS,
-        tasks=args.tasks,
+        gen_kwargs=get_gen_kwargs(args),
+        tasks=eval_tasks,
         num_fewshot=0,
         batch_size=1,
         max_batch_size=1,
@@ -297,6 +311,12 @@ def parse_args():
         nargs="+",
         default=None,
         help="Sequence lengths for RULER tasks.",
+    )
+    parser.add_argument(
+        "--min_seq_len",
+        type=int,
+        default=None,
+        help="Only evaluate samples whose prompt is at least this many tokens.",
     )
     parser.add_argument("--dump_full_kv_dir", type=str, default=None)
     parser.add_argument("--log_efficiency_metrics", action="store_true")
@@ -396,14 +416,10 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
     parser.add_argument(
-        "--override_target_perc",
-        action="store_true",
-        help="Use --target_perc instead of the per-layer values stored in the meta-weights checkpoint.",
-    )
-    parser.add_argument(
-        "--override_num_epochs",
-        action="store_true",
-        help="Use --num_epochs instead of the inner_steps value stored in the meta-weights checkpoint.",
+        "--value_mlp_weights_path",
+        type=str,
+        default=None,
+        help="Path to plain pretrained value-cache MLP weights from train_value_mlps.py.",
     )
     parser.add_argument(
         "--global_compression",
@@ -415,17 +431,6 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Undo RoPE on keys before MLP training and inference. Use --no-un_rope to disable.",
-    )
-    parser.add_argument(
-        "--rope_theta",
-        type=float,
-        default=None,  # TODO: set default based on model config if not passed
-        help="RoPE theta used to recompute cos/sin if not passed by the model (fallback only).",
-    )
-    parser.add_argument(
-        "--normalise_keys",
-        action="store_true",
-        help="Normalise keys (z-score over token dim, per head) before passing to the MLP.",
     )
     parser.add_argument(
         "--use_residual",
@@ -457,22 +462,6 @@ def parse_args():
         help="Freeze W_linear during MLP training.",
     )
     parser.add_argument(
-        "--zero_init_mlp_last_layer",
-        action="store_true",
-        help="Initialise the final value-cache MLP layer to zero so the residual branch starts from W_linear only.",
-    )
-    parser.add_argument(
-        "--prev_layer_init",
-        action="store_true",
-        help="Initialise each value-cache MLP from the previous layer's trained MLP.",
-    )
-    parser.add_argument(
-        "--early_stopping_tol",
-        type=float,
-        default=None,
-        help="Stop MLP training early when relative loss improvement falls below this threshold.",
-    )
-    parser.add_argument(
         "--use_attn_predictor",
         action="store_true",
         help="Use a shared CNN attention predictor to guide value residual selection.",
@@ -484,6 +473,12 @@ def parse_args():
         help="Path to a checkpoint from train_attention_predictor.py.",
     )
     parser.add_argument(
+        "--eviction_keep_ratio",
+        type=float,
+        default=1.0,
+        help="Fraction of prefill KV tokens to retain per layer. Values below 1 enable attention-predictor physical eviction.",
+    )
+    parser.add_argument(
         "--v_turboquant_residuals",
         action="store_true",
         help="Quantise stored MLP value residuals with TurboQuant.",
@@ -491,94 +486,17 @@ def parse_args():
     parser.add_argument(
         "--v_compressor_bits",
         type=int,
-        default=3,
+        default=2,
         help="Bits per rotated residual coordinate for TurboQuant residual coding.",
     )
 
     args = parser.parse_args()
-    if args.meta_weights_path is not None:
-        args = override_args_from_meta_weights(args)
     args = apply_attn_predictor_config(args)
+    if args.eviction_keep_ratio < 1 and not args.use_attn_predictor:
+        raise ValueError("--eviction_keep_ratio < 1 requires --use_attn_predictor.")
 
     print("Config for lm-eval: ", vars(args))
 
-    return args
-
-
-def override_args_from_meta_weights(args):
-    """Infer MLP architecture and inner-loop config from a meta-weights checkpoint."""
-    # TODO: this super ugly. In the future, save MLP config in meta learning config file
-    ckpt = torch.load(args.meta_weights_path, map_location="cpu")
-
-    config_path = os.path.join(
-        os.path.dirname(args.meta_weights_path), "config.yaml"
-    )
-    if os.path.exists(config_path):
-        train_cfg = OmegaConf.load(config_path).training
-        if args.override_num_epochs:
-            print(
-                f"[meta_weights] Ignoring num_epochs from checkpoint ({train_cfg.inner_steps}); using --num_epochs={args.num_epochs}."
-            )
-        else:
-            args.num_epochs = train_cfg.inner_steps
-        args.loss_func = train_cfg.loss_func
-        args.un_rope = train_cfg.un_rope
-        args.optimizer = getattr(train_cfg, "inner_optimizer", "sgd")
-
-    layer0 = next(v for k, v in ckpt.items() if k.startswith("layer_"))
-    weight_keys = sorted(k for k in layer0 if k.startswith("weights."))
-    w0, wlast = layer0[weight_keys[0]], layer0[weight_keys[-1]]
-
-    n_layers = len(weight_keys)
-    n_heads = (
-        w0.shape[1] if w0.dim() == 4 else w0.shape[0]
-    )  # in case batch dim not present
-    head_dim = wlast.shape[-1]
-    hidden_factor = (w0.shape[-1] // head_dim) if n_layers > 1 else 1
-
-    for attr, ckpt_val in [
-        ("num_layers_per_mlp", n_layers),
-        ("hidden_factors_per_mlp", hidden_factor),
-        ("num_heads_per_mlp", n_heads),
-    ]:
-        cli_val = getattr(args, attr)
-        if cli_val != ckpt_val:
-            print(
-                f"Warning: overriding --{attr} {cli_val} → {ckpt_val} to match checkpoint."
-            )
-        setattr(args, attr, ckpt_val)
-
-    if "target_perc_params" in ckpt:
-        raw_percs = [t.item() for t in ckpt["target_perc_params"]]
-        # Old checkpoints stored target_perc_params in logit-space and have no
-        # target_perc_format key. TODO: Remove once stopped using old ckpts
-        if ckpt.get("target_perc_format") != "direct":
-            print(
-                "[meta_weights] WARNING: checkpoint has no target_perc_format key — "
-                "assuming old logit-space format. Applying sigmoid to convert to percentages."
-            )
-            raw_percs = [
-                torch.sigmoid(t).item() for t in ckpt["target_perc_params"]
-            ]
-        meta_percs = [v * 100 for v in raw_percs]
-        if args.override_target_perc:
-            print(
-                f"[meta_weights] Ignoring per-layer target_perc from checkpoint "
-                f"(mean={sum(meta_percs)/len(meta_percs):.1f}%); using --target_perc={args.target_perc}."
-            )
-        else:
-            args.target_perc = meta_percs
-            print(
-                f"[meta_weights] Loaded per-layer target_perc: "
-                f"mean={sum(meta_percs)/len(meta_percs):.1f}%, "
-                f"min={min(meta_percs):.1f}%, max={max(meta_percs):.1f}%"
-            )
-
-    print(
-        f"[meta_weights] Inferred: num_layers={n_layers}, hidden_factor={hidden_factor}, "
-        f"num_heads={n_heads}, "
-        f"num_epochs={args.num_epochs}, loss_func={args.loss_func}, optimizer overridden to sgd"
-    )
     return args
 
 

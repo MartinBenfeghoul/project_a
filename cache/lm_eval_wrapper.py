@@ -18,12 +18,14 @@ class CompressedCacheHFLM(HFLM):
         key_cache_kwargs,
         value_cache_kwargs,
         logger,
+        eviction_keep_ratio,
         adjust_key_value_comp_ratio=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._key_cache_kwargs = key_cache_kwargs
         self._value_cache_kwargs = value_cache_kwargs
+        self._eviction_keep_ratio = eviction_keep_ratio
         self._adjust_key_value_comp_ratio = adjust_key_value_comp_ratio
         self._logger = logger
 
@@ -34,6 +36,7 @@ class CompressedCacheHFLM(HFLM):
             value_cache_kwargs=self._value_cache_kwargs,
             adjust_key_value_comp_ratio=self._adjust_key_value_comp_ratio,
             cache_context=cache_context,
+            eviction_keep_ratio=self._eviction_keep_ratio,
             verbose=False,
         )
 
@@ -58,16 +61,17 @@ class CompressedCacheHFLM(HFLM):
                 return self.model(
                     input_ids=inps, attention_mask=attn_mask, labels=labels
                 ).logits
-            return self.model(inps, past_key_values=self._make_cache()).logits
+            cache = self._make_cache()
+            output = self.model(inps, past_key_values=cache)
+            return output.logits
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         self._logger.recorded_cr = False
         self._logger.recorded_k_timing = False
         task_name = getattr(self, "_current_task_name", None)
-        cache_context = (
-            {"task_name": task_name} if task_name is not None else None
-        )
-        generation_kwargs["past_key_values"] = self._make_cache(cache_context)
+        cache_context = {"task_name": task_name} if task_name is not None else None
+        cache = self._make_cache(cache_context)
+        generation_kwargs["past_key_values"] = cache
         generation_kwargs["temperature"] = generation_kwargs.get(
             "temperature", 0.0
         )
@@ -88,10 +92,11 @@ class CompressedCacheHFLM(HFLM):
             dtype=self.mixed_precision_dtype,
             enabled=self.mixed_precision_dtype is not None,
         ):
-            return self.model.generate(
+            output = self.model.generate(
                 input_ids=context,
                 max_length=max_length,
                 stopping_criteria=stopping_criteria,
                 pad_token_id=self.tokenizer.pad_token_id,
                 **generation_kwargs,
             )
+        return output

@@ -24,7 +24,6 @@ class MLP(nn.Module):
         intermediate_activation: str = "relu",
         use_residual: bool = False,
         per_head_residual: bool = False,
-        zero_init_last_layer: bool = False,
     ):
         super().__init__()
 
@@ -64,10 +63,6 @@ class MLP(nn.Module):
             self.weights.append(w)
             self.biases.append(b)
             curr_dim = out_dim
-
-        if zero_init_last_layer:
-            nn.init.zeros_(self.weights[-1])
-            nn.init.zeros_(self.biases[-1])
 
         if use_residual:
             if per_head_residual:

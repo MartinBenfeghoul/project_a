@@ -47,6 +47,8 @@ def get_expected_seq_len(cache_kwargs):
 
 
 def check_recon_length(recon_keys, cache_kwargs):
+    if cache_kwargs is not None and cache_kwargs.get("allow_sparse_kv", False):
+        return
     exp_seq_len = get_expected_seq_len(cache_kwargs)
     if exp_seq_len is not None and recon_keys.size(-2) != exp_seq_len:
         raise ValueError(

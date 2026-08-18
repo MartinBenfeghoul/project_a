@@ -5,8 +5,8 @@ from torch.func import functional_call
 
 
 @dataclass(frozen=True)
-class MetaLearningLayerInit:
-    """Meta-learned initialisation for one value-cache MLP layer."""
+class LearnedLayerInit:
+    """Learned initialisation for one value-cache MLP layer."""
 
     weights: dict | None = None
     inner_lrs: list[torch.Tensor] | None = None
@@ -20,14 +20,14 @@ class MetaLearningLayerInit:
         return self.inner_lrs is not None
 
 
-class MetaLearningInit:
-    """Checkpoint-backed lookup for per-layer meta-learned initialisation."""
+class LearnedInit:
+    """Checkpoint-backed lookup for per-layer learned initialisation."""
 
-    def __init__(self, layers: dict[int, MetaLearningLayerInit] | None = None):
+    def __init__(self, layers: dict[int, LearnedLayerInit] | None = None):
         self.layers = layers or {}
 
     @classmethod
-    def empty(cls) -> "MetaLearningInit":
+    def empty(cls) -> "LearnedInit":
         return cls()
 
     @classmethod
@@ -37,7 +37,7 @@ class MetaLearningInit:
         num_layers_per_mlp: list[int],
         use_residual: bool,
         freeze_W_linear: bool,
-    ) -> "MetaLearningInit":
+    ) -> "LearnedInit":
         checkpoint = torch.load(path, map_location="cpu")
         layer_weights = _extract_meta_layer_weights(checkpoint)
         layer_inner_lrs = _split_meta_inner_lrs(
@@ -50,7 +50,7 @@ class MetaLearningInit:
         layer_indices = set(layer_weights) | set(layer_inner_lrs)
         return cls(
             {
-                idx: MetaLearningLayerInit(
+                idx: LearnedLayerInit(
                     weights=layer_weights.get(idx),
                     inner_lrs=layer_inner_lrs.get(idx),
                 )
@@ -58,8 +58,18 @@ class MetaLearningInit:
             }
         )
 
-    def for_layer(self, layer_idx: int) -> MetaLearningLayerInit:
-        return self.layers.get(layer_idx, MetaLearningLayerInit())
+    @classmethod
+    def from_value_mlp_checkpoint(cls, path: str) -> "LearnedInit":
+        checkpoint = torch.load(path, map_location="cpu")
+        layers = {
+            int(k.split("_")[1]): LearnedLayerInit(weights=v)
+            for k, v in checkpoint.items()
+            if k.startswith("layer_")
+        }
+        return cls(layers)
+
+    def for_layer(self, layer_idx: int) -> LearnedLayerInit:
+        return self.layers.get(layer_idx, LearnedLayerInit())
 
 
 def adapt_mlp_with_meta_lrs(
@@ -69,7 +79,7 @@ def adapt_mlp_with_meta_lrs(
     values: torch.Tensor,
     loss_func,
     num_epochs: int,
-    meta_init: MetaLearningLayerInit,
+    learned_init: LearnedLayerInit,
     use_residual: bool,
     freeze_W_linear: bool,
     early_stopping_tol: float | None,
@@ -77,7 +87,7 @@ def adapt_mlp_with_meta_lrs(
     weight_lrs, bias_lrs, w_linear_lr = _meta_lr_tensors(
         mlp=mlp,
         keys=keys,
-        meta_init=meta_init,
+        learned_init=learned_init,
         use_residual=use_residual,
         freeze_W_linear=freeze_W_linear,
     )
@@ -147,12 +157,12 @@ def _meta_lr_tensors(
     *,
     mlp,
     keys: torch.Tensor,
-    meta_init: MetaLearningLayerInit,
+    learned_init: LearnedLayerInit,
     use_residual: bool,
     freeze_W_linear: bool,
 ) -> tuple[list[torch.Tensor], list[torch.Tensor], torch.Tensor | None]:
     n = mlp.num_layers
-    inner_lrs = meta_init.inner_lrs
+    inner_lrs = learned_init.inner_lrs
     weight_lrs = [
         lr.to(device=keys.device, dtype=keys.dtype) for lr in inner_lrs[:n]
     ]

@@ -32,8 +32,14 @@ class RopeLayerMixin:
             cos, sin = cache_kwargs["cos"], cache_kwargs["sin"]
             if cos.dim() == 3:
                 cos, sin = cos.unsqueeze(1), sin.unsqueeze(1)
-            cos = cos[:, :, :prefix_len].to(device=device, dtype=dtype)
-            sin = sin[:, :, :prefix_len].to(device=device, dtype=dtype)
+            kept_positions = cache_kwargs.get("kept_positions")
+            if kept_positions is not None:
+                kept_positions = kept_positions[:prefix_len].to(device=cos.device)
+                cos = cos.index_select(2, kept_positions).to(device=device, dtype=dtype)
+                sin = sin.index_select(2, kept_positions).to(device=device, dtype=dtype)
+            else:
+                cos = cos[:, :, :prefix_len].to(device=device, dtype=dtype)
+                sin = sin[:, :, :prefix_len].to(device=device, dtype=dtype)
         elif self.rope_cos is not None and self.rope_sin is not None:
             cos = self.rope_cos[:, :, :prefix_len].to(
                 device=device, dtype=dtype
