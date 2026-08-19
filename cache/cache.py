@@ -78,6 +78,7 @@ class CompressedCache:
         self.selective_landmark_indices = {}
         self.selective_landmark_counts = {}
         self.selective_prompt_lens = {}
+        self.selective_true_prompt_lens = {}
         self.selective_outliers = {}
         self.selective_exact_positions = {}
         self.selective_exact_keys = {}
@@ -223,6 +224,7 @@ class CompressedCache:
         layer_idx: int,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
+        true_seq_len: int | None = None,
     ) -> None:
         _, _, seq_len, head_dim = key_states.shape
         padded_keys, landmarks, valid = self._build_chunk_landmarks(key_states)
@@ -273,6 +275,9 @@ class CompressedCache:
         self.selective_landmark_indices[layer_idx] = landmark_indices
         self.selective_landmark_counts[layer_idx] = landmark_count
         self.selective_prompt_lens[layer_idx] = seq_len
+        self.selective_true_prompt_lens[layer_idx] = (
+            seq_len if true_seq_len is None else true_seq_len
+        )
         self.selective_outliers[layer_idx] = outliers
         gather_idx = positions[..., None].expand(-1, -1, -1, head_dim)
         self.selective_exact_positions[layer_idx] = positions
@@ -444,12 +449,19 @@ class CompressedCache:
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if key_states.size(-2) == 1 and getattr(self.key_cache, "prefill", False):
+            self.update_events()
         full_key_states, full_value_states = key_states, value_states
-        if self.selective_reconstruction and key_states.size(-2) > 1:
-            self._store_selective_landmarks(layer_idx, key_states, value_states)
         key_states, value_states, keep_positions = self._maybe_apply_eviction(
             key_states, value_states, layer_idx
         )
+        if self.selective_reconstruction and key_states.size(-2) > 1:
+            self._store_selective_landmarks(
+                layer_idx,
+                key_states,
+                value_states,
+                true_seq_len=full_key_states.size(-2),
+            )
         if keep_positions is not None:
             cache_kwargs = {} if cache_kwargs is None else dict(cache_kwargs)
             cache_kwargs["kept_positions"] = keep_positions
@@ -617,7 +629,7 @@ class CompressedCache:
                 original_key_bytes = sum(
                     tensor.size(0)
                     * tensor.size(1)
-                    * self.selective_prompt_lens[layer_idx]
+                    * self.selective_true_prompt_lens[layer_idx]
                     * tensor.size(3)
                     * tensor.element_size()
                     for layer_idx, tensor in self.selective_exact_keys.items()
