@@ -28,5 +28,6 @@ data/*
 figures/*
 torchinductor_*/*
 
-.dockerignore
-Dockerfile
+
+
+*.so
