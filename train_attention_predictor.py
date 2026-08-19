@@ -10,6 +10,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model.attention_predictor import (
     AttentionPredictor,
+    _attention_backend_specs,
+    _get_attention_backend,
     attention_targets_to_distribution,
     max_pool_attention,
     topk_block_mask,
@@ -192,7 +194,6 @@ def train(args: argparse.Namespace) -> None:
         device_map="auto",
     )
     model.eval()
-    model.config.output_attentions = True
     model.config.use_cache = False
 
     device = next(model.parameters()).device
@@ -236,6 +237,39 @@ def train(args: argparse.Namespace) -> None:
     }
     num_updates = 0
 
+    train_state = {"positions": None, "batch_metrics": None}
+
+    def capture_attention_hook(module, module_args, output):
+        attn_weights = output[1]
+        histories, targets = build_training_examples(
+            attn=attn_weights,
+            positions=train_state["positions"],
+            history_step=args.history_step,
+            block_size=args.block_size,
+        )
+        with torch.enable_grad():
+            metrics = train_layer_examples(
+                predictor=predictor,
+                histories=histories,
+                targets=targets,
+                topk_blocks=args.topk_blocks,
+                bce_weight=args.bce_weight,
+                loss_scale=1.0 / len(layers),
+                microbatch_size=args.predictor_microbatch_size,
+            )
+        for key, value in metrics.items():
+            train_state["batch_metrics"][key] += value / len(layers)
+
+    attention_specs = _attention_backend_specs()
+    hook_handles = [
+        module.register_forward_hook(capture_attention_hook)
+        for module in model.modules()
+        if _get_attention_backend(module, attention_specs) is not None
+        and getattr(module, "layer_idx", None) in layers
+    ]
+    if not hook_handles:
+        raise RuntimeError("No attention modules matched --layers for capture hooks.")
+
     progress = tqdm(
         islice(dataloader, args.max_batches),
         total=args.max_batches,
@@ -246,18 +280,7 @@ def train(args: argparse.Namespace) -> None:
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
 
-        with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_attentions=True,
-                use_cache=False,
-            )
-
-        if outputs.attentions is None:
-            raise RuntimeError("Model did not return attentions.")
-
-        positions = sample_positions(
+        train_state["positions"] = sample_positions(
             seq_len=input_ids.shape[-1],
             history_step=args.history_step,
             block_size=args.block_size,
@@ -265,30 +288,18 @@ def train(args: argparse.Namespace) -> None:
             samples_per_sequence=args.samples_per_sequence,
             device=device,
         )
+        train_state["batch_metrics"] = {key: 0.0 for key in running}
 
         optimizer.zero_grad(set_to_none=True)
-        batch_metrics = {key: 0.0 for key in running}
 
-        for layer_idx in layers:
-            histories, targets = build_training_examples(
-                attn=outputs.attentions[layer_idx],
-                positions=positions,
-                history_step=args.history_step,
-                block_size=args.block_size,
+        with torch.no_grad():
+            model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
             )
 
-            metrics = train_layer_examples(
-                predictor=predictor,
-                histories=histories,
-                targets=targets,
-                topk_blocks=args.topk_blocks,
-                bce_weight=args.bce_weight,
-                loss_scale=1.0 / len(layers),
-                microbatch_size=args.predictor_microbatch_size,
-            )
-
-            for key, value in metrics.items():
-                batch_metrics[key] += value / len(layers)
+        batch_metrics = train_state["batch_metrics"]
 
         torch.nn.utils.clip_grad_norm_(
             predictor.parameters(), args.max_grad_norm
@@ -325,6 +336,9 @@ def train(args: argparse.Namespace) -> None:
                         "train/lr": optimizer.param_groups[0]["lr"],
                     }
                 )
+
+    for handle in hook_handles:
+        handle.remove()
 
     save_attention_predictor_checkpoint(
         args,
