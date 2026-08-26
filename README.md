@@ -16,7 +16,6 @@ pip install -r requirements.txt
 Create a `.env` file in the root directory with the following content:
 ```
 HF_TOKEN="<your_huggingface_token>"
-WANDB_KEY="<your_wandb_key>"
 HF_DATASETS_TRUST_REMOTE_CODE=1
 TOKENIZERS_PARALLELISM=false
 ```

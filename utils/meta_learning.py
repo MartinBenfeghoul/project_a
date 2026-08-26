@@ -41,7 +41,6 @@ class LearnedInit:
         path: str,
         num_layers_per_mlp: list[int],
         use_residual: bool,
-        freeze_W_linear: bool,
     ) -> "LearnedInit":
         checkpoint = torch.load(path, map_location="cpu")
         layer_weights = {
@@ -54,7 +53,6 @@ class LearnedInit:
             layer_weights,
             num_layers_per_mlp,
             use_residual,
-            freeze_W_linear,
         )
         layer_indices = set(layer_weights) | set(layer_lrs)
         return cls(
@@ -90,22 +88,18 @@ def adapt_mlp_with_meta_lrs(
     num_epochs: int,
     learned_init: LearnedLayerInit,
     use_residual: bool,
-    freeze_W_linear: bool,
     optimizer_cls=torch.optim.SGD,
 ) -> None:
     n = mlp.num_layers
     saved_lrs = learned_init.inner_lrs
     params = list(mlp.weights) + list(mlp.biases)
     lrs = [lr.to(keys) for lr in saved_lrs[: 2 * n]]
-    if use_residual and not freeze_W_linear and len(saved_lrs) > 2 * n:
+    if use_residual and len(saved_lrs) > 2 * n:
         params.append(mlp.W_linear)
         lrs.append(saved_lrs[2 * n].to(keys))
 
     optimizer = optimizer_cls(
-        [
-            {"params": [param], "lr": float(lr)}
-            for param, lr in zip(params, lrs)
-        ]
+        [{"params": [param], "lr": float(lr)} for param, lr in zip(params, lrs)]
     )
 
     for _ in range(num_epochs):
@@ -120,7 +114,6 @@ def _split_lrs(
     weights: dict[int, dict],
     depths: list[int],
     use_residual: bool,
-    freeze_linear: bool,
 ) -> dict[int, list[torch.Tensor]]:
     if "inner_lr_params" not in state:
         return {}
@@ -130,9 +123,7 @@ def _split_lrs(
     offset = 0
     for layer_idx, depth in enumerate(depths):
         layer_state = weights.get(layer_idx, {})
-        has_linear = (
-            "W_linear" in layer_state and use_residual and not freeze_linear
-        )
+        has_linear = "W_linear" in layer_state and use_residual
         chunk = 2 * depth + int(has_linear)
         layer_lrs[layer_idx] = flat_lrs[offset : offset + chunk]
         offset += chunk
@@ -149,15 +140,11 @@ def get_rope_theta(model_config) -> float:
     return float(rope_theta)
 
 
-
 def constrain_lrs(raw_lrs, config) -> list[torch.Tensor] | None:
     if raw_lrs is None:
         return None
     lower, upper = float(config.inner_lr_min), float(config.inner_lr_max)
-    return [
-        lower + (upper - lower) * torch.sigmoid(param)
-        for param in raw_lrs
-    ]
+    return [lower + (upper - lower) * torch.sigmoid(param) for param in raw_lrs]
 
 
 def trainable_params(mlp) -> list[torch.Tensor]:
@@ -178,11 +165,7 @@ def expand_lrs(mlps, layer_lrs) -> list[torch.Tensor] | None:
 
 
 def setup_optimizer(mlps, config):
-    params = [
-        param
-        for mlp in mlps
-        for param in trainable_params(mlp)
-    ]
+    params = [param for mlp in mlps for param in trainable_params(mlp)]
     raw_lrs = None
     if config.learn_inner_lr:
         lower, upper = float(config.inner_lr_min), float(config.inner_lr_max)
@@ -191,10 +174,7 @@ def setup_optimizer(mlps, config):
         fraction = (initial - lower) / (upper - lower)
         raw = math.log(fraction / (1.0 - fraction))
         device = params[0].device
-        raw_lrs = [
-            nn.Parameter(torch.tensor(raw, device=device))
-            for _ in mlps
-        ]
+        raw_lrs = [nn.Parameter(torch.tensor(raw, device=device)) for _ in mlps]
         params.extend(raw_lrs)
 
     return raw_lrs, torch.optim.Adam(
@@ -244,8 +224,7 @@ def _predict(mlps, kvs, params, names_by_mlp) -> list[torch.Tensor]:
 
 def _mse(preds, kvs) -> torch.Tensor:
     return sum(
-        F.mse_loss(pred, values)
-        for pred, (_, values) in zip(preds, kvs)
+        F.mse_loss(pred, values) for pred, (_, values) in zip(preds, kvs)
     )
 
 
@@ -299,8 +278,7 @@ def _residual_loss(mlps, kvs, preds, target_cr) -> torch.Tensor:
 def _adam_step(params, grads, means, variances, lr, step):
     beta1, beta2, epsilon = 0.9, 0.999, 1e-8
     next_means = [
-        beta1 * mean + (1.0 - beta1) * grad
-        for mean, grad in zip(means, grads)
+        beta1 * mean + (1.0 - beta1) * grad for mean, grad in zip(means, grads)
     ]
     next_variances = [
         beta2 * variance + (1.0 - beta2) * grad.square()
@@ -331,11 +309,7 @@ def inner_loop(
     residual_cr: float | None = None,
 ):
     """Run first-order functional Adam and return the final-only objective."""
-    meta_params = [
-        param
-        for mlp in mlps
-        for param in trainable_params(mlp)
-    ]
+    meta_params = [param for mlp in mlps for param in trainable_params(mlp)]
     dtype = kvs[0][0].dtype
     params = [
         param.detach().to(dtype=dtype).clone().requires_grad_(True)
@@ -393,9 +367,7 @@ def inner_loop(
     initial_value = initial_loss.detach().item()
     final_value = final_loss.detach().item()
     objective_value = (
-        objective.detach().item()
-        if residual_cr is not None
-        else final_value
+        objective.detach().item() if residual_cr is not None else final_value
     )
     return meta_params, {
         "initial_support_loss": initial_value,

@@ -35,7 +35,3 @@ training:
   eval_ruler_samples: 10
   eval_longbench: true
   eval_longbench_samples: 10
-
-wandb:
-  enabled: true
-  project: "gist_vs_details"

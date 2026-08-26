@@ -1,4 +1,3 @@
-import copy
 import math
 import torch
 
@@ -24,23 +23,6 @@ def get_cache(cache_type, CACHE_CLASSES, verbose=True):
     return CACHE_CLASSES[cache_type]
 
 
-def adjust_lr_comp_ratios(key_cache_kwargs, value_cache_kwargs):
-    if "comp_ratio" not in key_cache_kwargs:
-        return
-
-    comp_ratio = key_cache_kwargs["comp_ratio"]
-    key_comp_ratio = 1.25 * comp_ratio
-    value_comp_ratio = (5 / 6) * comp_ratio
-    if value_comp_ratio <= 1.0:
-        raise ValueError(
-            f"Adjusted value comp ratio {value_comp_ratio} is <= 1.0, "
-            f"consider starting with a higher comp ratio than {comp_ratio}."
-        )
-
-    key_cache_kwargs["comp_ratio"] = key_comp_ratio
-    value_cache_kwargs["comp_ratio"] = value_comp_ratio
-
-
 class CompressedCache:
     """
     Dynamic cache that applies low-rank decomposition to keys
@@ -54,7 +36,6 @@ class CompressedCache:
         key_cache_kwargs: dict | None = None,
         value_cache_kwargs: dict | None = None,
         log_key_recon_mse: bool = True,  # TODO: add full plumbing for this flag
-        adjust_key_value_comp_ratio: bool = False,
         **kwargs,
     ):
         # super().__init__(ddp_cache_data=ddp_cache_data, config=config)
@@ -90,13 +71,7 @@ class CompressedCache:
         from .keys import KEY_CACHE_CLASSES
         from .values import VALUE_CACHE_CLASSES
 
-        value_key_cache_kwargs = copy.deepcopy(key_cache_kwargs)
-        if (
-            adjust_key_value_comp_ratio
-            and value_cache_type in KEY_CACHE_CLASSES
-            and "baseline" not in (key_cache_type, value_cache_type)
-        ):
-            adjust_lr_comp_ratios(key_cache_kwargs, value_key_cache_kwargs)
+        value_key_cache_kwargs = dict(key_cache_kwargs)
 
         self.key_cache = get_cache(
             key_cache_type, KEY_CACHE_CLASSES, kwargs.get("verbose", True)
@@ -150,7 +125,9 @@ class CompressedCache:
             torch.nn.functional.pad(key_states, (0, 0, 0, padding))
             if padding
             else key_states
-        ).reshape(batch_size, num_heads, num_chunks, SELECTIVE_CHUNK_SIZE, head_dim)
+        ).reshape(
+            batch_size, num_heads, num_chunks, SELECTIVE_CHUNK_SIZE, head_dim
+        )
         valid = (
             torch.arange(padded_len, device=key_states.device).reshape(
                 1, 1, num_chunks, SELECTIVE_CHUNK_SIZE
@@ -200,9 +177,7 @@ class CompressedCache:
             SELECTIVE_CHUNK_SIZE,
             device=chunks.device,
         )
-        return (
-            chunks[..., None] * SELECTIVE_CHUNK_SIZE + offsets
-        ).flatten(2)
+        return (chunks[..., None] * SELECTIVE_CHUNK_SIZE + offsets).flatten(2)
 
     def _record_selective_overhead(self, layer_idx: int) -> None:
         """Cache persistent selective-key bytes and pass them to rank selection"""
@@ -213,7 +188,9 @@ class CompressedCache:
             self.selective_outliers[layer_idx],
             self.selective_exact_keys[layer_idx],
         )
-        nbytes = sum(tensor.numel() * tensor.element_size() for tensor in tensors)
+        nbytes = sum(
+            tensor.numel() * tensor.element_size() for tensor in tensors
+        )
         self._selective_bytes[layer_idx] = nbytes
         record = getattr(self.key_cache, "set_selective_overhead", None)
         if callable(record):
@@ -415,7 +392,9 @@ class CompressedCache:
         keep = force.clone()
         if remaining > 0:
             selectable = score.masked_fill(force, float("-inf"))
-            topk = selectable.topk(min(remaining, seq_len), largest=True).indices
+            topk = selectable.topk(
+                min(remaining, seq_len), largest=True
+            ).indices
             keep[topk] = True
 
         return keep.nonzero(as_tuple=False).flatten().sort().values
@@ -432,9 +411,9 @@ class CompressedCache:
         if key_states.shape[-2] == 1:
             return key_states, value_states, None
 
-        keep_positions = self._build_keep_positions(value_importance, key_states.shape[-2]).to(
-            device=key_states.device
-        )
+        keep_positions = self._build_keep_positions(
+            value_importance, key_states.shape[-2]
+        ).to(device=key_states.device)
         self.kept_positions[layer_idx] = keep_positions.detach().cpu()
         return (
             key_states.index_select(-2, keep_positions),
@@ -449,7 +428,9 @@ class CompressedCache:
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if key_states.size(-2) == 1 and getattr(self.key_cache, "prefill", False):
+        if key_states.size(-2) == 1 and getattr(
+            self.key_cache, "prefill", False
+        ):
             self.update_events()
         full_key_states, full_value_states = key_states, value_states
         key_states, value_states, keep_positions = self._maybe_apply_eviction(
@@ -466,7 +447,9 @@ class CompressedCache:
             cache_kwargs = {} if cache_kwargs is None else dict(cache_kwargs)
             cache_kwargs["kept_positions"] = keep_positions
             cache_kwargs["allow_sparse_kv"] = True
-        elif self.eviction_keep_ratio < 1.0 and cache_kwargs is not None: # decode
+        elif (
+            self.eviction_keep_ratio < 1.0 and cache_kwargs is not None
+        ):  # decode
             cache_kwargs = dict(cache_kwargs)
             cache_kwargs["allow_sparse_kv"] = True
 
@@ -664,22 +647,10 @@ class CompressedCache:
         return sum(self._key_recon_mses) / len(self._key_recon_mses)
 
     @property
-    def eta_mean(self):
-        return getattr(self.key_cache, "eta_mean", None)
-
-    @property
-    def eta_std(self):
-        return getattr(self.key_cache, "eta_std", None)
-
-    @property
     def value_recon_mse(self) -> float | None:
         if hasattr(self.value_cache, "recon_mse"):
             return self.value_cache.recon_mse
         return None
-
-    @property
-    def value_mlp_log_events(self) -> list[dict[str, Any]]:
-        return getattr(self.value_cache, "mlp_log_events", [])
 
     def update_events(self, *args, **kwargs):
         """

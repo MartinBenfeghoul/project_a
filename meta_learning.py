@@ -15,7 +15,6 @@ import torch
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import wandb
 
 from model.mlp import MLP
 from utils import (
@@ -26,7 +25,6 @@ from utils import (
     get_model_and_tokenizer,
     load_data,
     save_checkpoint,
-    init_wandb,
     add_grad,
     constrain_lrs,
     expand_lrs,
@@ -47,11 +45,7 @@ def _metric_sums():
 
 def _step(
     optimizer,
-    sums,
     count,
-    epoch,
-    step,
-    use_wandb,
 ):
     for group in optimizer.param_groups:
         for param in group["params"]:
@@ -59,19 +53,6 @@ def _step(
                 param.grad.div_(count)
     optimizer.step()
     optimizer.zero_grad()
-    step += 1
-    if use_wandb:
-        wandb.log(
-            {
-                "trainer/update_step": step,
-                "trainer/epoch": epoch,
-                **{
-                    f"train/{name}": total / count
-                    for name, total in sums.items()
-                },
-            }
-        )
-    return step
 
 
 def run_epoch(
@@ -81,9 +62,7 @@ def run_epoch(
     optimizer,
     cfg,
     epoch,
-    step,
     device,
-    use_wandb,
     inner_dtype,
     raw_lrs=None,
     residual_cr=None,
@@ -98,7 +77,6 @@ def run_epoch(
     sums = _metric_sums()
     batch_count = 0
     accum_count = 0
-    update_sums = _metric_sums()
     optimizer.zero_grad()
 
     for batch_idx, batch in enumerate(
@@ -142,19 +120,13 @@ def run_epoch(
 
         for name in sums:
             sums[name] += metrics[name]
-            update_sums[name] += metrics[name]
         accum_count += 1
         if accum_count >= accum_steps:
-            step = _step(
+            _step(
                 optimizer,
-                update_sums,
                 accum_count,
-                epoch,
-                step,
-                use_wandb,
             )
             accum_count = 0
-            update_sums = _metric_sums()
 
         batch_count += 1
 
@@ -168,16 +140,12 @@ def run_epoch(
             )
 
     if accum_count > 0:
-        step = _step(
+        _step(
             optimizer,
-            update_sums,
             accum_count,
-            epoch,
-            step,
-            use_wandb,
         )
 
-    return sums, batch_count, step
+    return sums, batch_count
 
 
 def meta_train(
@@ -189,11 +157,9 @@ def meta_train(
     cfg,
     ckpt_path,
     tokenizer,
-    use_wandb=False,
 ):
     raw_lrs, optimizer = setup_optimizer(mlps, cfg)
     model.eval()
-    step = 0
     inner_dtype = getattr(torch, str(cfg.inner_adaptation_dtype))
     print(f"FP32 meta parameters; {inner_dtype} inner adaptation")
     residual_cr = (
@@ -205,26 +171,17 @@ def meta_train(
             f"(target_cr={residual_cr})"
         )
 
-    if use_wandb:
-        wandb.define_metric("trainer/update_step")
-        wandb.define_metric("train/*", step_metric="trainer/update_step")
-        wandb.define_metric("trainer/epoch")
-        wandb.define_metric("epoch/*", step_metric="trainer/epoch")
-        wandb.define_metric("benchmark/*", step_metric="trainer/epoch")
-
     data_iter = iter(dataloader)
     for epoch in range(cfg.num_meta_epochs):
         start = time.time()
-        sums, batch_count, step = run_epoch(
+        sums, batch_count = run_epoch(
             model,
             mlps,
             data_iter,
             optimizer,
             cfg,
             epoch,
-            step,
             device,
-            use_wandb,
             inner_dtype,
             raw_lrs=raw_lrs,
             residual_cr=residual_cr,
@@ -243,27 +200,12 @@ def meta_train(
             f"Time: {epoch_sec:.1f}s"
         )
 
-        if use_wandb:
-            wandb.log(
-                {
-                    **{
-                        f"epoch/avg_{name}": value
-                        for name, value in avgs.items()
-                    },
-                    "trainer/epoch": epoch,
-                    "trainer/update_step": step,
-                    "perf/epoch_time_sec": epoch_sec,
-                },
-            )
-
         with torch.no_grad():
             saved_lrs = expand_lrs(mlps, constrain_lrs(raw_lrs, cfg))
         save_checkpoint(mlps, saved_lrs, ckpt_path, epoch)
 
         eval_every = max(1, int(cfg.eval_interval))
-        if (epoch + 1) % eval_every == 0 or (
-            epoch + 1 == cfg.num_meta_epochs
-        ):
+        if (epoch + 1) % eval_every == 0 or (epoch + 1 == cfg.num_meta_epochs):
             base, ext = os.path.splitext(ckpt_path)
             epoch_ckpt = f"{base}_epoch{epoch}{ext}"
             for benchmark, enabled, samples in (
@@ -284,8 +226,6 @@ def meta_train(
                     ckpt_path=epoch_ckpt,
                     device=device,
                     epoch=epoch,
-                    step=step,
-                    use_wandb=use_wandb,
                     benchmark=benchmark,
                     samples=samples,
                 )
@@ -311,7 +251,6 @@ def build_cache_args(model_cfg, cfg, ckpt_path, device, target_cr):
         "un_rope": True,
         "rope_theta": get_rope_theta(model_cfg),
         "use_residual": cfg.use_residual,
-        "freeze_W_linear": False,
         "target_cr": target_cr,
     }
 
@@ -324,8 +263,6 @@ def eval_benchmark(
     ckpt_path,
     device,
     epoch,
-    step,
-    use_wandb,
     benchmark,
     samples,
 ):
@@ -349,8 +286,6 @@ def eval_benchmark(
     )
 
     logger = Logger()
-    logger.prefill_events = []
-    logger.decode_events = []
 
     lm = CompressedCacheHFLM(
         key_cache_kwargs={"cache_type": "baseline"},
@@ -363,7 +298,6 @@ def eval_benchmark(
         ),
         eviction_keep_ratio=1.0,
         logger=logger,
-        adjust_key_value_comp_ratio=False,
         pretrained=model,
         tokenizer=tokenizer,
         truncation=False,
@@ -400,17 +334,6 @@ def eval_benchmark(
         f"{benchmark} eval epoch {epoch}: "
         f"avg={avg_score:.4f}, per-task={scores}"
     )
-
-    if use_wandb:
-        log_data = {
-            f"benchmark/{benchmark}_avg": avg_score,
-            f"benchmark/{benchmark}_target_cr": target_cr,
-            "trainer/epoch": epoch,
-            "trainer/update_step": step,
-        }
-        for task, score in scores.items():
-            log_data[f"benchmark/{benchmark}/{task}"] = score
-        wandb.log(log_data)
 
 
 def load_config():
@@ -459,10 +382,6 @@ def main():
     cfg = config.training
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    use_wandb = init_wandb(config)
-    if use_wandb:
-        print("wandb logging enabled")
 
     print(f"Using device: {device}")
     print(f"Loading model: {config.model.name}")
@@ -536,11 +455,7 @@ def main():
         cfg=cfg,
         ckpt_path=ckpt_path,
         tokenizer=tokenizer,
-        use_wandb=use_wandb,
     )
-
-    if use_wandb:
-        wandb.finish()
 
 
 if __name__ == "__main__":

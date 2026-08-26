@@ -1,7 +1,6 @@
 import os
 import json
 import argparse
-import time
 from omegaconf import OmegaConf
 import torch
 
@@ -24,11 +23,7 @@ from utils import (
     get_device_type,
     list_of_strings,
     get_output_path,
-    extract_and_save_stats,
-    extract_and_save_efficiency_stats,
-    log_live_value_mlp_training_wandb,
-    init_lm_eval_wandb,
-    filter_tasks_by_min_seq_len
+    filter_tasks_by_min_seq_len,
 )
 
 GEN_KWARGS = {
@@ -36,13 +31,6 @@ GEN_KWARGS = {
     "use_cache": True,
     "logits_to_keep": 1,
 }
-
-
-def get_gen_kwargs(args):
-    gen_kwargs = dict(GEN_KWARGS)
-    if args.k_cache_type == "surprise_lr":
-        gen_kwargs["logits_to_keep"] = 0
-    return gen_kwargs
 
 
 def get_tasks(tasks, print_tasks=True):
@@ -67,26 +55,7 @@ def main(args):
         else []
     )
     logger = Logger()
-    logger.prefill_events = []
-    logger.decode_events = []
-    logger.recorded_k_timing = False
     logger.recorded_cr = False
-
-    if args.dump_full_kv_dir is not None:
-        if args.k_cache_type != "baseline" or args.v_cache_type != "baseline":
-            raise ValueError(
-                "--dump_full_kv_dir requires --k_cache_type=baseline "
-                "and --v_cache_type=baseline."
-            )
-        tasks = get_tasks(args.tasks, print_tasks=False)
-        if len(tasks) != 1 or args.limit != 1:
-            raise ValueError(
-                "--dump_full_kv_dir currently only supports a single task "
-                "and a limit of 1 sample. "
-                f"Got tasks={tasks} and limit={args.limit}."
-            )
-        args.use_wandb = False
-        os.makedirs(args.dump_full_kv_dir, exist_ok=True)
 
     rope_theta = getattr(model.config, "rope_theta", 500_000.0)
 
@@ -95,22 +64,9 @@ def main(args):
     num_layers = model.config.num_hidden_layers
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
-        "decomposition_method": args.decomposition_method,
-        "local_window": args.local_window,
-        "log_timing_stats": args.log_key_cache_timing,
         "comp_ratio": args.comp_ratio,
         "energy_threshold": args.energy_threshold,
         "rank_selection": args.rank_selection,
-        "lr": args.k_lr,
-        "decomp_n_iter": args.decomp_n_iter,
-        "gamma": args.gamma,
-        "min_size": 8,
-        "kmeans_cluster_size": args.kmeans_cluster_size,
-        "kmeans_n_iter": args.kmeans_n_iter,
-        "kmeans_init": args.kmeans_init,
-        "kmeans_dtype": args.kmeans_dtype,
-        "kmeans_avg_heads": args.kmeans_avg_heads,
-        "kmeans_per_head": args.kmeans_per_head,
         "layer_group_size": args.xkv_layer_group_size,
         "xkv_svd_backend": args.xkv_svd_backend,
         "num_layers": num_layers,
@@ -143,50 +99,23 @@ def main(args):
         "value_mlp_weights_path": args.value_mlp_weights_path,
         "un_rope": args.un_rope,
         "rope_theta": rope_theta,
-        "global_compression": args.global_compression,
         "use_residual": args.use_residual,
         "intermediate_activation": args.intermediate_activation,
-        "linear_only": args.linear_only,
-        "freeze_W_linear": args.freeze_W_linear,
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
     }
-    if (args.use_residual or args.linear_only) and args.v_cache_type == "mlp":
+    if args.use_residual and args.v_cache_type == "mlp":
         value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(
             model, per_head=args.per_head_kv_linear
         )
 
     model.eval()
 
-    model_baseline_mem = 0
-    if args.log_efficiency_metrics and torch.cuda.is_available():
-        # warm up cuda kernels before benchmarking to avoid inflated first-pass times
-        print("Warming up GPU...")
-        _warmup_ids = torch.ones((1, 32), dtype=torch.long, device=device)
-        for _ in range(3):
-            model(_warmup_ids)
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
-        # model-weights-only footprint
-        model_baseline_mem = torch.cuda.memory_allocated()
-
     args.tasks = get_tasks(args.tasks)
-    use_wandb = init_lm_eval_wandb(args)
 
-    pre_hook, post_hook = make_hooks(
-        logger,
-        measure_latency=args.log_efficiency_metrics,
-        measure_gpu_memory=args.log_efficiency_metrics,
-        model_baseline_mem=model_baseline_mem,
-        use_wandb=use_wandb,
-        dump_full_kv_dir=args.dump_full_kv_dir,
-        model_name=args.model_name,
-        task_name=args.tasks[0],
-        rope_theta=rope_theta,
-    )
+    post_hook = make_hooks(logger)
     metric_hook_handles = [
-        model.register_forward_pre_hook(pre_hook, with_kwargs=True),
         model.register_forward_hook(post_hook, with_kwargs=True),
     ]
 
@@ -195,7 +124,6 @@ def main(args):
         value_cache_kwargs=value_cache_kwargs,
         eviction_keep_ratio=args.eviction_keep_ratio,
         logger=logger,
-        adjust_key_value_comp_ratio=args.adjust_key_value_comp_ratio,
         pretrained=model,
         tokenizer=tokenizer,
         max_length=None,
@@ -216,15 +144,9 @@ def main(args):
             task_dict, tokenizer, args.min_seq_len
         )
 
-    if args.log_efficiency_metrics:
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-            torch.cuda.synchronize()
-        start_time = time.perf_counter()
-
     results = evaluator.simple_evaluate(
         model=lm,
-        gen_kwargs=get_gen_kwargs(args),
+        gen_kwargs=GEN_KWARGS,
         tasks=eval_tasks,
         num_fewshot=0,
         batch_size=args.batch_size,
@@ -258,16 +180,7 @@ def main(args):
 
     print(make_table(results))
 
-    results = extract_and_save_stats(logger, results)
-    if args.log_efficiency_metrics:
-        results = extract_and_save_efficiency_stats(
-            logger, results, model_baseline_mem, start_time
-        )
     results["results"]["config"] = vars(args)
-
-    if args.debug:
-        print("Debug mode — not saving results.")
-        return results
 
     output_dir = os.path.join(
         args.output_dir, args.model_name.replace("/", "_")
@@ -286,16 +199,6 @@ def main(args):
         metric_hook_handles + attn_predictor_hook_handles + selective_handles
     ):
         handle.remove()
-    if use_wandb:
-        import wandb
-
-        if logger.value_mlp_log_events:
-            log_live_value_mlp_training_wandb(
-                logger.value_mlp_log_events,
-                logger.request_idx + 1,
-                log_tables=True,
-            )
-        wandb.finish()
     return results
 
 
@@ -331,30 +234,14 @@ def parse_args():
         default=None,
         help="Only evaluate samples whose prompt is at least this many tokens.",
     )
-    parser.add_argument("--dump_full_kv_dir", type=str, default=None)
-    parser.add_argument("--log_efficiency_metrics", action="store_true")
-    parser.add_argument("--use_wandb", action="store_true")
-    parser.add_argument("--debug", action="store_true")
-
     # key cache
     parser.add_argument(
-        "-kc", "--k_cache_type", type=str, default="surprise_lr"
-    )
-    parser.add_argument(
-        "--decomposition_method",
-        type=str,
-        default="svd",
-        choices=["svd", "lora"],
+        "-kc",
+        "--k_cache_type",
+        choices=["baseline", "xkv", "turboquant"],
+        default="xkv",
     )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
-    parser.add_argument(
-        "--adjust_key_value_comp_ratio",
-        action="store_true",
-        help=(
-            "Use different low-rank compression targets for key and value "
-            "caches while preserving the requested combined --comp_ratio."
-        ),
-    )
     parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
     parser.add_argument(
         "--rank_selection",
@@ -362,10 +249,6 @@ def parse_args():
         default="comp_ratio",
         choices=["comp_ratio", "energy"],
     )
-    parser.add_argument("--k_lr", type=float, default=1e-2)
-    parser.add_argument("--decomp_n_iter", type=int, default=4)
-    parser.add_argument("--gamma", type=float, default=3.0)
-    parser.add_argument("--local_window", type=int, default=0)
     parser.add_argument(
         "--xkv_layer_group_size",
         type=int,
@@ -378,27 +261,6 @@ def parse_args():
         default="cholqr",
     )
     parser.add_argument("--selective_reconstruction", action="store_true")
-    parser.add_argument(
-        "--kmeans_cluster_size",
-        type=float,
-        default=None,
-    )
-    parser.add_argument("--kmeans_n_iter", type=int, default=3)
-    parser.add_argument(
-        "--kmeans_init",
-        type=str,
-        default="infllm",
-        choices=["infllm", "random", "kmeans++"],
-    )
-    parser.add_argument(
-        "--kmeans_dtype",
-        type=str,
-        default="float32",
-        choices=["float16", "float32", "bfloat16"],
-    )
-    parser.add_argument("--kmeans_avg_heads", action="store_true")
-    parser.add_argument("--kmeans_per_head", action="store_true")
-    parser.add_argument("--log_key_cache_timing", action="store_true")
     parser.add_argument(
         "--k_quantise_a",
         action="store_true",
@@ -441,11 +303,6 @@ def parse_args():
         help="Path to plain pretrained value-cache MLP weights from train_value_mlps.py.",
     )
     parser.add_argument(
-        "--global_compression",
-        action="store_true",
-        help="Pool errors across all layers and apply a single global threshold instead of per-layer thresholds.",
-    )
-    parser.add_argument(
         "--un_rope",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -464,21 +321,10 @@ def parse_args():
         help="The activation function for the MLP in the value cache.",
     )
     parser.add_argument(
-        "--linear_only",
-        action="store_true",
-        help="Recover values directly from W_linear_init (keys @ pinv(W_k) @ W_v), skipping MLP training entirely. Requires --un_rope.",
-    )
-    parser.add_argument(
         "--per_head_kv_linear",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly. Use --no-per_head_kv_linear to disable.",
-    )
-    parser.add_argument(
-        "--freeze_W_linear",
-        action="store_true",
-        default=False,
-        help="Freeze W_linear during MLP training.",
     )
     parser.add_argument(
         "--use_attn_predictor",
@@ -511,7 +357,9 @@ def parse_args():
     args = parser.parse_args()
     args = apply_attn_predictor_config(args)
     if args.eviction_keep_ratio < 1 and not args.use_attn_predictor:
-        raise ValueError("--eviction_keep_ratio < 1 requires --use_attn_predictor.")
+        raise ValueError(
+            "--eviction_keep_ratio < 1 requires --use_attn_predictor."
+        )
 
     print("Config for lm-eval: ", vars(args))
 

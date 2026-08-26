@@ -13,21 +13,6 @@ from utils import Dataset, collate, extract_kv_linear_init, load_data
 from utils.rope import compute_rope_cos_sin, inverse_rope
 
 
-def init_wandb(args, layers):
-    if not args.use_wandb:
-        return None
-    import wandb
-
-    wandb.init(
-        project="gist_vs_details",
-        entity="mixture_of_titans",
-        config={**vars(args), "layers": layers},
-    )
-    wandb.define_metric("train/step")
-    wandb.define_metric("train/*", step_metric="train/step")
-    return wandb
-
-
 def get_layer_kv(past_key_values, layer_idx):
     layer = past_key_values.layers[layer_idx]
     key = getattr(layer, "keys", getattr(layer, "key_states", None))
@@ -59,7 +44,9 @@ def build_mlps(model, device, dtype):
         ).to(device=device, dtype=dtype)
         if w_linear is not None:
             with torch.no_grad():
-                mlp.W_linear.copy_(w_linear[layer_idx].to(device=device, dtype=dtype))
+                mlp.W_linear.copy_(
+                    w_linear[layer_idx].to(device=device, dtype=dtype)
+                )
         mlps.append(mlp)
     return mlps
 
@@ -143,7 +130,9 @@ def evaluate_mlps(mlps, val_batches, layers):
                 losses[layer_idx] += float(loss.detach().cpu())
 
     num_batches = max(len(val_batches), 1)
-    losses = {layer_idx: loss / num_batches for layer_idx, loss in losses.items()}
+    losses = {
+        layer_idx: loss / num_batches for layer_idx, loss in losses.items()
+    }
     mean_loss = sum(losses.values()) / max(len(losses), 1)
     return mean_loss, losses
 
@@ -164,12 +153,9 @@ def train(args):
     device = next(model.parameters()).device
     rope_theta = getattr(model.config, "rope_theta", 500000.0)
     layers = list(range(model.config.num_hidden_layers))
-    wandb_run = init_wandb(args, layers)
     mlps = build_mlps(model, device, dtype)
     optimizers = {
-        layer_idx: Adam(
-            optimizer_params(mlps[layer_idx], args), lr=args.lr
-        )
+        layer_idx: Adam(optimizer_params(mlps[layer_idx], args), lr=args.lr)
         for layer_idx in layers
     }
 
@@ -193,7 +179,9 @@ def train(args):
 
     val_batches = []
     if args.val_batches > 0:
-        for _ in tqdm(range(args.val_batches), desc="preparing validation batches"):
+        for _ in tqdm(
+            range(args.val_batches), desc="preparing validation batches"
+        ):
             val_batches.append(
                 prepare_kv_batch(
                     next(dataloader_iter),
@@ -262,8 +250,6 @@ def train(args):
         if val_batches:
             postfix["val"] = f"{best_val_loss:.4f}"
         progress.set_postfix(postfix)
-        if wandb_run is not None:
-            wandb_run.log(log_payload)
 
     metrics = {
         f"layer_{idx}_loss": running_loss[idx] / max(num_updates[idx], 1)
@@ -295,14 +281,13 @@ def train(args):
     model_name = args.model_name.replace("/", "--")
     output_path = f"checkpoints/value_mlps/{model_name}/value_mlps_{args.max_batches}batches_{args.num_epochs}epochs_{args.seq_len}seqlen.pt"
     save_checkpoint(output_path, mlps, args, layers, metrics)
-    if wandb_run is not None:
-        wandb_run.log({f"train/final_{k}": v for k, v in metrics.items()})
-        wandb_run.finish()
     print(f"Saved value MLP checkpoint to {output_path}")
 
 
 def build_arg_parser():
-    parser = argparse.ArgumentParser(description="Train value-cache MLPs on FineWeb.")
+    parser = argparse.ArgumentParser(
+        description="Train value-cache MLPs on FineWeb."
+    )
     parser.add_argument(
         "--model_name",
         type=str,
@@ -310,7 +295,12 @@ def build_arg_parser():
     )
     parser.add_argument("--seq_len", type=int, default=4096)
     parser.add_argument("--max_batches", type=int, default=32)
-    parser.add_argument("--val_batches", type=int, default=2, help="Number of batches for validation.")
+    parser.add_argument(
+        "--val_batches",
+        type=int,
+        default=2,
+        help="Number of batches for validation.",
+    )
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_epochs", type=int, default=25)
     parser.add_argument(
@@ -318,7 +308,6 @@ def build_arg_parser():
         choices=["float16", "bfloat16", "float32"],
         default="float32",
     )
-    parser.add_argument("--use_wandb", action="store_true")
     return parser
 
 

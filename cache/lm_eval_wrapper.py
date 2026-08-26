@@ -19,14 +19,12 @@ class CompressedCacheHFLM(HFLM):
         value_cache_kwargs,
         logger,
         eviction_keep_ratio,
-        adjust_key_value_comp_ratio=False,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._key_cache_kwargs = key_cache_kwargs
         self._value_cache_kwargs = value_cache_kwargs
         self._eviction_keep_ratio = eviction_keep_ratio
-        self._adjust_key_value_comp_ratio = adjust_key_value_comp_ratio
         self._logger = logger
 
     def _make_cache(self, cache_context=None):
@@ -34,18 +32,10 @@ class CompressedCacheHFLM(HFLM):
             config=self.model.config,
             key_cache_kwargs=self._key_cache_kwargs,
             value_cache_kwargs=self._value_cache_kwargs,
-            adjust_key_value_comp_ratio=self._adjust_key_value_comp_ratio,
             cache_context=cache_context,
             eviction_keep_ratio=self._eviction_keep_ratio,
             verbose=False,
         )
-
-    def generate_until(self, requests, disable_tqdm=False):
-        self._current_task_name = requests[0].task_name if requests else None
-        try:
-            return super().generate_until(requests, disable_tqdm=disable_tqdm)
-        finally:
-            self._current_task_name = None
 
     def _model_call(self, inps, attn_mask=None, labels=None):
         with (
@@ -69,13 +59,9 @@ class CompressedCacheHFLM(HFLM):
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         self._logger.recorded_cr = False
-        self._logger.recorded_k_timing = False
-        task_name = getattr(self, "_current_task_name", None)
-        cache_context = {}
-        if task_name is not None:
-            cache_context["task_name"] = task_name
-        cache_context["padding_mask"] = generation_kwargs["attention_mask"]
-        cache = self._make_cache(cache_context)
+        cache = self._make_cache(
+            {"padding_mask": generation_kwargs["attention_mask"]}
+        )
         generation_kwargs["past_key_values"] = cache
         generation_kwargs["temperature"] = generation_kwargs.get(
             "temperature", 0.0

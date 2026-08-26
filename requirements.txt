@@ -9,7 +9,6 @@ scipy
 
 dotenv==0.9.9
 omegaconf
-wandb
 tqdm
 
 html2text==2025.4.15

@@ -3,7 +3,6 @@ from itertools import islice
 
 import torch
 import torch.nn.functional as F
-import wandb
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -17,8 +16,6 @@ from model.attention_predictor import (
     topk_block_mask,
 )
 from utils import (
-    attention_predictor_config,
-    init_wandb,
     parse_layers,
     prepare_run_directory,
     save_attention_predictor_checkpoint,
@@ -198,11 +195,7 @@ def train(args: argparse.Namespace) -> None:
 
     device = next(model.parameters()).device
     layers = parse_layers(args.layers, model.config.num_hidden_layers)
-    wandb_config = attention_predictor_config(args, layers)
-    wandb_config.wandb.run_name = prepare_run_directory(args, layers)
-    if init_wandb(wandb_config):
-        wandb.define_metric("train/step")
-        wandb.define_metric("train/*", step_metric="train/step")
+    prepare_run_directory(args, layers)
 
     hf_dataset = load_data(
         dataset_path="HuggingFaceFW/fineweb-edu",
@@ -268,7 +261,9 @@ def train(args: argparse.Namespace) -> None:
         and getattr(module, "layer_idx", None) in layers
     ]
     if not hook_handles:
-        raise RuntimeError("No attention modules matched --layers for capture hooks.")
+        raise RuntimeError(
+            "No attention modules matched --layers for capture hooks."
+        )
 
     progress = tqdm(
         islice(dataloader, args.max_batches),
@@ -319,23 +314,6 @@ def train(args: argparse.Namespace) -> None:
                 mass=f"{averaged['recovered_mass']:.4f}",
                 recall=f"{averaged['recall_at_k']:.4f}",
             )
-            if args.use_wandb:
-                wandb.log(
-                    {
-                        "train/step": batch_idx,
-                        "train/loss": averaged["loss"],
-                        "train/kl_loss": averaged["kl_loss"],
-                        "train/bce_loss": averaged["bce_loss"],
-                        "train/recovered_mass": averaged["recovered_mass"],
-                        "train/recall_at_k": averaged["recall_at_k"],
-                        "train/batch_loss": batch_metrics["loss"],
-                        "train/batch_recovered_mass": batch_metrics[
-                            "recovered_mass"
-                        ],
-                        "train/batch_recall_at_k": batch_metrics["recall_at_k"],
-                        "train/lr": optimizer.param_groups[0]["lr"],
-                    }
-                )
 
     for handle in hook_handles:
         handle.remove()
@@ -349,8 +327,6 @@ def train(args: argparse.Namespace) -> None:
         running,
         num_updates,
     )
-    if args.use_wandb:
-        wandb.finish()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -384,9 +360,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bce_weight", type=float, default=0.1)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--use_wandb", action="store_true")
-    parser.add_argument("--wandb_project", type=str, default="gist_vs_details")
-    parser.add_argument("--wandb_entity", type=str, default="mixture_of_titans")
     return parser
 
 
