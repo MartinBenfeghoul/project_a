@@ -34,32 +34,6 @@ def find_rank_wrt_cr(r, m, n):
     return k
 
 
-def find_rank_wrt_energy(S, energy_threshold):
-    """
-    Args:
-        S: singular values tensor, shape (..., r). Assumed non-negative and sorted descending along last dim.
-        energy_threshold: float in (0, 1], or tensor broadcastable to S.shape[:-1]
-
-    Returns:
-        k: smallest integer satisfying energy > energy_threshold for all dimensions
-           (i.e., k is a Python int; rank is in [1, r] unless r==0).
-    """
-    if S.numel() == 0:
-        return 0
-
-    S2 = S**2
-    denom = S2.sum(-1, keepdim=True).clamp_min(torch.finfo(S2.dtype).tiny)
-    energy = S2.cumsum(-1) / denom
-    meets = energy >= energy_threshold
-    first_idx = meets.float().argmax(dim=-1)
-    has_any = meets.any(dim=-1)
-
-    k_per = torch.where(
-        has_any, first_idx + 1, torch.full_like(first_idx, S.shape[-1])
-    )
-    return int(k_per.max().item())
-
-
 @torch.no_grad()
 def _xkv_cholqr(Y: torch.Tensor) -> torch.Tensor:
     """Cholesky-QR low-precision randomised SVD"""
@@ -123,9 +97,7 @@ def _truncate_svd_factors(
     batch_shape: tuple[int, ...],
     m: int,
     n: int,
-    rank_selection: str,
     cr: float = 2.0,
-    energy_threshold: float = 0.95,
 ):
     """Truncate full-SVD outputs and restore the original leading shape.
 
@@ -134,16 +106,7 @@ def _truncate_svd_factors(
     """
     r = S.shape[-1]
 
-    if rank_selection == "comp_ratio":
-        k = find_rank_wrt_cr(cr, m, n)
-    elif rank_selection == "energy":
-        k = find_rank_wrt_energy(S.reshape(*batch_shape, r), energy_threshold)
-    else:
-        raise ValueError(
-            f"Invalid rank_selection {rank_selection!r}. "
-            "Expected 'comp_ratio' or 'energy'."
-        )
-
+    k = find_rank_wrt_cr(cr, m, n)
     k = max(1, min(int(k), r))
 
     U = U.reshape(*batch_shape, m, r)[..., :k]
@@ -156,12 +119,10 @@ def _truncate_svd_factors(
 
 def _parallel_svd_segments(
     segments: list[torch.Tensor],
-    rank_selection: str,
     target_device: torch.device,
     target_dtype: torch.dtype,
     dtype: torch.dtype = torch.float32,
     cr: float = 2.0,
-    energy_threshold: float = 0.95,
     **kwargs,
 ):
     """Run threaded CPU SVD for a list of tensor segments.
@@ -219,9 +180,7 @@ def _parallel_svd_segments(
             batch_shape,
             m,
             n,
-            rank_selection,
             cr=cr,
-            energy_threshold=energy_threshold,
         )
         factor_pairs.append(
             (
@@ -235,9 +194,7 @@ def _parallel_svd_segments(
 
 def svd(
     M: torch.Tensor,
-    rank_selection: str,
     cr: float = 2.0,
-    energy_threshold: float = 0.95,
     dtype: torch.dtype = torch.float32,
     **kwargs,
 ):
@@ -248,12 +205,10 @@ def svd(
     """
     US, Vh = _parallel_svd_segments(
         [M],
-        rank_selection,
         target_device=M.device,
         target_dtype=M.dtype,
         dtype=dtype,
         cr=cr,
-        energy_threshold=energy_threshold,
         **kwargs,
     )[0]
     return US, Vh
@@ -262,9 +217,7 @@ def svd(
 def decompose_grouped_xkv_to_segment_store(
     tensor: torch.Tensor,
     segment_ranges: list[list[tuple[int, int]]],
-    rank_selection: str,
     cr: float = 2.0,
-    energy_threshold: float = 0.95,
     dtype: torch.dtype = torch.float32,
     svd_backend: str = "linalg",
     n_iter: int = 4,
@@ -297,9 +250,7 @@ def decompose_grouped_xkv_to_segment_store(
                 segment.shape[:-2],
                 segment.size(-2),
                 segment.size(-1),
-                rank_selection,
                 cr=cr,
-                energy_threshold=energy_threshold,
             )
             layer_segments[batch_idx].append(
                 {

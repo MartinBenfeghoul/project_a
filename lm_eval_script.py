@@ -65,12 +65,9 @@ def main(args):
     key_cache_kwargs = {
         "cache_type": args.k_cache_type,
         "comp_ratio": args.comp_ratio,
-        "energy_threshold": args.energy_threshold,
-        "rank_selection": args.rank_selection,
         "layer_group_size": args.xkv_layer_group_size,
         "xkv_svd_backend": args.xkv_svd_backend,
         "num_layers": num_layers,
-        "unrope_keys": args.un_rope,
         "selective_reconstruction": args.selective_reconstruction,
         "rope_theta": rope_theta,
         "quantise_a": args.k_quantise_a,
@@ -78,37 +75,20 @@ def main(args):
         "compressor_bits": args.k_compressor_bits,
     }
 
-    target_perc_per_layer = (
-        args.target_perc
-        if isinstance(args.target_perc, list)
-        else [args.target_perc] * num_layers
-    )
     value_cache_kwargs = {
         "cache_type": args.v_cache_type,
-        "num_layers_per_mlp": [args.num_layers_per_mlp] * num_layers,
-        "hidden_factors_per_mlp": [args.hidden_factors_per_mlp] * num_layers,
-        "num_heads_per_mlp": [args.num_heads_per_mlp] * num_layers,
         "per_sequence": args.per_sequence,
-        "target_perc": target_perc_per_layer,
-        "lr": args.v_lr,
-        "device": torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        "optimizer": args.optimizer,
-        "loss_func": args.loss_func,
         "num_epochs": args.num_epochs,
         "meta_weights_path": args.meta_weights_path,
         "value_mlp_weights_path": args.value_mlp_weights_path,
-        "un_rope": args.un_rope,
         "rope_theta": rope_theta,
         "use_residual": args.use_residual,
-        "intermediate_activation": args.intermediate_activation,
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
         "compressor_bits": args.v_compressor_bits,
     }
     if args.use_residual and args.v_cache_type == "mlp":
-        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(
-            model, per_head=args.per_head_kv_linear
-        )
+        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model)
 
     model.eval()
 
@@ -242,13 +222,6 @@ def parse_args():
         default="xkv",
     )
     parser.add_argument("-r", "--comp_ratio", type=float, default=2.0)
-    parser.add_argument("-e", "--energy_threshold", type=float, default=0.95)
-    parser.add_argument(
-        "--rank_selection",
-        type=str,
-        default="comp_ratio",
-        choices=["comp_ratio", "energy"],
-    )
     parser.add_argument(
         "--xkv_layer_group_size",
         type=int,
@@ -280,20 +253,13 @@ def parse_args():
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--num_layers_per_mlp", type=int, default=2)
-    parser.add_argument("--hidden_factors_per_mlp", type=int, default=1)
-    parser.add_argument("--num_heads_per_mlp", type=int, default=8)
     parser.add_argument("--per_sequence", action="store_true")
-    parser.add_argument("--target_perc", type=int, default=85)
-    parser.add_argument("--target_cr", type=float, default=None)
-    parser.add_argument("--v_lr", type=float, default=1e-3)
     parser.add_argument(
-        "--optimizer",
-        type=str,
-        default="adam",
-        choices=["adam", "adamw", "sgd"],
+        "--target_cr",
+        type=float,
+        default=None,
+        help="sets MLP target compression ratio.",
     )
-    parser.add_argument("--loss_func", type=str, default="mse")
     parser.add_argument("--num_epochs", type=int, default=50)
     parser.add_argument("--meta_weights_path", type=str, default=None)
     parser.add_argument(
@@ -303,28 +269,10 @@ def parse_args():
         help="Path to plain pretrained value-cache MLP weights from train_value_mlps.py.",
     )
     parser.add_argument(
-        "--un_rope",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Undo RoPE on keys before MLP training and inference. Use --no-un_rope to disable.",
-    )
-    parser.add_argument(
         "--use_residual",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights. Use --no-use_residual to disable.",
-    )
-    parser.add_argument(
-        "--intermediate_activation",
-        type=str,
-        default="relu",
-        help="The activation function for the MLP in the value cache.",
-    )
-    parser.add_argument(
-        "--per_head_kv_linear",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Compute pinv(W_k) @ W_v independently per KV head instead of jointly. Use --no-per_head_kv_linear to disable.",
     )
     parser.add_argument(
         "--use_attn_predictor",
@@ -356,6 +304,8 @@ def parse_args():
     )
     args = parser.parse_args()
     args = apply_attn_predictor_config(args)
+    if args.v_cache_type == "mlp" and args.target_cr is None:
+        parser.error("--target_cr is required when --v_cache_type=mlp.")
     if args.eviction_keep_ratio < 1 and not args.use_attn_predictor:
         raise ValueError(
             "--eviction_keep_ratio < 1 requires --use_attn_predictor."

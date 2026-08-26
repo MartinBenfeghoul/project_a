@@ -84,54 +84,6 @@ def generate_run_name(config):
     return f"seq{t.seq_len}_" f"steps{t.inner_steps}_" f"mlr{t.meta_lr}_"
 
 
-def save_results(
-    file_name,
-    avg_nll,
-    avg_nll_modified_cache,
-    new_avg_nll_change_perc,
-    accuracy,
-    threshold,
-    num_epoch,
-    mem_func,
-    num_token,
-    num_token_per_training,
-    type_of_seq,
-    num_seq,
-    lr,
-    loss_func,
-    num_changed_kv,
-    percentage_changed_kv,
-    layer_decomposition=None,
-    seq_len=None,
-):
-    """Save experiment results to a JSONL file."""
-    with open(file_name, "a") as f:
-        f.write(
-            json.dumps(
-                {
-                    "seq_len": seq_len,
-                    "avg_nll": avg_nll,
-                    "avg_nll_change_thresh": avg_nll_modified_cache,
-                    "avg_nll_change_perc": new_avg_nll_change_perc,
-                    "avg_accuracy_modified_cache": accuracy,
-                    "threshold": threshold,
-                    "num_epoch": num_epoch,
-                    "mem_func": mem_func,
-                    "num_token": num_token,
-                    "num_token_per_training": num_token_per_training,
-                    "type_of_seq": type_of_seq,
-                    "num_seq": num_seq,
-                    "lr": lr,
-                    "loss_func": loss_func,
-                    "num_changed_kv": num_changed_kv,
-                    "percentage_changed_kv": percentage_changed_kv,
-                    "layer_decomposition": layer_decomposition,
-                }
-            )
-            + "\n"
-        )
-
-
 def save_attention_predictor_checkpoint(
     args,
     predictor,
@@ -170,9 +122,7 @@ def save_attention_predictor_checkpoint(
         json.dump(metrics, f, indent=2)
 
 
-def save_checkpoint(
-    layer_mlps, inner_lr_params, checkpoint_path, epoch, target_perc_params=None
-):
+def save_checkpoint(layer_mlps, inner_lr_params, checkpoint_path, epoch):
     base, ext = os.path.splitext(checkpoint_path)
     epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
     epoch_params = {
@@ -182,13 +132,6 @@ def save_checkpoint(
         epoch_params["inner_lr_params"] = [
             lr.detach().cpu() for lr in inner_lr_params
         ]
-    if target_perc_params is not None:
-        epoch_params["target_perc_params"] = [
-            p.detach().cpu() for p in target_perc_params
-        ]
-        epoch_params["target_perc_format"] = (
-            "direct"  # values in percentage-space instead of logit-space
-        )
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
 

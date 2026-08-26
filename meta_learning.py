@@ -231,24 +231,13 @@ def meta_train(
                 )
 
 
-def build_cache_args(model_cfg, cfg, ckpt_path, device, target_cr):
+def build_cache_args(model_cfg, cfg, ckpt_path, target_cr):
     """Build inference settings that match the meta-training inner loop."""
-    num_layers = model_cfg.num_hidden_layers
-    num_heads = model_cfg.num_key_value_heads
     return {
         "cache_type": "mlp",
-        "num_layers_per_mlp": [2] * num_layers,
-        "hidden_factors_per_mlp": [1] * num_layers,
-        "num_heads_per_mlp": [num_heads] * num_layers,
-        "target_perc": [None] * num_layers,
         "per_sequence": False,
-        "lr": cfg.inner_lr,
-        "device": device,
-        "optimizer": "adam",
-        "loss_func": "mse",
         "num_epochs": cfg.inner_steps,
         "meta_weights_path": ckpt_path,
-        "un_rope": True,
         "rope_theta": get_rope_theta(model_cfg),
         "use_residual": cfg.use_residual,
         "target_cr": target_cr,
@@ -293,7 +282,6 @@ def eval_benchmark(
             model.config,
             cfg,
             ckpt_path,
-            device,
             target_cr,
         ),
         eviction_keep_ratio=1.0,
@@ -351,9 +339,8 @@ def init_mlps(model, cfg, device):
     num_heads = model.config.num_key_value_heads
     dim = model.config.hidden_size // model.config.num_attention_heads
     num_layers = model.config.num_hidden_layers
-    per_head = cfg.per_head_residual
     linear_init = (
-        extract_kv_linear_init(model, per_head=per_head)
+        extract_kv_linear_init(model)
         if cfg.use_residual
         else [None] * num_layers
     )
@@ -363,7 +350,6 @@ def init_mlps(model, cfg, device):
             num_heads=num_heads,
             head_dim=dim,
             use_residual=cfg.use_residual,
-            per_head_residual=per_head,
         ).to(device=device)
         if cfg.use_residual:
             with torch.no_grad():
@@ -391,8 +377,7 @@ def main():
 
     run_name = generate_run_name(config)
     if cfg.use_residual:
-        residual_type = "perhead" if cfg.per_head_residual else "joint"
-        run_name += f"_{residual_type}_residual"
+        run_name += "_perhead_residual"
     base_dir = os.path.join("checkpoints", model_dir, run_name)
     run_dir = base_dir
     idx = 0

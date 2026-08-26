@@ -3,18 +3,6 @@ import re
 import torch.nn.functional as F
 
 
-def cosine_loss(v_hat, v_true):
-    """Cosine similarity loss between predicted and true values."""
-    return 1 - F.cosine_similarity(v_hat, v_true, dim=-1).mean()
-
-
-def get_loss_func(loss_func_name):
-    """Get loss function by name."""
-    if loss_func_name == "cosine":
-        return cosine_loss
-    return F.mse_loss
-
-
 def clean(text):
     pre_dot = text.split(".")[0]
     digits = "".join(re.findall(r"\d", pre_dot))

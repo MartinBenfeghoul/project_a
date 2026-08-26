@@ -1,4 +1,4 @@
-from .metrics import eval_model, avg_nll, clean, cosine_loss, get_loss_func
+from .metrics import eval_model, avg_nll, clean
 from .model import (
     get_model_and_tokenizer,
     clone_mlp_params,
@@ -13,7 +13,6 @@ from .dataloader import (
     Dataset,
     PairedDataset,
 )
-from .training import train_mlps, set_seed
 from .args import (
     str2bool,
     list_of_strings,
@@ -23,7 +22,6 @@ from .args import (
 )
 from .logging import (
     Logger,
-    save_results,
     generate_run_name,
     save_checkpoint,
     get_output_path,

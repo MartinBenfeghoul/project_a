@@ -92,7 +92,6 @@ class CompressedCache:
             self.pass_keys_to_value_cache = True
         elif value_cache_type in KEY_CACHE_CLASSES:
             value_cache_kwargs = value_key_cache_kwargs
-            value_cache_kwargs["unrope_keys"] = False
             self.value_cache = get_cache(
                 value_cache_type,
                 KEY_CACHE_CLASSES,
@@ -101,6 +100,7 @@ class CompressedCache:
                 ddp_cache_data=ddp_cache_data,
                 **value_cache_kwargs,
             )
+            self.value_cache.unrope_keys = False
             self.pass_keys_to_value_cache = False
         else:
             raise ValueError(f"Invalid cache type: {value_cache_type}")

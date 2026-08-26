@@ -39,7 +39,6 @@ class LearnedInit:
     def from_checkpoint(
         cls,
         path: str,
-        num_layers_per_mlp: list[int],
         use_residual: bool,
     ) -> "LearnedInit":
         checkpoint = torch.load(path, map_location="cpu")
@@ -51,7 +50,6 @@ class LearnedInit:
         layer_lrs = _split_lrs(
             checkpoint,
             layer_weights,
-            num_layers_per_mlp,
             use_residual,
         )
         layer_indices = set(layer_weights) | set(layer_lrs)
@@ -88,7 +86,6 @@ def adapt_mlp_with_meta_lrs(
     num_epochs: int,
     learned_init: LearnedLayerInit,
     use_residual: bool,
-    optimizer_cls=torch.optim.SGD,
 ) -> None:
     n = mlp.num_layers
     saved_lrs = learned_init.inner_lrs
@@ -98,7 +95,7 @@ def adapt_mlp_with_meta_lrs(
         params.append(mlp.W_linear)
         lrs.append(saved_lrs[2 * n].to(keys))
 
-    optimizer = optimizer_cls(
+    optimizer = torch.optim.Adam(
         [{"params": [param], "lr": float(lr)} for param, lr in zip(params, lrs)]
     )
 
@@ -112,7 +109,6 @@ def adapt_mlp_with_meta_lrs(
 def _split_lrs(
     state: dict,
     weights: dict[int, dict],
-    depths: list[int],
     use_residual: bool,
 ) -> dict[int, list[torch.Tensor]]:
     if "inner_lr_params" not in state:
@@ -121,10 +117,10 @@ def _split_lrs(
     flat_lrs = state["inner_lr_params"]
     layer_lrs = {}
     offset = 0
-    for layer_idx, depth in enumerate(depths):
+    for layer_idx in sorted(weights):
         layer_state = weights.get(layer_idx, {})
         has_linear = "W_linear" in layer_state and use_residual
-        chunk = 2 * depth + int(has_linear)
+        chunk = 4 + int(has_linear)
         layer_lrs[layer_idx] = flat_lrs[offset : offset + chunk]
         offset += chunk
     return layer_lrs

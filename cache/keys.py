@@ -43,21 +43,20 @@ def check_recon_length(recon_keys, cache_kwargs):
 class DecomposedKeysCache(SingleTensorCache):
     def __init__(
         self,
-        *args,
-        rank_selection: str = "comp_ratio",
+        ddp_cache_data=None,
+        *,
         comp_ratio: float = 2.0,
-        energy_threshold: float = 0.95,
-        unrope_keys: bool = True,
         quantise_a: bool = False,
         quantise_b: bool = False,
         compressor_bits: int = 4,
-        **kwargs,
+        rope_theta: float | None = None,
     ):
-        super().__init__(*args, **kwargs)
-        self.rank_selection = rank_selection
+        super().__init__(
+            ddp_cache_data=ddp_cache_data,
+            rope_theta=rope_theta,
+        )
         self.r = comp_ratio
-        self.e = energy_threshold
-        self.unrope_keys = unrope_keys
+        self.unrope_keys = True
         self.quantise_a = quantise_a
         self.quantise_b = quantise_b
         self.compressor_bits = compressor_bits
@@ -72,13 +71,12 @@ class DecomposedKeysCache(SingleTensorCache):
 
     def _decomposition_kwargs(self):
         return {
-            "rank_selection": self.rank_selection,
             "cr": self.r,
-            "energy_threshold": self.e,
             "quantise_a": self.quantise_a,
             "quantise_b": self.quantise_b,
             "compressor_bits": self.compressor_bits,
         }
+
 
 class XKVKeysCache(DecomposedKeysCache):
     """
@@ -93,13 +91,25 @@ class XKVKeysCache(DecomposedKeysCache):
 
     def __init__(
         self,
-        *args,
+        ddp_cache_data=None,
+        *,
         layer_group_size: int = 2,
         num_layers: int | None = None,
         xkv_svd_backend: str = "cholqr",
-        **kwargs,
+        comp_ratio: float = 2.0,
+        quantise_a: bool = False,
+        quantise_b: bool = False,
+        compressor_bits: int = 4,
+        rope_theta: float | None = None,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            ddp_cache_data=ddp_cache_data,
+            comp_ratio=comp_ratio,
+            quantise_a=quantise_a,
+            quantise_b=quantise_b,
+            compressor_bits=compressor_bits,
+            rope_theta=rope_theta,
+        )
         if layer_group_size <= 0:
             raise ValueError("layer_group_size must be positive.")
         if num_layers is not None and num_layers <= 0:
@@ -211,8 +221,6 @@ class XKVKeysCache(DecomposedKeysCache):
 
     def _align_fused_rank(self, decompose_kwargs, tensor, group_layers):
         """Fit aligned xKV factors into the total key budget."""
-        if decompose_kwargs["rank_selection"] != "comp_ratio":
-            return
         from efficiency import adjust_rank
 
         m, n = tensor.shape[-2:]

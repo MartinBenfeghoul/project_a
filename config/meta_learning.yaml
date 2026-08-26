@@ -23,7 +23,6 @@ training:
   meta_loss_post_residual: false
 
   use_residual: false
-  per_head_residual: false
 
   num_meta_epochs: 1000
   log_interval: 10

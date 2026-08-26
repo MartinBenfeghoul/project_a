@@ -1,5 +1,5 @@
 from .base import SingleTensorCache, SingleTensorDynamicLayer
-from torch.optim import Adam, AdamW, SGD
+from torch.optim import Adam
 from torch.nn.functional import mse_loss
 import torch
 from model.mlp import MLP
@@ -13,53 +13,30 @@ from utils import (
 from .turboquant import TurboQuantCache
 from utils.turboquant import init_compressor
 
-LOSS_FUNC = {"mse": mse_loss}
-
-OPTIMIZER = {"adam": Adam, "adamw": AdamW, "sgd": SGD}
-
 
 class MLPValueLayer(SingleTensorDynamicLayer):
     def __init__(
         self,
-        mlp_num_layers: int,
-        mlp_hidden_factor: int,
-        mlp_num_heads: int,
+        target_cr: float,
         per_sequence: bool = False,
-        target_perc: float | None = None,
-        threshold: float | None = None,
-        optimizer_cls: str = "adam",
         num_epochs: int = 5,
-        lr: float = 1.0e-3,
-        loss_func: str = "mse",
         learned_init: LearnedLayerInit | None = None,
-        un_rope: bool = False,
         use_residual: bool = False,
-        intermediate_activation: str = "relu",
         W_linear_init: torch.Tensor | None = None,
-        target_cr: float | None = None,
+        rope_theta: float = 500_000.0,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
-        **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(rope_theta=rope_theta)
 
-        self.mlp_num_layers = mlp_num_layers
-        self.mlp_hidden_factor = mlp_hidden_factor
-        self.mlp_num_heads = mlp_num_heads
+        self.target_cr = float(target_cr)
         self.per_sequence = per_sequence
-        self.target_perc = target_perc
-        self.threshold = threshold
 
-        self.loss_func = LOSS_FUNC[loss_func]
-        self.optimizer_cls = OPTIMIZER[optimizer_cls]
         self.num_epochs = num_epochs
-        self.lr = lr
         self.learned_init = learned_init or LearnedLayerInit()
 
-        self.un_rope = un_rope
         self.use_residual = use_residual
         self.W_linear_init = W_linear_init
-        self.intermediate_activation = intermediate_activation
 
         self.mlp = None
         self.indices = None
@@ -71,23 +48,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.rope_sin: torch.Tensor | None = None
         self.key_mean: torch.Tensor | None = None
         self.key_std: torch.Tensor | None = None
-        self.target_cr = target_cr
         self._num_params = None
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
         self.compressor = None
-
-    @staticmethod
-    def _is_per_head_linear(
-        weight: torch.Tensor | None,
-        num_heads: int,
-        head_dim: int,
-    ) -> bool:
-        return (
-            weight is not None
-            and weight.ndim in (3, 4)
-            and weight.shape[-3:] == (num_heads, head_dim, head_dim)
-        )
 
     @staticmethod
     def _expand_per_sequence_parameter(
@@ -134,22 +98,13 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     "W_linear",
                     w_linear_init,
                 )
-            per_head_residual = self._is_per_head_linear(
-                w_linear_init,
-                self.num_heads,
-                self.head_dim,
-            )
             self.mlp = MLP(
                 head_dim=self.head_dim,
-                num_layers=self.mlp_num_layers,
-                hidden_factor=self.mlp_hidden_factor,
-                num_heads=self.mlp_num_heads,
+                num_heads=self.num_heads,
                 per_sequence=self.per_sequence,
                 batch_size=value_states.shape[0] if self.per_sequence else None,
                 deterministic_init=not self.learned_init.has_weights,
                 use_residual=self.use_residual,
-                per_head_residual=per_head_residual,
-                intermediate_activation=self.intermediate_activation,
             ).to(device=value_states.device, dtype=value_states.dtype)
 
             self._num_params = sum(p.numel() for p in self.mlp.parameters())
@@ -215,7 +170,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         padding_mask: torch.Tensor,
         independent_backward: bool = False,
     ) -> torch.Tensor:
-        errors = self.loss_func(predicted, target, reduction="none")
+        errors = mse_loss(predicted, target, reduction="none")
         valid = padding_mask[:, None, :, None]
         if self.per_sequence:
             per_sequence = (errors * valid).sum(dim=(1, 2, 3)) / (
@@ -254,7 +209,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     num_epochs=self.num_epochs,
                     learned_init=self.learned_init,
                     use_residual=self.use_residual,
-                    optimizer_cls=self.optimizer_cls,
                 )
                 with torch.no_grad():
                     self.recon_mse = self._reconstruction_loss(
@@ -262,12 +216,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     ).item()
             else:
                 all_params = list(self.mlp.parameters())
-                use_fused = (
-                    self.optimizer_cls is Adam and torch.cuda.is_available()
-                )
-                optimizer = self.optimizer_cls(
-                    all_params, lr=self.lr, fused=use_fused
-                )
+                use_fused = torch.cuda.is_available()
+                optimizer = Adam(all_params, lr=1e-3, fused=use_fused)
                 for epoch_idx in range(self.num_epochs):
                     optimizer.zero_grad()
                     # keys/values shape: [num_sequences, num_head, num_token, head_dim]
@@ -285,25 +235,29 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 optimizer.zero_grad(set_to_none=True)
                 self.recon_mse = loss_val
 
-    def compute_compression_targets(
+    def compute_residual_budget(
         self,
-        keys: torch.Tensor,
         padding_mask: torch.Tensor,
-    ) -> torch.Tensor | None:
-        b, h, _, d = keys.shape
+    ) -> int | torch.Tensor:
+        """Return the residual rows that fit within the target CR budget."""
+        b, h, t, d = self.tensor.shape
         value_dtype_size = torch.finfo(self.tensor.dtype).bits / 8
-        index_dtype_size = torch.iinfo(torch.int32).bits / 8
+        max_index = b * h * t - 1
+        index_dtype = (
+            torch.int32
+            if max_index < torch.iinfo(torch.int32).max
+            else torch.int64
+        )
+        index_dtype_size = torch.iinfo(index_dtype).bits / 8
         if self.compressor is not None:
-            import math
-
             indices_per_byte = 8 // self.compressor.bits
-            per_delta_bytes = (
+            residual_row_bytes = (
                 math.ceil(d / indices_per_byte)
                 + value_dtype_size
                 + index_dtype_size
             )  # packed indices + norm + sparse index
         else:
-            per_delta_bytes = d * value_dtype_size + index_dtype_size
+            residual_row_bytes = d * value_dtype_size + index_dtype_size
 
         valid_rows = padding_mask.sum(dim=1, dtype=torch.long) * h
         total_valid_rows = int(valid_rows.sum().item())
@@ -319,65 +273,63 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 valid_rows * d * value_dtype_size / self.target_cr
                 - model_bytes_per_sequence
             )
-            n_deltas = (allowed_per_sequence / per_delta_bytes).to(torch.long)
-            n_deltas.clamp_(min=0)
-            n_deltas = torch.minimum(n_deltas, valid_rows)
-            target_rows_per_batch = valid_rows - n_deltas
-            self.target_perc = float(
-                100 * target_rows_per_batch.sum().item() / total_valid_rows
+            residual_rows = (allowed_per_sequence / residual_row_bytes).to(
+                torch.long
             )
-            return target_rows_per_batch
+            residual_rows.clamp_(min=0)
+            return torch.minimum(residual_rows, valid_rows)
 
         original_bytes = total_valid_rows * d * value_dtype_size
-        allowed_delta_storage = original_bytes / self.target_cr - model_bytes
-        n_deltas = int(allowed_delta_storage / per_delta_bytes)
-        n_deltas = max(0, min(n_deltas, total_valid_rows))
-        self.target_perc = 100 * (1 - (n_deltas / total_valid_rows))
-        return None
+        allowed_residual_storage = original_bytes / self.target_cr - model_bytes
+        residual_rows = int(allowed_residual_storage / residual_row_bytes)
+        return max(0, min(residual_rows, total_valid_rows))
 
     def compress(
         self,
         keys: torch.Tensor,
         padding_mask: torch.Tensor,
-        target_rows_per_batch: torch.Tensor | None = None,
+        residual_budget: int | torch.Tensor,
     ) -> None:
         self._B, self._H, self._T, _ = keys.shape
         self.original_token_count = int(padding_mask.sum().item())
 
         v_approx = self.mlp(keys)
-        errors = self.loss_func(self.tensor, v_approx, reduction="none").mean(
-            dim=-1
-        )
+        errors = mse_loss(self.tensor, v_approx, reduction="none").mean(dim=-1)
         valid = padding_mask[:, None, :].expand_as(errors)
         self.compressed_len = self.tensor.shape[2]
 
-        if self.threshold is None and self.target_perc is None:
-            raise ValueError(
-                "MLPValueLayer requires either a threshold or target_perc to compress values"
-            )
-
-        if self.target_perc is not None:
-            B = errors.shape[0]
-            mask = valid.clone()
-            for batch_idx in range(B):
-                valid_errors = errors[batch_idx][valid[batch_idx]]
-                k = (
-                    int(target_rows_per_batch[batch_idx].item())
-                    if target_rows_per_batch is not None
-                    else max(
-                        1,
-                        int(valid_errors.numel() * (self.target_perc / 100)),
-                    )
-                )
-                if k == 0:
-                    continue
-                if k >= valid_errors.numel():
-                    mask[batch_idx] = False
-                    continue
-                thresh = torch.topk(valid_errors, k, largest=False).values[-1]
-                mask[batch_idx] &= errors[batch_idx] > thresh
+        mask = torch.zeros_like(valid)
+        if self.per_sequence:
+            for batch_idx, budget in enumerate(residual_budget):
+                budget = int(budget.item())
+                valid_flat = valid[batch_idx].flatten()
+                valid_indices = valid_flat.nonzero(as_tuple=False).flatten()
+                if budget >= valid_indices.numel():
+                    mask[batch_idx] = valid[batch_idx]
+                elif budget > 0:
+                    valid_errors = errors[batch_idx].flatten()[valid_indices]
+                    selected = torch.topk(
+                        valid_errors,
+                        budget,
+                        largest=True,
+                        sorted=False,
+                    ).indices
+                    mask[batch_idx].view(-1)[valid_indices[selected]] = True
         else:
-            mask = (errors > self.threshold) & valid
+            budget = int(residual_budget)
+            valid_flat = valid.flatten()
+            valid_indices = valid_flat.nonzero(as_tuple=False).flatten()
+            if budget >= valid_indices.numel():
+                mask = valid.clone()
+            elif budget > 0:
+                valid_errors = errors.flatten()[valid_indices]
+                selected = torch.topk(
+                    valid_errors,
+                    budget,
+                    largest=True,
+                    sorted=False,
+                ).indices
+                mask.view(-1)[valid_indices[selected]] = True
 
         b, h, t = mask.nonzero(as_tuple=True)
         max_index = self._B * self._H * self._T - 1
@@ -465,15 +417,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         prefix_len = positions.size(-1) - self.tensor.size(-2)
         prefix_positions = positions[..., :prefix_len]
         selected_keys = keys[..., :prefix_len, :]
-        keys_for_mlp = (
-            self._rope_selected(
-                selected_keys,
-                prefix_positions,
-                self.compressed_len,
-                inverse=True,
-            )
-            if self.un_rope
-            else selected_keys
+        keys_for_mlp = self._rope_selected(
+            selected_keys,
+            prefix_positions,
+            self.compressed_len,
+            inverse=True,
         )
         values = self.mlp(keys_for_mlp)
 
@@ -522,29 +470,21 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     "padding_mask must have shape [batch, sequence_length]."
                 )
 
-        if self.un_rope:
-            keys_for_mlp = self._undo_rope(
-                keys,
-                cache_kwargs,
-                prefill=self.prefill,
-                compressed_len=self.compressed_len,
-            )
-        else:
-            keys_for_mlp = keys
+        keys_for_mlp = self._undo_rope(
+            keys,
+            cache_kwargs,
+            prefill=self.prefill,
+            compressed_len=self.compressed_len,
+        )
         values = super().update(value_states)
 
         if self.prefill:
-            target_rows_per_batch = None
-            if self.target_cr:
-                target_rows_per_batch = self.compute_compression_targets(
-                    keys_for_mlp,
-                    padding_mask,
-                )
+            residual_budget = self.compute_residual_budget(padding_mask)
             self.train_mlp(keys_for_mlp, padding_mask)
             self.compress(
                 keys_for_mlp,
                 padding_mask,
-                target_rows_per_batch,
+                residual_budget,
             )
             self.prefill = False
             return values
@@ -591,54 +531,34 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 class MLPValueCache(SingleTensorCache):
     def __init__(
         self,
-        *args,
-        num_layers_per_mlp: list[int],
-        hidden_factors_per_mlp: list[int],
-        num_heads_per_mlp: list[int],
-        target_perc: list[float],
+        ddp_cache_data=None,
+        *,
+        target_cr: float,
         per_sequence: bool = False,
-        lr: float = 1e-3,
-        optimizer: str = "adam",
-        loss_func: str = "mse",
         num_epochs: int = 5,
         meta_weights_path: str | None = None,
         value_mlp_weights_path: str | None = None,
-        un_rope: bool = False,
         rope_theta: float = 500_000.0,
         use_residual: bool = False,
         W_linear_per_layer: (
             list[torch.Tensor] | Callable[[], list[torch.Tensor]] | None
         ) = None,
-        intermediate_activation: str = "relu",
-        target_cr: float | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
-        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
-
-        assert (
-            len(num_layers_per_mlp)
-            == len(hidden_factors_per_mlp)
-            == len(num_heads_per_mlp)
-            == len(target_perc)
+        super().__init__(
+            ddp_cache_data=ddp_cache_data,
+            rope_theta=rope_theta,
         )
 
-        self.num_layers_per_mlp = num_layers_per_mlp
-        self.hidden_factors_per_mlp = hidden_factors_per_mlp
-        self.num_heads_per_mlp = num_heads_per_mlp
-        self.target_perc = target_perc
+        target_cr = float(target_cr)
+        if not math.isfinite(target_cr) or target_cr <= 0:
+            raise ValueError("target_cr must be finite and positive.")
         self.per_sequence = per_sequence
 
-        self.lr = lr
-
-        self.optimizer_cls = optimizer
-        self.loss_func = loss_func
         self.num_epochs = num_epochs
-        self.un_rope = un_rope
         self.rope_theta = rope_theta
         self.use_residual = use_residual
-        self.intermediate_activation = intermediate_activation
         self.comp_ratio = 0
         self.target_cr = target_cr
         self.turboquant_residuals = turboquant_residuals
@@ -655,7 +575,6 @@ class MLPValueCache(SingleTensorCache):
             else (
                 LearnedInit.from_checkpoint(
                     path=meta_weights_path,
-                    num_layers_per_mlp=num_layers_per_mlp,
                     use_residual=use_residual,
                 )
                 if meta_weights_path is not None
@@ -671,11 +590,6 @@ class MLPValueCache(SingleTensorCache):
         elif callable(W_linear_per_layer):
             W_linear_per_layer = W_linear_per_layer()
         self.W_linear_per_layer = W_linear_per_layer
-
-        if use_residual and W_linear_per_layer is not None and not un_rope:
-            raise ValueError(
-                "use_residual with W_linear_per_layer initialisation requires un_rope=True."
-            )
 
     def _ensure_layers(self, layer_idx: int) -> None:
         while len(self.layers) <= layer_idx:
@@ -693,22 +607,13 @@ class MLPValueCache(SingleTensorCache):
                 else None
             )
         return MLPValueLayer(
-            mlp_num_layers=self.num_layers_per_mlp[layer_idx],
-            mlp_hidden_factor=self.hidden_factors_per_mlp[layer_idx],
-            mlp_num_heads=self.num_heads_per_mlp[layer_idx],
-            target_perc=self.target_perc[layer_idx],
+            target_cr=self.target_cr,
             per_sequence=self.per_sequence,
-            loss_func=self.loss_func,
             num_epochs=self.num_epochs,
-            lr=self.lr,
-            optimizer_cls=self.optimizer_cls,
             learned_init=learned_init,
-            un_rope=self.un_rope,
             rope_theta=self.rope_theta,
             use_residual=self.use_residual,
             W_linear_init=w_linear_init,
-            intermediate_activation=self.intermediate_activation,
-            target_cr=self.target_cr,
             turboquant_residuals=self.turboquant_residuals,
             compressor_bits=self.compressor_bits,
         )

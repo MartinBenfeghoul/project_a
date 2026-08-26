@@ -34,13 +34,13 @@ def unrope(keys, rope_theta):
 def build_mlps(model, device, dtype):
     cfg = model.config
     head_dim = cfg.hidden_size // cfg.num_attention_heads
-    w_linear = extract_kv_linear_init(model, per_head=True)
+    w_linear = extract_kv_linear_init(model)
     mlps = []
     for layer_idx in range(cfg.num_hidden_layers):
         mlp = MLP(
             head_dim=head_dim,
+            num_heads=cfg.num_key_value_heads,
             use_residual=True,
-            per_head_residual=True,
         ).to(device=device, dtype=dtype)
         if w_linear is not None:
             with torch.no_grad():
