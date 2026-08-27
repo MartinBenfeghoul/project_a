@@ -9,8 +9,14 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model.mlp import MLP
-from utils import Dataset, collate, extract_kv_linear_init, load_data
-from utils.rope import compute_rope_cos_sin, inverse_rope
+from utils import (
+    Dataset,
+    collate,
+    extract_kv_linear_init,
+    load_data,
+    compute_rope_cos_sin,inverse_rope
+)
+
 
 
 def get_layer_kv(past_key_values, layer_idx):

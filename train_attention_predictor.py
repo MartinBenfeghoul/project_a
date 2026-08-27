@@ -20,7 +20,7 @@ from utils import (
     prepare_run_directory,
     save_attention_predictor_checkpoint,
 )
-from utils.dataloader import Dataset, collate, load_data
+from utils import Dataset, collate, load_data
 
 
 def sample_positions(

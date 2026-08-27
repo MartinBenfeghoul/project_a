@@ -5,6 +5,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+def get_device(model):
+    try:
+        device = model.device
+    except AttributeError:
+        try:
+            device = model.model.device
+        except AttributeError:
+            device = "cuda:0"
+    return device
+
 
 def get_model_and_tokenizer(
     model_name, pad_token=None, pad_token_side="left", torch_dtype=None
