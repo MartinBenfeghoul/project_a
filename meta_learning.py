@@ -218,13 +218,12 @@ def meta_train(
                 )
 
 
-def build_cache_args(model_cfg, cfg, ckpt_path, target_cr):
+def build_cache_args(cfg, ckpt_path, target_cr):
     """Build inference settings that match the meta-training inner loop."""
     return {
         "cache_type": "mlp",
         "num_epochs": cfg.inner_steps,
         "meta_weights_path": ckpt_path,
-        "rope_theta": get_rope_theta(model_cfg),
         "use_residual": cfg.use_residual,
         "target_cr": target_cr,
     }
@@ -260,7 +259,6 @@ def eval_benchmark(
     lm = CompressedCacheHFLM(
         key_cache_kwargs={"cache_type": "baseline"},
         value_cache_kwargs=build_cache_args(
-            model.config,
             cfg,
             ckpt_path,
             target_cr,

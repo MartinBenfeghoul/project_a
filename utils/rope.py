@@ -21,6 +21,33 @@ def apply_rope(
     return x * cos + rotate_half(x) * sin
 
 
+def apply_packed_rope(x: torch.Tensor, packed: torch.Tensor) -> torch.Tensor:
+    """Apply RoPE from ``[cos_half, sin_half]`` without expanding either."""
+    half_dim = x.size(-1) // 2
+    x1, x2 = x[..., :half_dim], x[..., half_dim:]
+    cos_half = packed[..., :half_dim]
+    sin_half = packed[..., half_dim:]
+    return torch.cat(
+        (x1 * cos_half - x2 * sin_half, x2 * cos_half + x1 * sin_half),
+        dim=-1,
+    )
+
+
+def inverse_packed_rope(
+    x: torch.Tensor,
+    packed: torch.Tensor,
+) -> torch.Tensor:
+    """Undo RoPE from ``[cos_half, sin_half]`` without expanding either."""
+    half_dim = x.size(-1) // 2
+    x1, x2 = x[..., :half_dim], x[..., half_dim:]
+    cos_half = packed[..., :half_dim]
+    sin_half = packed[..., half_dim:]
+    return torch.cat(
+        (x1 * cos_half + x2 * sin_half, x2 * cos_half - x1 * sin_half),
+        dim=-1,
+    )
+
+
 def compute_rope_cos_sin(
     seq_len: int,
     head_dim: int,
@@ -37,3 +64,13 @@ def compute_rope_cos_sin(
     freqs = torch.outer(t, inv_freq)
     emb = torch.cat([freqs, freqs], dim=-1)
     return emb.cos()[None, None].to(dtype), emb.sin()[None, None].to(dtype)
+
+
+def get_rope_theta(model_config) -> float:
+    rope_theta = getattr(model_config, "rope_theta", None)
+    if rope_theta is None:
+        rope_parameters = getattr(model_config, "rope_parameters", {}) or {}
+        rope_theta = rope_parameters.get("rope_theta")
+    if rope_theta is None:
+        raise ValueError("Model config does not define rope_theta")
+    return float(rope_theta)

@@ -13,7 +13,7 @@ from utils.turboquant import (
     factor_shape,
     quantise_factor,
 )
-from .base import SingleTensorCache
+from .base import SharedRopeCache, SingleTensorCache
 from .turboquant import TurboQuantCache
 
 
@@ -49,11 +49,11 @@ class DecomposedKeysCache(SingleTensorCache):
         quantise_a: bool = False,
         quantise_b: bool = False,
         compressor_bits: int = 4,
-        rope_theta: float | None = None,
+        rope_cache: SharedRopeCache | None = None,
     ):
         super().__init__(
             ddp_cache_data=ddp_cache_data,
-            rope_theta=rope_theta,
+            rope_cache=rope_cache,
         )
         self.r = comp_ratio
         self.unrope_keys = True
@@ -100,7 +100,7 @@ class XKVKeysCache(DecomposedKeysCache):
         quantise_a: bool = False,
         quantise_b: bool = False,
         compressor_bits: int = 4,
-        rope_theta: float | None = None,
+        rope_cache: SharedRopeCache | None = None,
     ):
         super().__init__(
             ddp_cache_data=ddp_cache_data,
@@ -108,7 +108,7 @@ class XKVKeysCache(DecomposedKeysCache):
             quantise_a=quantise_a,
             quantise_b=quantise_b,
             compressor_bits=compressor_bits,
-            rope_theta=rope_theta,
+            rope_cache=rope_cache,
         )
         if layer_group_size <= 0:
             raise ValueError("layer_group_size must be positive.")
@@ -446,6 +446,7 @@ class XKVKeysCache(DecomposedKeysCache):
         if (
             not self.unrope_keys
             or "inverse_permutation" in metadata
+            or not self.layers[layer_idx].supports_fused_rope
             or not self.fused_reconstructor.available()
         ):
             return None
@@ -486,18 +487,15 @@ class XKVKeysCache(DecomposedKeysCache):
             fused_right is not None
             and layer_idx in self.fused_reconstructor.states
         ):
-            cos, sin = self.layers[layer_idx]._resolve_rope_cos_sin(
+            packed_rope = self.layers[layer_idx]._fused_rope(
                 metadata["compressed_len"],
-                head_dim,
-                shared.device,
-                shared.dtype,
+                shared,
             )
             keys = self.fused_reconstructor.reconstruct(
                 layer_idx,
                 shared,
                 fused_right,
-                cos,
-                sin,
+                packed_rope,
                 self.fused_chunk_sizes[layer_idx],
             )
         else:

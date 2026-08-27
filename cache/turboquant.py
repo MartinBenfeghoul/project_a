@@ -2,13 +2,17 @@ from typing import Any, Iterable
 
 import torch
 
-from .base import SingleTensorCache, SingleTensorDynamicLayer
+from .base import SharedRopeCache, SingleTensorCache, SingleTensorDynamicLayer
 from utils.turboquant import CompressorParams, MSECompressor
 
 
 class TurboQuantLayer(SingleTensorDynamicLayer):
-    def __init__(self, bits: int = 4, rope_theta: float | None = None):
-        super().__init__(rope_theta=rope_theta)
+    def __init__(
+        self,
+        bits: int = 4,
+        rope_cache: SharedRopeCache | None = None,
+    ):
+        super().__init__(rope_cache=rope_cache)
         self.bits = bits
         self.compressor: MSECompressor | None = None
         self.compressed_params: CompressorParams | None = None
@@ -117,7 +121,7 @@ class TurboQuantCache(SingleTensorCache):
             self.layers.append(
                 TurboQuantLayer(
                     bits=self.compressor_bits,
-                    rope_theta=self.rope_theta,
+                    rope_cache=self.rope_cache,
                 )
             )
         return self.layers[layer_idx].update(tensor_states, cache_kwargs)

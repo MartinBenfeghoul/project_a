@@ -61,16 +61,6 @@ class LearnedInit:
         return self.layers.get(layer_idx, LearnedLayerInit())
 
 
-def get_rope_theta(model_config) -> float:
-    rope_theta = getattr(model_config, "rope_theta", None)
-    if rope_theta is None:
-        rope_parameters = getattr(model_config, "rope_parameters", {}) or {}
-        rope_theta = rope_parameters.get("rope_theta")
-    if rope_theta is None:
-        raise ValueError("Model config does not define rope_theta")
-    return float(rope_theta)
-
-
 def trainable_params(mlp) -> list[torch.Tensor]:
     params = list(mlp.weights) + list(mlp.biases)
     if hasattr(mlp, "W_linear"):

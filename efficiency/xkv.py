@@ -266,7 +266,6 @@ class FusedKeyReconstructor:
     def __init__(self):
         self.states = {}
         self.output = None
-        self.cos_sin = None
 
     @staticmethod
     def supports(
@@ -337,30 +336,12 @@ class FusedKeyReconstructor:
         )
         return state["chunks"]
 
-    def _rope_cache(
-        self,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        seq_len: int,
-    ) -> torch.Tensor:
-        if self.cos_sin is None or self.cos_sin.size(0) != seq_len:
-            half_dim = cos.size(-1) // 2
-            self.cos_sin = torch.cat(
-                [
-                    cos[0, 0, :seq_len, :half_dim],
-                    sin[0, 0, :seq_len, :half_dim],
-                ],
-                dim=-1,
-            ).contiguous()
-        return self.cos_sin
-
     def reconstruct(
         self,
         layer_idx: int,
         shared: torch.Tensor,
         right: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
+        packed_rope: torch.Tensor,
         chunk_size: int,
     ) -> torch.Tensor:
         state = self.states[layer_idx]
@@ -385,7 +366,7 @@ class FusedKeyReconstructor:
         )
         state["chunks_i32"].copy_(chunks)
         chunk_ids = state["chunks_i32"]
-        cos_sin = self._rope_cache(cos, sin, shared.size(1))
+        cos_sin = packed_rope
         torch.ops._shadowkv.batch_gather_gemm(
             shared.contiguous(),
             right.contiguous(),
@@ -436,7 +417,7 @@ class FusedKeyReconstructor:
 
     @property
     def nbytes(self) -> int:
-        tensors = [self.output, self.cos_sin]
+        tensors = [self.output]
         for state in self.states.values():
             tensors.extend(state.values())
         return sum(_tensor_nbytes(tensor) for tensor in tensors)

@@ -1,7 +1,5 @@
 import math
 import warnings
-from concurrent.futures import ThreadPoolExecutor
-from itertools import repeat
 
 import torch
 
@@ -12,12 +10,6 @@ from utils.turboquant import (
     is_quantised_factor,
     quantise_factor,
 )
-
-
-def _full_svd_single(M: torch.Tensor, dtype: torch.dtype):
-    """Compute a full SVD for one matrix after moving it to CPU."""
-    M = M.to(device="cpu", dtype=dtype).contiguous()
-    return torch.linalg.svd(M, full_matrices=False)
 
 
 def find_rank_wrt_cr(r, m, n):
@@ -114,103 +106,6 @@ def _truncate_svd_factors(
     Vh = Vh.reshape(*batch_shape, r, n)[..., :k, :]
 
     US = U * S.unsqueeze(-2)
-    return US, Vh
-
-
-def _parallel_svd_segments(
-    segments: list[torch.Tensor],
-    target_device: torch.device,
-    target_dtype: torch.dtype,
-    dtype: torch.dtype = torch.float32,
-    cr: float = 2.0,
-    **kwargs,
-):
-    """Run threaded CPU SVD for a list of tensor segments.
-
-    Each segment may still live on the original device. The worker that owns a
-    matrix moves it to CPU, computes its SVD, and the resulting factor pair is
-    moved back to `target_device` in `target_dtype`.
-    """
-    if not segments:
-        return []
-
-    specs = []
-    flat_matrices = []
-    for segment in segments:
-        batch_shape = segment.shape[:-2]
-        m, n = segment.shape[-2:]
-        flat_segment = segment.reshape(-1, m, n)
-        specs.append(
-            (
-                batch_shape,
-                m,
-                n,
-                flat_segment.size(0),
-            )
-        )
-        flat_matrices.extend(flat_segment.unbind(0))
-
-    max_workers = min(len(flat_matrices), torch.get_num_threads())
-    max_workers = max(1, max_workers)
-
-    prev_threads = torch.get_num_threads()
-    torch.set_num_threads(1)
-    try:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            svds = list(
-                executor.map(_full_svd_single, flat_matrices, repeat(dtype))
-            )
-    finally:
-        torch.set_num_threads(prev_threads)
-
-    factor_pairs = []
-    offset = 0
-    for batch_shape, m, n, count in specs:
-        segment_svds = svds[offset : offset + count]
-        offset += count
-
-        U = torch.stack([u for u, _, _ in segment_svds], dim=0)
-        S = torch.stack([s for _, s, _ in segment_svds], dim=0)
-        Vh = torch.stack([vh for _, _, vh in segment_svds], dim=0)
-
-        US, Vh = _truncate_svd_factors(
-            U,
-            S,
-            Vh,
-            batch_shape,
-            m,
-            n,
-            cr=cr,
-        )
-        factor_pairs.append(
-            (
-                US.to(device=target_device, dtype=target_dtype),
-                Vh.to(device=target_device, dtype=target_dtype),
-            )
-        )
-
-    return factor_pairs
-
-
-def svd(
-    M: torch.Tensor,
-    cr: float = 2.0,
-    dtype: torch.dtype = torch.float32,
-    **kwargs,
-):
-    """Apply the threaded CPU SVD path to one tensor.
-
-    Each flattened matrix is handled by a worker that moves it to CPU for the
-    SVD, then returns the truncated factors on the original device.
-    """
-    US, Vh = _parallel_svd_segments(
-        [M],
-        target_device=M.device,
-        target_dtype=M.dtype,
-        dtype=dtype,
-        cr=cr,
-        **kwargs,
-    )[0]
     return US, Vh
 
 

@@ -19,13 +19,12 @@ from .logging import (
     save_attention_predictor_checkpoint,
     prepare_run_directory,
 )
-from .rope import inverse_rope, apply_rope, compute_rope_cos_sin
+from .rope import inverse_rope, apply_rope, compute_rope_cos_sin, get_rope_theta
 from .device import get_device
 from .meta_learning import (
     LearnedInit,
     LearnedLayerInit,
     add_grad,
-    get_rope_theta,
     inner_loop,
     prepare_kvs,
     setup_optimizer,

@@ -48,7 +48,6 @@ def main(args):
         if args.selective_reconstruction
         else []
     )
-    rope_theta = getattr(model.config, "rope_theta", 500_000.0)
 
     attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
 
@@ -60,7 +59,6 @@ def main(args):
         "xkv_svd_backend": args.xkv_svd_backend,
         "num_layers": num_layers,
         "selective_reconstruction": args.selective_reconstruction,
-        "rope_theta": rope_theta,
         "quantise_a": args.k_quantise_a,
         "quantise_b": args.k_quantise_b,
         "compressor_bits": args.k_compressor_bits,
@@ -71,7 +69,6 @@ def main(args):
         "num_epochs": args.num_epochs,
         "meta_weights_path": args.meta_weights_path,
         "value_mlp_weights_path": args.value_mlp_weights_path,
-        "rope_theta": rope_theta,
         "use_residual": args.use_residual,
         "target_cr": args.target_cr,
         "turboquant_residuals": args.v_turboquant_residuals,
@@ -152,7 +149,7 @@ def parse_args():
     )
     parser.add_argument("-o", "--output_dir", type=str, default="./results")
     parser.add_argument(
-        "-t", "--tasks", type=list_of_strings, default=["lm_eval"]
+        "-t", "--tasks", type=list_of_strings, default=["longbench"]
     )
     parser.add_argument(
         "--limit",

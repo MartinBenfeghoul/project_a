@@ -1,6 +1,6 @@
 import math
 
-from .base import SingleTensorCache, SingleTensorDynamicLayer
+from .base import SharedRopeCache, SingleTensorCache, SingleTensorDynamicLayer
 from torch.optim import Adam
 from torch.nn.functional import mse_loss
 import torch
@@ -23,11 +23,11 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         learned_init: LearnedLayerInit | None = None,
         use_residual: bool = False,
         W_linear_init: torch.Tensor | None = None,
-        rope_theta: float = 500_000.0,
+        rope_cache: SharedRopeCache | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
     ):
-        super().__init__(rope_theta=rope_theta)
+        super().__init__(rope_cache=rope_cache)
 
         self.target_cr = float(target_cr)
 
@@ -43,8 +43,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.is_compressed = False
         self.prefill = True
         self.compressed_len = 0
-        self.rope_cos: torch.Tensor | None = None
-        self.rope_sin: torch.Tensor | None = None
         self._num_params = None
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
@@ -437,7 +435,7 @@ class MLPValueCache(SingleTensorCache):
         num_epochs: int = 5,
         meta_weights_path: str | None = None,
         value_mlp_weights_path: str | None = None,
-        rope_theta: float = 500_000.0,
+        rope_cache: SharedRopeCache | None = None,
         use_residual: bool = False,
         W_linear_per_layer: (
             list[torch.Tensor] | Callable[[], list[torch.Tensor]] | None
@@ -447,7 +445,7 @@ class MLPValueCache(SingleTensorCache):
     ):
         super().__init__(
             ddp_cache_data=ddp_cache_data,
-            rope_theta=rope_theta,
+            rope_cache=rope_cache,
         )
 
         target_cr = float(target_cr)
@@ -455,7 +453,6 @@ class MLPValueCache(SingleTensorCache):
             raise ValueError("target_cr must be finite and positive.")
 
         self.num_epochs = num_epochs
-        self.rope_theta = rope_theta
         self.use_residual = use_residual
         self.comp_ratio = 0
         self.target_cr = target_cr
@@ -507,7 +504,7 @@ class MLPValueCache(SingleTensorCache):
             target_cr=self.target_cr,
             num_epochs=self.num_epochs,
             learned_init=learned_init,
-            rope_theta=self.rope_theta,
+            rope_cache=self.rope_cache,
             use_residual=self.use_residual,
             W_linear_init=w_linear_init,
             turboquant_residuals=self.turboquant_residuals,

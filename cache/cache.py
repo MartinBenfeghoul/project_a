@@ -2,6 +2,7 @@ import math
 import torch
 
 from efficiency import FusedLandmarkScorer
+from .base import SharedRopeCache
 
 from transformers.cache_utils import (
     Any,
@@ -44,6 +45,10 @@ class CompressedCache:
             value_cache_kwargs = {"cache_type": "baseline"}
         else:
             value_cache_kwargs = dict(value_cache_kwargs)
+
+        self.rope_cache = SharedRopeCache()
+        key_cache_kwargs["rope_cache"] = self.rope_cache
+        value_cache_kwargs["rope_cache"] = self.rope_cache
 
         key_cache_type = key_cache_kwargs.pop("cache_type")
         value_cache_type = value_cache_kwargs.pop("cache_type")
@@ -598,6 +603,7 @@ class CompressedCache:
                     for tensor in self.selective_exact_values.values()
                 )
                 selective_bytes += self._selective_scorer.nbytes
+                selective_bytes += self.rope_cache.nbytes
                 selective_bytes += getattr(
                     self.key_cache, "selective_reconstruction_nbytes", 0
                 )
