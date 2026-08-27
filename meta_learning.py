@@ -26,8 +26,6 @@ from utils import (
     load_data,
     save_checkpoint,
     add_grad,
-    constrain_lrs,
-    expand_lrs,
     get_rope_theta,
     inner_loop,
     prepare_kvs,
@@ -64,7 +62,6 @@ def run_epoch(
     epoch,
     device,
     inner_dtype,
-    raw_lrs=None,
     residual_cr=None,
 ):
     inner_lr = cfg.inner_lr
@@ -85,7 +82,6 @@ def run_epoch(
             total=batches_per_epoch,
         )
     ):
-        param_lrs = expand_lrs(mlps, constrain_lrs(raw_lrs, cfg))
         start = time.time()
         with torch.no_grad():
             output = model(
@@ -103,9 +99,8 @@ def run_epoch(
         meta_params, metrics = inner_loop(
             mlps,
             kvs,
-            param_lrs if param_lrs is not None else inner_lr,
+            inner_lr,
             inner_steps,
-            outer_lrs=raw_lrs,
             residual_cr=residual_cr,
         )
         del output, kvs
@@ -113,10 +108,6 @@ def run_epoch(
 
         for param, grad in zip(meta_params, metrics["param_grads"]):
             add_grad(param, grad)
-
-        if raw_lrs is not None:
-            for lr_param, grad in zip(raw_lrs, metrics["lr_grads"]):
-                add_grad(lr_param, grad)
 
         for name in sums:
             sums[name] += metrics[name]
@@ -158,7 +149,7 @@ def meta_train(
     ckpt_path,
     tokenizer,
 ):
-    raw_lrs, optimizer = setup_optimizer(mlps, cfg)
+    optimizer = setup_optimizer(mlps, cfg)
     model.eval()
     inner_dtype = getattr(torch, str(cfg.inner_adaptation_dtype))
     print(f"FP32 meta parameters; {inner_dtype} inner adaptation")
@@ -183,7 +174,6 @@ def meta_train(
             epoch,
             device,
             inner_dtype,
-            raw_lrs=raw_lrs,
             residual_cr=residual_cr,
         )
 
@@ -200,9 +190,7 @@ def meta_train(
             f"Time: {epoch_sec:.1f}s"
         )
 
-        with torch.no_grad():
-            saved_lrs = expand_lrs(mlps, constrain_lrs(raw_lrs, cfg))
-        save_checkpoint(mlps, saved_lrs, ckpt_path, epoch)
+        save_checkpoint(mlps, ckpt_path, epoch)
 
         eval_every = max(1, int(cfg.eval_interval))
         if (epoch + 1) % eval_every == 0 or (epoch + 1 == cfg.num_meta_epochs):
@@ -235,7 +223,6 @@ def build_cache_args(model_cfg, cfg, ckpt_path, target_cr):
     """Build inference settings that match the meta-training inner loop."""
     return {
         "cache_type": "mlp",
-        "per_sequence": False,
         "num_epochs": cfg.inner_steps,
         "meta_weights_path": ckpt_path,
         "rope_theta": get_rope_theta(model_cfg),
@@ -264,8 +251,6 @@ def eval_benchmark(
         get_device,
         get_tasks,
     )
-    from utils import Logger
-
     target_cr = float(cfg.eval_target_cr)
     eval_batch_size = int(getattr(cfg, "eval_batch_size", 1))
     print(
@@ -273,8 +258,6 @@ def eval_benchmark(
         f"{samples} samples per task, target_cr={target_cr}, "
         f"batch_size={eval_batch_size})..."
     )
-
-    logger = Logger()
 
     lm = CompressedCacheHFLM(
         key_cache_kwargs={"cache_type": "baseline"},
@@ -285,7 +268,6 @@ def eval_benchmark(
             target_cr,
         ),
         eviction_keep_ratio=1.0,
-        logger=logger,
         pretrained=model,
         tokenizer=tokenizer,
         truncation=False,

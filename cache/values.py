@@ -1,3 +1,5 @@
+import math
+
 from .base import SingleTensorCache, SingleTensorDynamicLayer
 from torch.optim import Adam
 from torch.nn.functional import mse_loss
@@ -7,7 +9,6 @@ from typing import Any, Callable
 from utils import (
     LearnedInit,
     LearnedLayerInit,
-    adapt_mlp_with_meta_lrs,
 )
 
 from .turboquant import TurboQuantCache
@@ -18,7 +19,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
     def __init__(
         self,
         target_cr: float,
-        per_sequence: bool = False,
         num_epochs: int = 5,
         learned_init: LearnedLayerInit | None = None,
         use_residual: bool = False,
@@ -30,7 +30,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         super().__init__(rope_theta=rope_theta)
 
         self.target_cr = float(target_cr)
-        self.per_sequence = per_sequence
 
         self.num_epochs = num_epochs
         self.learned_init = learned_init or LearnedLayerInit()
@@ -52,24 +51,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
         self.compressor = None
-
-    @staticmethod
-    def _expand_per_sequence_parameter(
-        value: torch.Tensor,
-        target: torch.Tensor,
-    ) -> torch.Tensor:
-        """Match a shared or singleton-batch value to a batched parameter."""
-        if value.shape == target.shape:
-            return value
-        if value.shape == target.shape[1:]:
-            value = value.unsqueeze(0)
-        if (
-            value.ndim == target.ndim
-            and value.size(0) == 1
-            and value.shape[1:] == target.shape[1:]
-        ):
-            return value.expand_as(target)
-        return value
 
     def lazy_initialization(self, value_states: torch.Tensor) -> None:
 
@@ -101,8 +82,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             self.mlp = MLP(
                 head_dim=self.head_dim,
                 num_heads=self.num_heads,
-                per_sequence=self.per_sequence,
-                batch_size=value_states.shape[0] if self.per_sequence else None,
                 deterministic_init=not self.learned_init.has_weights,
                 use_residual=self.use_residual,
             ).to(device=value_states.device, dtype=value_states.dtype)
@@ -115,13 +94,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     weights = {
                         k: v for k, v in weights.items() if k != "W_linear"
                     }
-                if self.per_sequence:
-                    target_state = self.mlp.state_dict()
-                    for name, value in weights.items():
-                        weights[name] = self._expand_per_sequence_parameter(
-                            value,
-                            target_state[name],
-                        )
                 self.mlp.load_state_dict(weights)
 
             if self.use_residual and self.W_linear_init is not None:
@@ -129,11 +101,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                     linear_init = self.W_linear_init.to(
                         device=value_states.device, dtype=value_states.dtype
                     )
-                    if self.per_sequence:
-                        linear_init = self._expand_per_sequence_parameter(
-                            linear_init,
-                            self.mlp.W_linear,
-                        )
                     self.mlp.W_linear.copy_(linear_init)
 
     def _encode_residuals(self, residuals):
@@ -168,21 +135,9 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         predicted: torch.Tensor,
         target: torch.Tensor,
         padding_mask: torch.Tensor,
-        independent_backward: bool = False,
     ) -> torch.Tensor:
         errors = mse_loss(predicted, target, reduction="none")
         valid = padding_mask[:, None, :, None]
-        if self.per_sequence:
-            per_sequence = (errors * valid).sum(dim=(1, 2, 3)) / (
-                padding_mask.sum(dim=1).clamp_min(1)
-                * errors.size(1)
-                * errors.size(3)
-            )
-            return (
-                per_sequence.sum()
-                if independent_backward
-                else per_sequence.mean()
-            )
         return (errors * valid).sum() / (
             valid.sum() * errors.size(1) * errors.size(3)
         )
@@ -195,50 +150,29 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         with torch.enable_grad():
             keys = keys.detach()
             values = self.tensor.detach()
-            if self.learned_init.has_inner_lrs:
-                adapt_mlp_with_meta_lrs(
-                    mlp=self.mlp,
-                    keys=keys,
-                    values=values,
-                    loss_func=lambda predicted, target: self._reconstruction_loss(
-                        predicted,
-                        target,
-                        padding_mask,
-                        independent_backward=True,
-                    ),
-                    num_epochs=self.num_epochs,
-                    learned_init=self.learned_init,
-                    use_residual=self.use_residual,
+            all_params = list(self.mlp.parameters())
+            use_fused = torch.cuda.is_available()
+            optimizer = Adam(all_params, lr=1e-3, fused=use_fused)
+            for _ in range(self.num_epochs):
+                optimizer.zero_grad()
+                # keys/values shape: [num_sequences, num_head, num_token, head_dim]
+                v_hat = self.mlp(keys)
+                loss = self._reconstruction_loss(
+                    v_hat,
+                    values,
+                    padding_mask,
                 )
-                with torch.no_grad():
-                    self.recon_mse = self._reconstruction_loss(
-                        self.mlp(keys), values, padding_mask
-                    ).item()
-            else:
-                all_params = list(self.mlp.parameters())
-                use_fused = torch.cuda.is_available()
-                optimizer = Adam(all_params, lr=1e-3, fused=use_fused)
-                for epoch_idx in range(self.num_epochs):
-                    optimizer.zero_grad()
-                    # keys/values shape: [num_sequences, num_head, num_token, head_dim]
-                    v_hat = self.mlp(keys)
-                    loss = self._reconstruction_loss(
-                        v_hat,
-                        values,
-                        padding_mask,
-                        independent_backward=True,
-                    )
-                    loss.backward()
-                    optimizer.step()
-                    loss_val = loss.detach().item()
+                loss.backward()
+                optimizer.step()
+                loss_val = loss.detach().item()
 
-                optimizer.zero_grad(set_to_none=True)
-                self.recon_mse = loss_val
+            optimizer.zero_grad(set_to_none=True)
+            self.recon_mse = loss_val
 
     def compute_residual_budget(
         self,
         padding_mask: torch.Tensor,
-    ) -> int | torch.Tensor:
+    ) -> int:
         """Return the residual rows that fit within the target CR budget."""
         b, h, t, d = self.tensor.shape
         value_dtype_size = torch.finfo(self.tensor.dtype).bits / 8
@@ -267,18 +201,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             )
 
         model_bytes = self._num_params * value_dtype_size
-        if self.per_sequence:
-            model_bytes_per_sequence = model_bytes / b
-            allowed_per_sequence = (
-                valid_rows * d * value_dtype_size / self.target_cr
-                - model_bytes_per_sequence
-            )
-            residual_rows = (allowed_per_sequence / residual_row_bytes).to(
-                torch.long
-            )
-            residual_rows.clamp_(min=0)
-            return torch.minimum(residual_rows, valid_rows)
-
         original_bytes = total_valid_rows * d * value_dtype_size
         allowed_residual_storage = original_bytes / self.target_cr - model_bytes
         residual_rows = int(allowed_residual_storage / residual_row_bytes)
@@ -288,7 +210,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self,
         keys: torch.Tensor,
         padding_mask: torch.Tensor,
-        residual_budget: int | torch.Tensor,
+        residual_budget: int,
     ) -> None:
         self._B, self._H, self._T, _ = keys.shape
         self.original_token_count = int(padding_mask.sum().item())
@@ -299,37 +221,20 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.compressed_len = self.tensor.shape[2]
 
         mask = torch.zeros_like(valid)
-        if self.per_sequence:
-            for batch_idx, budget in enumerate(residual_budget):
-                budget = int(budget.item())
-                valid_flat = valid[batch_idx].flatten()
-                valid_indices = valid_flat.nonzero(as_tuple=False).flatten()
-                if budget >= valid_indices.numel():
-                    mask[batch_idx] = valid[batch_idx]
-                elif budget > 0:
-                    valid_errors = errors[batch_idx].flatten()[valid_indices]
-                    selected = torch.topk(
-                        valid_errors,
-                        budget,
-                        largest=True,
-                        sorted=False,
-                    ).indices
-                    mask[batch_idx].view(-1)[valid_indices[selected]] = True
-        else:
-            budget = int(residual_budget)
-            valid_flat = valid.flatten()
-            valid_indices = valid_flat.nonzero(as_tuple=False).flatten()
-            if budget >= valid_indices.numel():
-                mask = valid.clone()
-            elif budget > 0:
-                valid_errors = errors.flatten()[valid_indices]
-                selected = torch.topk(
-                    valid_errors,
-                    budget,
-                    largest=True,
-                    sorted=False,
-                ).indices
-                mask.view(-1)[valid_indices[selected]] = True
+        budget = int(residual_budget)
+        valid_flat = valid.flatten()
+        valid_indices = valid_flat.nonzero(as_tuple=False).flatten()
+        if budget >= valid_indices.numel():
+            mask = valid.clone()
+        elif budget > 0:
+            valid_errors = errors.flatten()[valid_indices]
+            selected = torch.topk(
+                valid_errors,
+                budget,
+                largest=True,
+                sorted=False,
+            ).indices
+            mask.view(-1)[valid_indices[selected]] = True
 
         b, h, t = mask.nonzero(as_tuple=True)
         max_index = self._B * self._H * self._T - 1
@@ -534,7 +439,6 @@ class MLPValueCache(SingleTensorCache):
         ddp_cache_data=None,
         *,
         target_cr: float,
-        per_sequence: bool = False,
         num_epochs: int = 5,
         meta_weights_path: str | None = None,
         value_mlp_weights_path: str | None = None,
@@ -554,7 +458,6 @@ class MLPValueCache(SingleTensorCache):
         target_cr = float(target_cr)
         if not math.isfinite(target_cr) or target_cr <= 0:
             raise ValueError("target_cr must be finite and positive.")
-        self.per_sequence = per_sequence
 
         self.num_epochs = num_epochs
         self.rope_theta = rope_theta
@@ -575,7 +478,6 @@ class MLPValueCache(SingleTensorCache):
             else (
                 LearnedInit.from_checkpoint(
                     path=meta_weights_path,
-                    use_residual=use_residual,
                 )
                 if meta_weights_path is not None
                 else LearnedInit.empty()
@@ -608,7 +510,6 @@ class MLPValueCache(SingleTensorCache):
             )
         return MLPValueLayer(
             target_cr=self.target_cr,
-            per_sequence=self.per_sequence,
             num_epochs=self.num_epochs,
             learned_init=learned_init,
             rope_theta=self.rope_theta,

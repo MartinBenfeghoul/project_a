@@ -9,14 +9,10 @@ from .dataloader import (
     Dataset,
 )
 from .args import (
-    str2bool,
     list_of_strings,
-    list_of_floats,
-    args_type,
     parse_layers,
 )
 from .logging import (
-    Logger,
     generate_run_name,
     save_checkpoint,
     get_output_path,
@@ -28,10 +24,7 @@ from .device import get_device, get_device_type
 from .meta_learning import (
     LearnedInit,
     LearnedLayerInit,
-    adapt_mlp_with_meta_lrs,
     add_grad,
-    constrain_lrs,
-    expand_lrs,
     get_rope_theta,
     inner_loop,
     prepare_kvs,

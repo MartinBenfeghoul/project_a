@@ -14,9 +14,7 @@ from model.attention_predictor import (
     apply_attn_predictor_config,
 )
 from model.selective_attention import install_selective_attention
-from utils.logging import make_hooks
 from utils import (
-    Logger,
     get_model_and_tokenizer,
     extract_kv_linear_init,
     get_device,
@@ -54,9 +52,6 @@ def main(args):
         if args.selective_reconstruction
         else []
     )
-    logger = Logger()
-    logger.recorded_cr = False
-
     rope_theta = getattr(model.config, "rope_theta", 500_000.0)
 
     attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
@@ -77,7 +72,6 @@ def main(args):
 
     value_cache_kwargs = {
         "cache_type": args.v_cache_type,
-        "per_sequence": args.per_sequence,
         "num_epochs": args.num_epochs,
         "meta_weights_path": args.meta_weights_path,
         "value_mlp_weights_path": args.value_mlp_weights_path,
@@ -94,16 +88,10 @@ def main(args):
 
     args.tasks = get_tasks(args.tasks)
 
-    post_hook = make_hooks(logger)
-    metric_hook_handles = [
-        model.register_forward_hook(post_hook, with_kwargs=True),
-    ]
-
     lm = CompressedCacheHFLM(
         key_cache_kwargs=key_cache_kwargs,
         value_cache_kwargs=value_cache_kwargs,
         eviction_keep_ratio=args.eviction_keep_ratio,
-        logger=logger,
         pretrained=model,
         tokenizer=tokenizer,
         max_length=None,
@@ -136,28 +124,6 @@ def main(args):
         limit=args.limit,
     )
 
-    cr_values = logger.get_log_list("crs")
-    if cr_values:
-        cr_mean, cr_std = logger.get_log_mean("crs", std=True)
-        compression_metrics = {
-            "compression_ratio_mean": float(cr_mean),
-            "compression_ratio_std": float(cr_std),
-            "n_compression_ratio_samples": len(cr_values),
-        }
-        print("Compression metrics:", compression_metrics)
-        results["results"]["compression_metrics"] = compression_metrics
-
-    for label in ["value_recon_mse", "key_recon_mse"]:
-        mse_values = logger.get_log_list(label)
-        if mse_values:
-            mse_mean, mse_std = logger.get_log_mean(label, std=True)
-            metrics = {
-                "recon_mse_mean": float(mse_mean),
-                "recon_mse_std": float(mse_std),
-            }
-            print(f"{label}:", metrics)
-            results["results"][f"{label}"] = metrics
-
     print(make_table(results))
 
     results["results"]["config"] = vars(args)
@@ -175,9 +141,7 @@ def main(args):
     with open(output_path, "w") as f:
         json.dump(results["results"], f, ensure_ascii=False, indent=4)
     print(f"Results saved to {output_path}")
-    for handle in (
-        metric_hook_handles + attn_predictor_hook_handles + selective_handles
-    ):
+    for handle in attn_predictor_hook_handles + selective_handles:
         handle.remove()
     return results
 
@@ -253,7 +217,6 @@ def parse_args():
 
     # value cache
     parser.add_argument("-vc", "--v_cache_type", type=str, default="mlp")
-    parser.add_argument("--per_sequence", action="store_true")
     parser.add_argument(
         "--target_cr",
         type=float,

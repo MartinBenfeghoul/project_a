@@ -17,7 +17,6 @@ class CompressedCacheHFLM(HFLM):
         self,
         key_cache_kwargs,
         value_cache_kwargs,
-        logger,
         eviction_keep_ratio,
         **kwargs,
     ):
@@ -25,7 +24,6 @@ class CompressedCacheHFLM(HFLM):
         self._key_cache_kwargs = key_cache_kwargs
         self._value_cache_kwargs = value_cache_kwargs
         self._eviction_keep_ratio = eviction_keep_ratio
-        self._logger = logger
 
     def _make_cache(self, cache_context=None):
         return CompressedCache(
@@ -58,7 +56,6 @@ class CompressedCacheHFLM(HFLM):
             return output.logits
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
-        self._logger.recorded_cr = False
         cache = self._make_cache(
             {"padding_mask": generation_kwargs["attention_mask"]}
         )

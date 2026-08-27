@@ -3,7 +3,6 @@ import math
 
 import torch
 import torch.nn.functional as F
-from torch import nn
 from torch.func import functional_call
 
 from .rope import compute_rope_cos_sin, inverse_rope
@@ -14,15 +13,10 @@ class LearnedLayerInit:
     """Learned initialisation for one value-cache MLP layer."""
 
     weights: dict | None = None
-    inner_lrs: list[torch.Tensor] | None = None
 
     @property
     def has_weights(self) -> bool:
         return self.weights is not None
-
-    @property
-    def has_inner_lrs(self) -> bool:
-        return self.inner_lrs is not None
 
 
 class LearnedInit:
@@ -39,7 +33,6 @@ class LearnedInit:
     def from_checkpoint(
         cls,
         path: str,
-        use_residual: bool,
     ) -> "LearnedInit":
         checkpoint = torch.load(path, map_location="cpu")
         layer_weights = {
@@ -47,19 +40,10 @@ class LearnedInit:
             for key, value in checkpoint.items()
             if key.startswith("layer_")
         }
-        layer_lrs = _split_lrs(
-            checkpoint,
-            layer_weights,
-            use_residual,
-        )
-        layer_indices = set(layer_weights) | set(layer_lrs)
         return cls(
             {
-                idx: LearnedLayerInit(
-                    weights=layer_weights.get(idx),
-                    inner_lrs=layer_lrs.get(idx),
-                )
-                for idx in layer_indices
+                idx: LearnedLayerInit(weights=weights)
+                for idx, weights in layer_weights.items()
             }
         )
 
@@ -77,55 +61,6 @@ class LearnedInit:
         return self.layers.get(layer_idx, LearnedLayerInit())
 
 
-def adapt_mlp_with_meta_lrs(
-    *,
-    mlp,
-    keys: torch.Tensor,
-    values: torch.Tensor,
-    loss_func,
-    num_epochs: int,
-    learned_init: LearnedLayerInit,
-    use_residual: bool,
-) -> None:
-    n = mlp.num_layers
-    saved_lrs = learned_init.inner_lrs
-    params = list(mlp.weights) + list(mlp.biases)
-    lrs = [lr.to(keys) for lr in saved_lrs[: 2 * n]]
-    if use_residual and len(saved_lrs) > 2 * n:
-        params.append(mlp.W_linear)
-        lrs.append(saved_lrs[2 * n].to(keys))
-
-    optimizer = torch.optim.Adam(
-        [{"params": [param], "lr": float(lr)} for param, lr in zip(params, lrs)]
-    )
-
-    for _ in range(num_epochs):
-        optimizer.zero_grad()
-        loss = loss_func(mlp(keys), values)
-        loss.backward()
-        optimizer.step()
-
-
-def _split_lrs(
-    state: dict,
-    weights: dict[int, dict],
-    use_residual: bool,
-) -> dict[int, list[torch.Tensor]]:
-    if "inner_lr_params" not in state:
-        return {}
-
-    flat_lrs = state["inner_lr_params"]
-    layer_lrs = {}
-    offset = 0
-    for layer_idx in sorted(weights):
-        layer_state = weights.get(layer_idx, {})
-        has_linear = "W_linear" in layer_state and use_residual
-        chunk = 4 + int(has_linear)
-        layer_lrs[layer_idx] = flat_lrs[offset : offset + chunk]
-        offset += chunk
-    return layer_lrs
-
-
 def get_rope_theta(model_config) -> float:
     rope_theta = getattr(model_config, "rope_theta", None)
     if rope_theta is None:
@@ -136,13 +71,6 @@ def get_rope_theta(model_config) -> float:
     return float(rope_theta)
 
 
-def constrain_lrs(raw_lrs, config) -> list[torch.Tensor] | None:
-    if raw_lrs is None:
-        return None
-    lower, upper = float(config.inner_lr_min), float(config.inner_lr_max)
-    return [lower + (upper - lower) * torch.sigmoid(param) for param in raw_lrs]
-
-
 def trainable_params(mlp) -> list[torch.Tensor]:
     params = list(mlp.weights) + list(mlp.biases)
     if hasattr(mlp, "W_linear"):
@@ -150,30 +78,9 @@ def trainable_params(mlp) -> list[torch.Tensor]:
     return params
 
 
-def expand_lrs(mlps, layer_lrs) -> list[torch.Tensor] | None:
-    if layer_lrs is None:
-        return None
-    return [
-        layer_lr
-        for mlp, layer_lr in zip(mlps, layer_lrs)
-        for _ in trainable_params(mlp)
-    ]
-
-
 def setup_optimizer(mlps, config):
     params = [param for mlp in mlps for param in trainable_params(mlp)]
-    raw_lrs = None
-    if config.learn_inner_lr:
-        lower, upper = float(config.inner_lr_min), float(config.inner_lr_max)
-        initial = float(config.inner_lr)
-        assert lower < initial < upper
-        fraction = (initial - lower) / (upper - lower)
-        raw = math.log(fraction / (1.0 - fraction))
-        device = params[0].device
-        raw_lrs = [nn.Parameter(torch.tensor(raw, device=device)) for _ in mlps]
-        params.extend(raw_lrs)
-
-    return raw_lrs, torch.optim.Adam(
+    return torch.optim.Adam(
         params,
         lr=float(config.meta_lr),
     )
@@ -284,13 +191,9 @@ def _adam_step(params, grads, means, variances, lr, step):
     correction2 = 1.0 - beta2**step
     next_params = [
         param
-        - (lr[idx] if isinstance(lr, list) else lr)
-        / correction1
-        * mean
+        - lr / correction1 * mean
         / (variance.sqrt() / math.sqrt(correction2) + epsilon)
-        for idx, (param, mean, variance) in enumerate(
-            zip(params, next_means, next_variances)
-        )
+        for param, mean, variance in zip(params, next_means, next_variances)
     ]
     return next_params, next_means, next_variances
 
@@ -301,7 +204,6 @@ def inner_loop(
     lr,
     steps: int,
     *,
-    outer_lrs: list[nn.Parameter] | None = None,
     residual_cr: float | None = None,
 ):
     """Run first-order functional Adam and return the final-only objective."""
@@ -353,13 +255,11 @@ def inner_loop(
         else final_loss
     )
 
-    targets = params + (outer_lrs or [])
     grads = torch.autograd.grad(
         objective,
-        targets,
+        params,
         allow_unused=True,
     )
-    n_params = len(params)
     initial_value = initial_loss.detach().item()
     final_value = final_loss.detach().item()
     objective_value = (
@@ -369,8 +269,7 @@ def inner_loop(
         "initial_support_loss": initial_value,
         "final_support_loss": final_value,
         "meta_objective": objective_value,
-        "param_grads": grads[:n_params],
-        "lr_grads": grads[n_params:],
+        "param_grads": grads,
     }
 
 
