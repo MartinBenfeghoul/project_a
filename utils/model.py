@@ -7,7 +7,7 @@ load_dotenv()
 
 
 def get_model_and_tokenizer(
-    model_name, device, pad_token=None, pad_token_side="left", torch_dtype=None
+    model_name, pad_token=None, pad_token_side="left", torch_dtype=None
 ):
     print(f"Loading model and tokenizer for {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)

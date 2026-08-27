@@ -108,7 +108,6 @@ def solve_lloyd_max(
 
 def compute_expected_distortion(
     d: int,
-    bits: int,
     centroids: torch.Tensor,
     boundaries: torch.Tensor,
     use_exact: bool = False,
@@ -143,7 +142,7 @@ class LloydMaxCodebook:
         self.n_levels = 2**bits
         self.centroids, self.boundaries = solve_lloyd_max(d, bits, use_exact)
         self.distortion = compute_expected_distortion(
-            d, bits, self.centroids, self.boundaries, use_exact
+            d, self.centroids, self.boundaries, use_exact
         )
 
     def quantize(self, x: torch.Tensor) -> torch.Tensor:

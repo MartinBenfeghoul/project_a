@@ -212,7 +212,6 @@ def meta_train(
                     tokenizer=tokenizer,
                     cfg=cfg,
                     ckpt_path=epoch_ckpt,
-                    device=device,
                     epoch=epoch,
                     benchmark=benchmark,
                     samples=samples,
@@ -237,7 +236,6 @@ def eval_benchmark(
     tokenizer,
     cfg,
     ckpt_path,
-    device,
     epoch,
     benchmark,
     samples,
@@ -369,7 +367,7 @@ def main():
     os.makedirs(run_dir)
     print(f"Checkpoints will be saved to: {run_dir}/")
 
-    model, tokenizer = get_model_and_tokenizer(model_name, device)
+    model, tokenizer = get_model_and_tokenizer(model_name)
 
     num_heads = model.config.num_key_value_heads
     dim = model.config.hidden_size // model.config.num_attention_heads

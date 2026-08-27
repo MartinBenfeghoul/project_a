@@ -6,7 +6,6 @@ from efficiency import FusedLandmarkScorer
 from transformers.cache_utils import (
     Any,
     Iterable,
-    PreTrainedConfig,
 )
 
 SELECTIVE_TOKEN_BUDGET = 2048
@@ -32,14 +31,10 @@ class CompressedCache:
     def __init__(
         self,
         ddp_cache_data: Iterable[torch.Tensor] | None = None,
-        config: PreTrainedConfig | None = None,
         key_cache_kwargs: dict | None = None,
         value_cache_kwargs: dict | None = None,
-        log_key_recon_mse: bool = True,  # TODO: add full plumbing for this flag
         **kwargs,
     ):
-        # super().__init__(ddp_cache_data=ddp_cache_data, config=config)
-
         if key_cache_kwargs is None:
             key_cache_kwargs = {"cache_type": "baseline"}
         else:
@@ -106,8 +101,6 @@ class CompressedCache:
             raise ValueError(f"Invalid cache type: {value_cache_type}")
         self._cache_context = dict(kwargs.get("cache_context") or {})
         self._temp_value_importance = {}
-        self.log_key_recon_mse = log_key_recon_mse
-        self._key_recon_mses = []
         self.eviction_keep_ratio = kwargs.get("eviction_keep_ratio", 1.0)
         self.kept_positions = {}
         self._deferred_value_updates = {}
@@ -468,7 +461,6 @@ class CompressedCache:
             self._deferred_value_updates[layer_idx] = (
                 value_states,
                 dict(cache_kwargs),
-                key_states,
             )
             values = value_states
         elif (
@@ -479,15 +471,13 @@ class CompressedCache:
                 layer_idx,
                 value_states,
                 cache_kwargs,
-                key_states,
                 value_group_bounds,
             )
         else:
-            if self.pass_keys_to_value_cache or self.log_key_recon_mse:
+            if self.pass_keys_to_value_cache:
                 self._attach_keys_to_value_cache_kwargs(
                     cache_kwargs,
                     layer_idx,
-                    key_states,
                     keys,
                 )
             values = self.value_cache.update(
@@ -534,16 +524,11 @@ class CompressedCache:
         self,
         cache_kwargs: dict[str, Any],
         layer_idx: int,
-        key_states: torch.Tensor,
         keys: torch.Tensor,
     ) -> None:
         fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
         if callable(fn) and getattr(self.key_cache, "prefill", False):
             recon_keys = self.key_cache.get_reconstructed_keys_only(layer_idx)
-            if self.log_key_recon_mse and recon_keys is not None:
-                self._key_recon_mses.append(
-                    torch.nn.functional.mse_loss(recon_keys, key_states).item()
-                )
             cache_kwargs["keys"] = recon_keys
         else:
             cache_kwargs["keys"] = keys
@@ -553,7 +538,6 @@ class CompressedCache:
         layer_idx: int,
         value_states: torch.Tensor,
         cache_kwargs: dict[str, Any],
-        key_states: torch.Tensor,
         bounds: tuple[int, int],
     ) -> torch.Tensor:
         group_start, group_last_layer = bounds
@@ -561,30 +545,18 @@ class CompressedCache:
         for group_layer_idx in range(group_start, group_last_layer + 1):
             if group_layer_idx == layer_idx:
                 continue
-            deferred_values, deferred_kwargs, original_keys = (
+            deferred_values, deferred_kwargs = (
                 self._deferred_value_updates.pop(group_layer_idx)
             )
             recon_keys = self.key_cache.get_reconstructed_keys_only(
                 group_layer_idx
             )
-            if self.log_key_recon_mse and recon_keys is not None:
-                self._key_recon_mses.append(
-                    torch.nn.functional.mse_loss(
-                        recon_keys, original_keys
-                    ).item()
-                )
             deferred_kwargs["keys"] = recon_keys
             updates.append((group_layer_idx, deferred_values, deferred_kwargs))
 
         current_recon_keys = self.key_cache.get_reconstructed_keys_only(
             layer_idx
         )
-        if self.log_key_recon_mse and current_recon_keys is not None:
-            self._key_recon_mses.append(
-                torch.nn.functional.mse_loss(
-                    current_recon_keys, key_states
-                ).item()
-            )
         current_kwargs = dict(cache_kwargs)
         current_kwargs["keys"] = current_recon_keys
         updates.append((layer_idx, value_states, current_kwargs))
@@ -639,18 +611,6 @@ class CompressedCache:
             return value_cr
         else:
             return None
-
-    @property
-    def key_recon_mse(self) -> float | None:
-        if not self._key_recon_mses:
-            return None
-        return sum(self._key_recon_mses) / len(self._key_recon_mses)
-
-    @property
-    def value_recon_mse(self) -> float | None:
-        if hasattr(self.value_cache, "recon_mse"):
-            return self.value_cache.recon_mse
-        return None
 
     def update_events(self, *args, **kwargs):
         """

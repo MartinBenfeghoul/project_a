@@ -27,7 +27,6 @@ class CompressedCacheHFLM(HFLM):
 
     def _make_cache(self, cache_context=None):
         return CompressedCache(
-            config=self.model.config,
             key_cache_kwargs=self._key_cache_kwargs,
             value_cache_kwargs=self._value_cache_kwargs,
             cache_context=cache_context,

@@ -45,8 +45,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.compressed_len = 0
         self.rope_cos: torch.Tensor | None = None
         self.rope_sin: torch.Tensor | None = None
-        self.key_mean: torch.Tensor | None = None
-        self.key_std: torch.Tensor | None = None
         self._num_params = None
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
@@ -63,7 +61,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             value_states.shape[-1],
             value_states.device,
         )
-        self.recon_mse = None
         self.indices = torch.tensor(
             [], dtype=torch.long, device=value_states.device
         )
@@ -164,10 +161,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 )
                 loss.backward()
                 optimizer.step()
-                loss_val = loss.detach().item()
 
             optimizer.zero_grad(set_to_none=True)
-            self.recon_mse = loss_val
 
     def compute_residual_budget(
         self,
@@ -604,14 +599,6 @@ class MLPValueCache(SingleTensorCache):
         assert compressed_total != 0
 
         return original_total / compressed_total
-
-    @property
-    def recon_mse(self) -> float | None:
-        mses = [l.recon_mse for l in self.layers if l.recon_mse is not None]
-        if not mses:
-            return None
-        return sum(mses) / len(mses)
-
 
 VALUE_CACHE_CLASSES = {
     "baseline": SingleTensorCache,

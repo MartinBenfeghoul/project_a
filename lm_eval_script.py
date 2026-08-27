@@ -18,7 +18,6 @@ from utils import (
     get_model_and_tokenizer,
     extract_kv_linear_init,
     get_device,
-    get_device_type,
     list_of_strings,
     get_output_path,
     filter_tasks_by_min_seq_len,
@@ -43,10 +42,7 @@ def get_tasks(tasks, print_tasks=True):
 
 @torch.no_grad()
 def main(args):
-    device_type = get_device_type()
-    device = torch.device(device_type)
-
-    model, tokenizer = get_model_and_tokenizer(args.model_name, device)
+    model, tokenizer = get_model_and_tokenizer(args.model_name)
     selective_handles = (
         install_selective_attention(model)
         if args.selective_reconstruction

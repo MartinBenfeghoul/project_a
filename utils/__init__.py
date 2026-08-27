@@ -20,7 +20,7 @@ from .logging import (
     prepare_run_directory,
 )
 from .rope import inverse_rope, apply_rope, compute_rope_cos_sin
-from .device import get_device, get_device_type
+from .device import get_device
 from .meta_learning import (
     LearnedInit,
     LearnedLayerInit,
