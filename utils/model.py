@@ -1,14 +1,9 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from huggingface_hub import snapshot_download
 
 from dotenv import load_dotenv
 
 load_dotenv()
-
-
-def download_model_to_hub(model_name, **kwargs):
-    snapshot_download(model_name, **kwargs)
 
 
 def get_model_and_tokenizer(
@@ -56,13 +51,3 @@ def extract_kv_linear_init(model) -> list[torch.Tensor]:
     )  # [layers, num_kv_heads, head_dim, head_dim]
 
     return [W_linear[i] for i in range(len(layers))]
-
-
-def clone_mlp_params(layer_mlps):
-    return [[p.clone() for p in mlp.parameters()] for mlp in layer_mlps]
-
-
-def load_mlp_params(layer_mlps, params_list):
-    for mlp, params in zip(layer_mlps, params_list):
-        for p, saved_p in zip(mlp.parameters(), params):
-            p.data.copy_(saved_p.data)
