@@ -1,6 +1,7 @@
 import torch
 
-from cache.base import SharedRopeCache, SingleTensorDynamicLayer
+from cache.backends.tensor import SingleTensorDynamicLayer
+from cache.rope import SharedRopeCache
 from utils.rope import apply_packed_rope, inverse_packed_rope
 
 from tests.helpers import apply_model_rope, rope_cos_sin

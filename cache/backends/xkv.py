@@ -22,7 +22,8 @@ from numerics.quantisation import (
     pack_factors,
     quantise_factor,
 )
-from .base import SharedRopeCache, SingleTensorCache
+from ..rope import SharedRopeCache
+from .tensor import SingleTensorCache
 
 
 @dataclass

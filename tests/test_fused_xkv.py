@@ -145,8 +145,8 @@ def test_selective_retrieval_on_the_fused_path(quantise):
     """
     _requires_fused_ops()
 
-    from cache.base import SharedRopeCache
-    from cache.keys import XKVKeysCache
+    from cache.rope import SharedRopeCache
+    from cache.backends.xkv import XKVKeysCache
     from tests.helpers import apply_model_rope, gather_tokens
 
     torch.manual_seed(8)

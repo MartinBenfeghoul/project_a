@@ -7,7 +7,7 @@ from transformers import (
     MistralForCausalLM,
 )
 
-from cache.cache import CompressedCache
+from cache.core import CompressedCache
 from cache.config import (
     BaselineCacheConfig,
     CompressedCacheConfig,

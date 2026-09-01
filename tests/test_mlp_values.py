@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from cache.base import SharedRopeCache
-from cache.values import MLPValueCache
+from cache.rope import SharedRopeCache
+from cache.backends.mlp_values import MLPValueCache
 from model.mlp import MLP
 from utils.model import extract_kv_linear_init
 

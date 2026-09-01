@@ -1,8 +1,8 @@
 import torch
 
-from cache.base import SharedRopeCache
-from cache.keys import XKVKeysCache
-from cache.values import MLPValueCache
+from cache.rope import SharedRopeCache
+from cache.backends.xkv import XKVKeysCache
+from cache.backends.mlp_values import MLPValueCache
 from numerics.quantisation import factor_nbytes
 
 from tests.helpers import apply_model_rope, rope_cos_sin

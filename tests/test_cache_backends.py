@@ -1,15 +1,16 @@
 import torch
 
-from cache.base import SharedRopeCache
-from cache.cache import CompressedCache, SelectiveLayerState
+from cache.rope import SharedRopeCache
+from cache.core import CompressedCache
+from cache.selective import SelectiveLayerState
 from cache.config import (
     BaselineCacheConfig,
     CompressedCacheConfig,
     SelectiveCacheConfig,
     XKVCacheConfig,
 )
-from cache.keys import XKVKeysCache
-from cache.values import MLPValueCache
+from cache.backends.xkv import XKVKeysCache
+from cache.backends.mlp_values import MLPValueCache
 from utils.rope import inverse_rope
 
 from tests.helpers import apply_model_rope, gather_tokens, rope_cos_sin
@@ -36,7 +37,7 @@ def test_typed_config_builds_selective_layer_state():
     keys = torch.randn(1, 2, 64, 16)
     values = torch.randn_like(keys)
 
-    cache._store_selective_landmarks(0, keys, values)
+    cache.selective.store_landmarks(0, keys, values)
 
     state = cache.selective_layers[0]
     assert isinstance(state, SelectiveLayerState)

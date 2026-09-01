@@ -1,6 +1,7 @@
 import math
 
-from .base import SharedRopeCache, SingleTensorCache, SingleTensorDynamicLayer
+from ..rope import SharedRopeCache
+from .tensor import SingleTensorCache, SingleTensorDynamicLayer
 from torch.optim import Adam
 from torch.nn.functional import mse_loss
 import torch

@@ -2,7 +2,8 @@ from typing import Any, Iterable
 
 import torch
 
-from .base import SharedRopeCache, SingleTensorCache, SingleTensorDynamicLayer
+from ..rope import SharedRopeCache
+from .tensor import SingleTensorCache, SingleTensorDynamicLayer
 from numerics.quantisation import CompressorParams, MSECompressor
 
 

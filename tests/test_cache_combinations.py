@@ -8,7 +8,7 @@ import pytest
 import torch
 from transformers import DynamicCache
 
-from cache.cache import CompressedCache
+from cache.core import CompressedCache
 from cache.config import (
     BaselineCacheConfig,
     CompressedCacheConfig,
@@ -275,7 +275,7 @@ def test_layers_evict_independently_without_a_grouped_key_cache():
 
 def _key_reconstruction_error(group_size, *, evict, prompt_len=256, seed=59):
     """Mean relative error of the reconstructed keys against what went in."""
-    from cache.keys import XKVKeysCache
+    from cache.backends.xkv import XKVKeysCache
 
     model = build_llama(NUM_LAYERS)
     prompt, steps = _prompt_and_steps(seed, prompt_len=prompt_len)

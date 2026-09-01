@@ -4,7 +4,7 @@ from typing import Literal
 
 import torch
 
-from .base import SharedRopeCache
+from .rope import SharedRopeCache
 
 
 @dataclass(frozen=True)
@@ -88,9 +88,9 @@ def build_key_cache(
     rope_cache: SharedRopeCache,
     verbose: bool,
 ):
-    from .base import SingleTensorCache
-    from .keys import XKVKeysCache
-    from .turboquant import TurboQuantCache
+    from .backends.tensor import SingleTensorCache
+    from .backends.turboquant import TurboQuantCache
+    from .backends.xkv import XKVKeysCache
 
     _print_backend(config, verbose)
     if isinstance(config, BaselineCacheConfig):
@@ -126,10 +126,10 @@ def build_value_cache(
     rope_cache: SharedRopeCache,
     verbose: bool,
 ):
-    from .base import SingleTensorCache
-    from .keys import XKVKeysCache
-    from .turboquant import TurboQuantCache
-    from .values import MLPValueCache
+    from .backends.mlp_values import MLPValueCache
+    from .backends.tensor import SingleTensorCache
+    from .backends.turboquant import TurboQuantCache
+    from .backends.xkv import XKVKeysCache
 
     _print_backend(config, verbose)
     if isinstance(config, BaselineCacheConfig):

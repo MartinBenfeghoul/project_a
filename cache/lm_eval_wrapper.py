@@ -3,7 +3,7 @@ import torch
 from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils_hf import stop_sequences_criteria
 
-from .cache import CompressedCache
+from .core import CompressedCache
 from .config import CompressedCacheConfig
 
 

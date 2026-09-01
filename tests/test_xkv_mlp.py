@@ -3,13 +3,13 @@
 import pytest
 import torch
 
-from cache.cache import CompressedCache
+from cache.core import CompressedCache
 from cache.config import (
     CompressedCacheConfig,
     MLPValueCacheConfig,
     XKVCacheConfig,
 )
-from cache.values import MLPValueLayer
+from cache.backends.mlp_values import MLPValueLayer
 from utils.rope import inverse_rope
 
 from tests.helpers import apply_model_rope, rope_cos_sin

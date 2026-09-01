@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from cache.base import SharedRopeCache
-from cache.keys import XKVKeysCache
+from cache.rope import SharedRopeCache
+from cache.backends.xkv import XKVKeysCache
 from utils.rope import inverse_rope
 
 from tests.helpers import apply_model_rope, low_rank_keys, rope_cos_sin
@@ -18,7 +18,7 @@ def _flatten_heads(keys: torch.Tensor) -> torch.Tensor:
 
 def _capture_decomposition_inputs(monkeypatch):
     """Record every tensor handed to the segment-store decomposer."""
-    import cache.keys as keys_module
+    import cache.backends.xkv as keys_module
 
     captured = []
     original = keys_module.decompose_grouped_xkv_to_segment_store
