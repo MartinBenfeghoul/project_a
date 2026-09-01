@@ -8,7 +8,15 @@ from lm_eval import evaluator
 from lm_eval.utils import make_table
 from lm_eval.tasks import TaskManager, get_task_dict
 
-from cache import CompressedCacheHFLM
+from cache import (
+    BaselineCacheConfig,
+    CompressedCacheConfig,
+    CompressedCacheHFLM,
+    MLPValueCacheConfig,
+    SelectiveCacheConfig,
+    TurboQuantCacheConfig,
+    XKVCacheConfig,
+)
 from model.attention_predictor import (
     get_attn_predictor_hook_handles,
     apply_attn_predictor_config,
@@ -52,39 +60,70 @@ def main(args):
     attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
 
     num_layers = model.config.num_hidden_layers
-    key_cache_kwargs = {
-        "cache_type": args.k_cache_type,
-        "comp_ratio": args.comp_ratio,
-        "layer_group_size": args.xkv_layer_group_size,
-        "xkv_svd_backend": args.xkv_svd_backend,
-        "num_layers": num_layers,
-        "selective_reconstruction": args.selective_reconstruction,
-        "quantise_a": args.k_quantise_a,
-        "quantise_b": args.k_quantise_b,
-        "compressor_bits": args.k_compressor_bits,
-    }
+    if args.k_cache_type == "xkv":
+        key_config = XKVCacheConfig(
+            compression_ratio=args.comp_ratio,
+            layer_group_size=args.xkv_layer_group_size,
+            svd_backend=args.xkv_svd_backend,
+            num_layers=num_layers,
+            quantise_a=args.k_quantise_a,
+            quantise_b=args.k_quantise_b,
+            compressor_bits=args.k_compressor_bits,
+        )
+    elif args.k_cache_type == "turboquant":
+        key_config = TurboQuantCacheConfig(
+            compressor_bits=args.k_compressor_bits,
+        )
+    else:
+        key_config = BaselineCacheConfig()
 
-    value_cache_kwargs = {
-        "cache_type": args.v_cache_type,
-        "num_epochs": args.num_epochs,
-        "meta_weights_path": args.meta_weights_path,
-        "value_mlp_weights_path": args.value_mlp_weights_path,
-        "use_residual": args.use_residual,
-        "target_cr": args.target_cr,
-        "turboquant_residuals": args.v_turboquant_residuals,
-        "compressor_bits": args.v_compressor_bits,
-    }
-    if args.use_residual and args.v_cache_type == "mlp":
-        value_cache_kwargs["W_linear_per_layer"] = extract_kv_linear_init(model)
+    if args.v_cache_type == "mlp":
+        value_config = MLPValueCacheConfig(
+            target_compression_ratio=args.target_cr,
+            num_epochs=args.num_epochs,
+            meta_weights_path=args.meta_weights_path,
+            value_mlp_weights_path=args.value_mlp_weights_path,
+            use_residual=args.use_residual,
+            linear_weights=(
+                extract_kv_linear_init(model)
+                if args.use_residual
+                else None
+            ),
+            turboquant_residuals=args.v_turboquant_residuals,
+            compressor_bits=args.v_compressor_bits,
+        )
+    elif args.v_cache_type == "turboquant":
+        value_config = TurboQuantCacheConfig(
+            compressor_bits=args.v_compressor_bits,
+        )
+    elif args.v_cache_type == "xkv":
+        value_config = XKVCacheConfig(
+            compression_ratio=args.comp_ratio,
+            layer_group_size=args.xkv_layer_group_size,
+            svd_backend=args.xkv_svd_backend,
+            num_layers=num_layers,
+            quantise_a=args.k_quantise_a,
+            quantise_b=args.k_quantise_b,
+            compressor_bits=args.k_compressor_bits,
+        )
+    else:
+        value_config = BaselineCacheConfig()
+
+    cache_config = CompressedCacheConfig(
+        key=key_config,
+        value=value_config,
+        selective=SelectiveCacheConfig(
+            enabled=args.selective_reconstruction,
+        ),
+        eviction_keep_ratio=args.eviction_keep_ratio,
+    )
 
     model.eval()
 
     args.tasks = get_tasks(args.tasks)
 
     lm = CompressedCacheHFLM(
-        key_cache_kwargs=key_cache_kwargs,
-        value_cache_kwargs=value_cache_kwargs,
-        eviction_keep_ratio=args.eviction_keep_ratio,
+        cache_config=cache_config,
         pretrained=model,
         tokenizer=tokenizer,
         max_length=None,
@@ -265,6 +304,10 @@ def parse_args():
     if args.eviction_keep_ratio < 1 and not args.use_attn_predictor:
         raise ValueError(
             "--eviction_keep_ratio < 1 requires --use_attn_predictor."
+        )
+    if args.meta_weights_path is not None and args.value_mlp_weights_path is not None:
+        raise ValueError(
+            "Both initialisations can't be provided."
         )
 
     print("Config for lm-eval: ", vars(args))

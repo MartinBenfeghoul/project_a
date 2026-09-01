@@ -218,15 +218,16 @@ def meta_train(
                 )
 
 
-def build_cache_args(cfg, ckpt_path, target_cr):
+def build_value_cache_config(cfg, ckpt_path, target_cr):
     """Build inference settings that match the meta-training inner loop."""
-    return {
-        "cache_type": "mlp",
-        "num_epochs": cfg.inner_steps,
-        "meta_weights_path": ckpt_path,
-        "use_residual": cfg.use_residual,
-        "target_cr": target_cr,
-    }
+    from cache import MLPValueCacheConfig
+
+    return MLPValueCacheConfig(
+        target_compression_ratio=target_cr,
+        num_epochs=cfg.inner_steps,
+        meta_weights_path=ckpt_path,
+        use_residual=cfg.use_residual,
+    )
 
 
 def eval_benchmark(
@@ -248,6 +249,7 @@ def eval_benchmark(
         get_device,
         get_tasks,
     )
+    from cache import BaselineCacheConfig, CompressedCacheConfig
     target_cr = float(cfg.eval_target_cr)
     eval_batch_size = int(getattr(cfg, "eval_batch_size", 1))
     print(
@@ -257,13 +259,14 @@ def eval_benchmark(
     )
 
     lm = CompressedCacheHFLM(
-        key_cache_kwargs={"cache_type": "baseline"},
-        value_cache_kwargs=build_cache_args(
-            cfg,
-            ckpt_path,
-            target_cr,
+        cache_config=CompressedCacheConfig(
+            key=BaselineCacheConfig(),
+            value=build_value_cache_config(
+                cfg,
+                ckpt_path,
+                target_cr,
+            ),
         ),
-        eviction_keep_ratio=1.0,
         pretrained=model,
         tokenizer=tokenizer,
         truncation=False,

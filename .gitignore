@@ -5,3 +5,5 @@ wget-log*
 .env
 *.so
 
+checkpoints/*
+results/*

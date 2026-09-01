@@ -1,26 +1,64 @@
 import math
+from dataclasses import dataclass
+from typing import Any, Iterable
+
 import torch
 
 from efficiency import FusedLandmarkScorer
 from .base import SharedRopeCache
-
-from transformers.cache_utils import (
-    Any,
-    Iterable,
+from .config import (
+    CompressedCacheConfig,
+    build_key_cache,
+    build_value_cache,
 )
 
-SELECTIVE_TOKEN_BUDGET = 2048
-SELECTIVE_CHUNK_SIZE = 8
-SELECTIVE_LOCAL_TOKENS = 32
-SELECTIVE_OUTLIER_CHUNKS = 48
+
+@dataclass
+class DeferredValueUpdate:
+    """A value update held back until its xKV layer group is decomposed."""
+
+    value_states: torch.Tensor
+    cache_kwargs: dict[str, Any]
 
 
-def get_cache(cache_type, CACHE_CLASSES, verbose=True):
-    if cache_type not in CACHE_CLASSES:
-        raise ValueError(f"Invalid cache type: {cache_type}")
-    if verbose:
-        print(f"Loading cache type {cache_type}")
-    return CACHE_CLASSES[cache_type]
+@dataclass
+class SelectiveLayerState:
+    landmarks: torch.Tensor
+    landmark_indices: torch.Tensor
+    landmark_count: int
+    prompt_len: int
+    true_prompt_len: int
+    outliers: torch.Tensor
+    exact_positions: torch.Tensor
+    exact_keys: torch.Tensor
+    exact_values: torch.Tensor
+
+    @property
+    def key_overhead_nbytes(self) -> int:
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (
+                self.landmarks,
+                self.landmark_indices,
+                self.exact_positions,
+                self.outliers,
+                self.exact_keys,
+            )
+        )
+
+    @property
+    def exact_value_nbytes(self) -> int:
+        return self.exact_values.numel() * self.exact_values.element_size()
+
+    @property
+    def original_key_nbytes(self) -> int:
+        return (
+            self.exact_keys.size(0)
+            * self.exact_keys.size(1)
+            * self.true_prompt_len
+            * self.exact_keys.size(3)
+            * self.exact_keys.element_size()
+        )
 
 
 class CompressedCache:
@@ -32,103 +70,56 @@ class CompressedCache:
     def __init__(
         self,
         ddp_cache_data: Iterable[torch.Tensor] | None = None,
-        key_cache_kwargs: dict | None = None,
-        value_cache_kwargs: dict | None = None,
-        **kwargs,
+        config: CompressedCacheConfig | None = None,
+        cache_context: dict[str, Any] | None = None,
+        verbose: bool = True,
     ):
-        if key_cache_kwargs is None:
-            key_cache_kwargs = {"cache_type": "baseline"}
-        else:
-            key_cache_kwargs = dict(key_cache_kwargs)
-
-        if value_cache_kwargs is None:
-            value_cache_kwargs = {"cache_type": "baseline"}
-        else:
-            value_cache_kwargs = dict(value_cache_kwargs)
-
+        self.config = config or CompressedCacheConfig()
         self.rope_cache = SharedRopeCache()
-        key_cache_kwargs["rope_cache"] = self.rope_cache
-        value_cache_kwargs["rope_cache"] = self.rope_cache
-
-        key_cache_type = key_cache_kwargs.pop("cache_type")
-        value_cache_type = value_cache_kwargs.pop("cache_type")
-        self.selective_reconstruction = key_cache_kwargs.pop(
-            "selective_reconstruction", False
-        )
-        self.selective_landmarks = {}
-        self.selective_landmark_indices = {}
-        self.selective_landmark_counts = {}
-        self.selective_prompt_lens = {}
-        self.selective_true_prompt_lens = {}
-        self.selective_outliers = {}
-        self.selective_exact_positions = {}
-        self.selective_exact_keys = {}
-        self.selective_exact_values = {}
-        self._selective_bytes = {}
+        self.selective_config = self.config.selective
+        self.selective_reconstruction = self.selective_config.enabled
+        self.selective_layers: dict[int, SelectiveLayerState] = {}
         self._selective_scorer = FusedLandmarkScorer()
 
-        # local import to avoid circular import at module load
-        from .keys import KEY_CACHE_CLASSES
-        from .values import VALUE_CACHE_CLASSES
-
-        value_key_cache_kwargs = dict(key_cache_kwargs)
-
-        self.key_cache = get_cache(
-            key_cache_type, KEY_CACHE_CLASSES, kwargs.get("verbose", True)
-        )(
+        self.key_cache = build_key_cache(
+            self.config.key,
             ddp_cache_data=ddp_cache_data,
-            **key_cache_kwargs,
+            rope_cache=self.rope_cache,
+            verbose=verbose,
         )
-
-        if value_cache_type in VALUE_CACHE_CLASSES:
-            self.value_cache = get_cache(
-                value_cache_type,
-                VALUE_CACHE_CLASSES,
-                kwargs.get("verbose", True),
-            )(
-                ddp_cache_data=ddp_cache_data,
-                **value_cache_kwargs,
-            )
-            self.pass_keys_to_value_cache = True
-        elif value_cache_type in KEY_CACHE_CLASSES:
-            value_cache_kwargs = value_key_cache_kwargs
-            self.value_cache = get_cache(
-                value_cache_type,
-                KEY_CACHE_CLASSES,
-                kwargs.get("verbose", True),
-            )(
-                ddp_cache_data=ddp_cache_data,
-                **value_cache_kwargs,
-            )
-            self.value_cache.unrope_keys = False
-            self.pass_keys_to_value_cache = False
-        else:
-            raise ValueError(f"Invalid cache type: {value_cache_type}")
-        self._cache_context = dict(kwargs.get("cache_context") or {})
+        self.value_cache, self.pass_keys_to_value_cache = build_value_cache(
+            self.config.value,
+            ddp_cache_data=ddp_cache_data,
+            rope_cache=self.rope_cache,
+            verbose=verbose,
+        )
+        self._cache_context = dict(cache_context or {})
         self._temp_value_importance = {}
-        self.eviction_keep_ratio = kwargs.get("eviction_keep_ratio", 1.0)
+        self.eviction_keep_ratio = self.config.eviction_keep_ratio
         self.kept_positions = {}
-        self._deferred_value_updates = {}
+        self._group_keep_positions: dict[int, torch.Tensor] = {}
+        self._deferred_value_updates: dict[int, DeferredValueUpdate] = {}
 
-    @staticmethod
     def _build_chunk_landmarks(
+        self,
         key_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build mean-key landmarks and validity masks for fixed-size chunks"""
         batch_size, num_heads, seq_len, head_dim = key_states.shape
-        num_chunks = math.ceil(seq_len / SELECTIVE_CHUNK_SIZE)
-        padded_len = num_chunks * SELECTIVE_CHUNK_SIZE
+        chunk_size = self.selective_config.chunk_size
+        num_chunks = math.ceil(seq_len / chunk_size)
+        padded_len = num_chunks * chunk_size
         padding = padded_len - seq_len
         padded_keys = (
             torch.nn.functional.pad(key_states, (0, 0, 0, padding))
             if padding
             else key_states
         ).reshape(
-            batch_size, num_heads, num_chunks, SELECTIVE_CHUNK_SIZE, head_dim
+            batch_size, num_heads, num_chunks, chunk_size, head_dim
         )
         valid = (
             torch.arange(padded_len, device=key_states.device).reshape(
-                1, 1, num_chunks, SELECTIVE_CHUNK_SIZE
+                1, 1, num_chunks, chunk_size
             )
             < seq_len
         )
@@ -136,15 +127,13 @@ class CompressedCache:
         landmarks = padded_keys.sum(dim=3) / counts
         return padded_keys, landmarks, valid
 
-    @staticmethod
-    def _num_local_chunks(seq_len: int, num_chunks: int) -> int:
+    def _num_local_chunks(self, seq_len: int, num_chunks: int) -> int:
         """Count chunks overlapping the exact local-token window."""
-        local_start = max(0, seq_len - SELECTIVE_LOCAL_TOKENS)
-        return num_chunks - local_start // SELECTIVE_CHUNK_SIZE
+        local_start = max(0, seq_len - self.selective_config.local_tokens)
+        return num_chunks - local_start // self.selective_config.chunk_size
 
-    @classmethod
     def _select_outlier_chunks(
-        cls,
+        self,
         padded_keys: torch.Tensor,
         landmarks: torch.Tensor,
         valid: torch.Tensor,
@@ -152,44 +141,39 @@ class CompressedCache:
     ) -> torch.Tensor:
         """Select nonlocal chunks whose tokens least match their landmark."""
         num_chunks = padded_keys.size(2)
-        local_chunks = cls._num_local_chunks(seq_len, num_chunks)
+        local_chunks = self._num_local_chunks(seq_len, num_chunks)
         similarity = torch.nn.functional.cosine_similarity(
             padded_keys,
             landmarks.unsqueeze(3),
             dim=-1,
         ).masked_fill(~valid, 1.0)
         similarity[..., -local_chunks:, :] = torch.inf
-        outlier_count = min(SELECTIVE_OUTLIER_CHUNKS, num_chunks - local_chunks)
+        outlier_count = min(
+            self.selective_config.outlier_chunks,
+            num_chunks - local_chunks,
+        )
         return (
             similarity.amin(dim=3)
             .topk(outlier_count, dim=-1, largest=False)
             .indices
         )
 
-    @staticmethod
     def _expand_chunk_positions(
+        self,
         chunks: torch.Tensor,
     ) -> torch.Tensor:
         """Expand chunk indices into token positions."""
         offsets = torch.arange(
-            SELECTIVE_CHUNK_SIZE,
+            self.selective_config.chunk_size,
             device=chunks.device,
         )
-        return (chunks[..., None] * SELECTIVE_CHUNK_SIZE + offsets).flatten(2)
+        return (
+            chunks[..., None] * self.selective_config.chunk_size + offsets
+        ).flatten(2)
 
     def _record_selective_overhead(self, layer_idx: int) -> None:
         """Cache persistent selective-key bytes and pass them to rank selection"""
-        tensors = (
-            self.selective_landmarks[layer_idx],
-            self.selective_landmark_indices[layer_idx],
-            self.selective_exact_positions[layer_idx],
-            self.selective_outliers[layer_idx],
-            self.selective_exact_keys[layer_idx],
-        )
-        nbytes = sum(
-            tensor.numel() * tensor.element_size() for tensor in tensors
-        )
-        self._selective_bytes[layer_idx] = nbytes
+        nbytes = self.selective_layers[layer_idx].key_overhead_nbytes
         record = getattr(self.key_cache, "set_selective_overhead", None)
         if callable(record):
             record(layer_idx, nbytes)
@@ -237,7 +221,7 @@ class CompressedCache:
         outlier_positions = self._expand_chunk_positions(outliers)
         local_positions = (
             torch.arange(
-                max(0, seq_len - SELECTIVE_LOCAL_TOKENS),
+                max(0, seq_len - self.selective_config.local_tokens),
                 seq_len,
                 device=key_states.device,
             )
@@ -246,19 +230,19 @@ class CompressedCache:
         )
         positions = torch.cat([outlier_positions, local_positions], dim=-1)
 
-        self.selective_landmarks[layer_idx] = landmarks
-        self.selective_landmark_indices[layer_idx] = landmark_indices
-        self.selective_landmark_counts[layer_idx] = landmark_count
-        self.selective_prompt_lens[layer_idx] = seq_len
-        self.selective_true_prompt_lens[layer_idx] = (
-            seq_len if true_seq_len is None else true_seq_len
-        )
-        self.selective_outliers[layer_idx] = outliers
         gather_idx = positions[..., None].expand(-1, -1, -1, head_dim)
-        self.selective_exact_positions[layer_idx] = positions
-        self.selective_exact_keys[layer_idx] = key_states.gather(2, gather_idx)
-        self.selective_exact_values[layer_idx] = value_states.gather(
-            2, gather_idx
+        self.selective_layers[layer_idx] = SelectiveLayerState(
+            landmarks=landmarks,
+            landmark_indices=landmark_indices,
+            landmark_count=landmark_count,
+            prompt_len=seq_len,
+            true_prompt_len=(
+                seq_len if true_seq_len is None else true_seq_len
+            ),
+            outliers=outliers,
+            exact_positions=positions,
+            exact_keys=key_states.gather(2, gather_idx),
+            exact_values=value_states.gather(2, gather_idx),
         )
         self._record_selective_overhead(layer_idx)
 
@@ -267,52 +251,59 @@ class CompressedCache:
         layer_idx: int,
         query_states: torch.Tensor,
     ) -> torch.Tensor:
-        landmarks = self.selective_landmarks[layer_idx]
+        state = self.selective_layers[layer_idx]
+        landmarks = state.landmarks
         batch_size, num_query_heads, _, head_dim = query_states.shape
         num_kv_heads = landmarks.size(1)
         num_groups = num_query_heads // num_kv_heads
         grouped_query = query_states.reshape(
             batch_size, num_kv_heads, num_groups, head_dim
         )
-        landmark_count = self.selective_landmark_counts[layer_idx]
         scores = self._selective_scorer.score(grouped_query, landmarks)
-        scores = scores[..., :landmark_count]
-        prompt_len = self.selective_prompt_lens[layer_idx]
+        scores = scores[..., : state.landmark_count]
         selected_chunks = math.ceil(
-            SELECTIVE_TOKEN_BUDGET / SELECTIVE_CHUNK_SIZE
+            self.selective_config.token_budget
+            / self.selective_config.chunk_size
         )
         selected_indices = scores.topk(
-            min(selected_chunks, landmark_count),
+            min(selected_chunks, state.landmark_count),
             dim=-1,
             sorted=False,
         ).indices
-        chunks = self.selective_landmark_indices[layer_idx].gather(
-            2, selected_indices
-        )
+        chunks = state.landmark_indices.gather(2, selected_indices)
         prepare_chunks = getattr(
             self.key_cache, "prepare_selected_chunks", None
         )
         if callable(prepare_chunks):
-            reordered = prepare_chunks(layer_idx, chunks, SELECTIVE_CHUNK_SIZE)
+            reordered = prepare_chunks(
+                layer_idx,
+                chunks,
+                self.selective_config.chunk_size,
+            )
             if reordered is not None:
                 chunks = reordered
-        offsets = torch.arange(SELECTIVE_CHUNK_SIZE, device=scores.device)
+        offsets = torch.arange(
+            self.selective_config.chunk_size,
+            device=scores.device,
+        )
         positions = (
-            chunks[..., None] * SELECTIVE_CHUNK_SIZE + offsets
+            chunks[..., None] * self.selective_config.chunk_size + offsets
         ).reshape(batch_size, num_kv_heads, -1)
-        positions.clamp_(max=prompt_len - 1)
+        positions.clamp_(max=state.prompt_len - 1)
 
         current_len = self.key_cache.get_seq_length(layer_idx)
-        if current_len > prompt_len:
+        if current_len > state.prompt_len:
             suffix = (
-                torch.arange(prompt_len, current_len, device=scores.device)
+                torch.arange(
+                    state.prompt_len,
+                    current_len,
+                    device=scores.device,
+                )
                 .reshape(1, 1, -1)
                 .expand(batch_size, num_kv_heads, -1)
             )
             positions = torch.cat([positions, suffix], dim=-1)
-        return torch.cat(
-            [positions, self.selective_exact_positions[layer_idx]], dim=-1
-        )
+        return torch.cat([positions, state.exact_positions], dim=-1)
 
     def supports_selective_retrieval(self, layer_idx: int) -> bool:
         value_supports = getattr(
@@ -322,7 +313,7 @@ class CompressedCache:
             self.key_cache, "supports_selective_retrieval", None
         )
         return (
-            layer_idx in self.selective_landmarks
+            layer_idx in self.selective_layers
             and callable(value_supports)
             and value_supports(layer_idx)
             and (not callable(key_supports) or key_supports(layer_idx))
@@ -335,6 +326,11 @@ class CompressedCache:
         layer_idx: int,
         cache_kwargs: dict[str, Any],
     ) -> None:
+        # Selective decode bypasses update(), so end the prefill phase here.
+        if key_states.size(-2) == 1 and getattr(
+            self.key_cache, "prefill", False
+        ):
+            self.update_events()
         append_keys = getattr(self.key_cache, "append_decode", None)
         if callable(append_keys):
             append_keys(key_states, layer_idx, cache_kwargs)
@@ -347,8 +343,8 @@ class CompressedCache:
         layer_idx: int,
         positions: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        exact_positions = self.selective_exact_positions[layer_idx]
-        positions = positions[..., : -exact_positions.size(-1)]
+        state = self.selective_layers[layer_idx]
+        positions = positions[..., : -state.exact_positions.size(-1)]
         retrieve_keys = getattr(self.key_cache, "retrieve_selected", None)
         if callable(retrieve_keys):
             keys = retrieve_keys(layer_idx, positions)
@@ -359,10 +355,8 @@ class CompressedCache:
                 positions[..., None].expand(-1, -1, -1, full_keys.size(-1)),
             )
         values = self.value_cache.retrieve_selected(keys, positions, layer_idx)
-        keys = torch.cat([keys, self.selective_exact_keys[layer_idx]], dim=2)
-        values = torch.cat(
-            [values, self.selective_exact_values[layer_idx]], dim=2
-        )
+        keys = torch.cat([keys, state.exact_keys], dim=2)
+        values = torch.cat([values, state.exact_values], dim=2)
         return keys, values
 
     def set_value_importance(
@@ -397,6 +391,21 @@ class CompressedCache:
 
         return keep.nonzero(as_tuple=False).flatten().sort().values
 
+    def _eviction_group_key(self, layer_idx: int) -> int:
+        """Identify the layers that have to evict the same positions.
+
+        The key cache may fit one shared factor across a group of layers,
+        which only means anything if row t is the same token in every layer
+        of that group. Evicting per layer would misalign those rows and
+        destroy the cross-layer structure the shared factor exists to
+        capture, so the whole group reuses the decision made by its first
+        layer. Caches without layer groups keep their per-layer behaviour.
+        """
+        get_group_bounds = getattr(self.key_cache, "_get_group_bounds", None)
+        if not callable(get_group_bounds):
+            return layer_idx
+        return get_group_bounds(layer_idx)[0]
+
     def _maybe_apply_eviction(
         self,
         key_states: torch.Tensor,
@@ -405,13 +414,18 @@ class CompressedCache:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if self.eviction_keep_ratio == 1.0:
             return key_states, value_states, None
-        value_importance = self._temp_value_importance.get(layer_idx)
         if key_states.shape[-2] == 1:
             return key_states, value_states, None
 
-        keep_positions = self._build_keep_positions(
-            value_importance, key_states.shape[-2]
-        ).to(device=key_states.device)
+        group_key = self._eviction_group_key(layer_idx)
+        keep_positions = self._group_keep_positions.get(group_key)
+        if keep_positions is None:
+            keep_positions = self._build_keep_positions(
+                self._temp_value_importance.get(layer_idx),
+                key_states.shape[-2],
+            )
+            self._group_keep_positions[group_key] = keep_positions
+        keep_positions = keep_positions.to(device=key_states.device)
         self.kept_positions[layer_idx] = keep_positions.detach().cpu()
         return (
             key_states.index_select(-2, keep_positions),
@@ -463,9 +477,9 @@ class CompressedCache:
             value_group_bounds is not None
             and layer_idx != value_group_bounds[1]
         ):
-            self._deferred_value_updates[layer_idx] = (
-                value_states,
-                dict(cache_kwargs),
+            self._deferred_value_updates[layer_idx] = DeferredValueUpdate(
+                value_states=value_states,
+                cache_kwargs=dict(cache_kwargs),
             )
             values = value_states
         elif (
@@ -550,14 +564,17 @@ class CompressedCache:
         for group_layer_idx in range(group_start, group_last_layer + 1):
             if group_layer_idx == layer_idx:
                 continue
-            deferred_values, deferred_kwargs = (
-                self._deferred_value_updates.pop(group_layer_idx)
+            deferred = self._deferred_value_updates.pop(group_layer_idx)
+            deferred.cache_kwargs["keys"] = (
+                self.key_cache.get_reconstructed_keys_only(group_layer_idx)
             )
-            recon_keys = self.key_cache.get_reconstructed_keys_only(
-                group_layer_idx
+            updates.append(
+                (
+                    group_layer_idx,
+                    deferred.value_states,
+                    deferred.cache_kwargs,
+                )
             )
-            deferred_kwargs["keys"] = recon_keys
-            updates.append((group_layer_idx, deferred_values, deferred_kwargs))
 
         current_recon_keys = self.key_cache.get_reconstructed_keys_only(
             layer_idx
@@ -585,22 +602,14 @@ class CompressedCache:
 
         if key_cr is not None and value_cr is not None:
             comp_ratio = 2 / ((1 / key_cr) + (1 / value_cr))
-            if self.selective_exact_keys:
+            if self.selective_layers:
                 original_key_bytes = sum(
-                    tensor.size(0)
-                    * tensor.size(1)
-                    * self.selective_true_prompt_lens[layer_idx]
-                    * tensor.size(3)
-                    * tensor.element_size()
-                    for layer_idx, tensor in self.selective_exact_keys.items()
+                    state.original_key_nbytes
+                    for state in self.selective_layers.values()
                 )
                 selective_bytes = sum(
-                    self._selective_bytes.get(layer_idx, 0)
-                    for layer_idx in self.selective_exact_keys
-                )
-                selective_bytes += sum(
-                    tensor.numel() * tensor.element_size()
-                    for tensor in self.selective_exact_values.values()
+                    state.key_overhead_nbytes + state.exact_value_nbytes
+                    for state in self.selective_layers.values()
                 )
                 selective_bytes += self._selective_scorer.nbytes
                 selective_bytes += self.rope_cache.nbytes

@@ -1,15 +1,48 @@
 import math
 import warnings
+from dataclasses import dataclass
 
 import torch
 
 from utils.turboquant import (
     CompressorParams,
+    TurboQuantFactor,
     dequantise_factor,
     get_turboquant_compressor,
     is_quantised_factor,
     quantise_factor,
 )
+
+Factor = torch.Tensor | TurboQuantFactor
+
+
+@dataclass(frozen=True)
+class SVDDecompositionConfig:
+    """Settings controlling how a segment store is decomposed."""
+
+    compression_ratio: float = 2.0
+    svd_backend: str = "linalg"
+    dtype: torch.dtype = torch.float32
+    n_iter: int = 4
+    quantise_a: bool = False
+    quantise_b: bool = False
+    compressor_bits: int = 4
+
+
+@dataclass
+class FactorSegment:
+    """A single stored factor covering `token_range`."""
+
+    token_range: tuple[int, int]
+    factor: Factor
+
+
+@dataclass
+class FactorPairSegment:
+    """The `(left, right)` factor pair covering `token_range`."""
+
+    token_range: tuple[int, int]
+    factors: tuple[Factor, Factor]
 
 
 def find_rank_wrt_cr(r, m, n):
@@ -109,33 +142,34 @@ def _truncate_svd_factors(
     return US, Vh
 
 
+def _maybe_quantise(
+    factor: torch.Tensor,
+    quantise: bool,
+    compressor_bits: int,
+) -> Factor:
+    return quantise_factor(factor, compressor_bits) if quantise else factor
+
+
 def decompose_grouped_xkv_to_segment_store(
     tensor: torch.Tensor,
     segment_ranges: list[list[tuple[int, int]]],
-    cr: float = 2.0,
-    dtype: torch.dtype = torch.float32,
-    svd_backend: str = "linalg",
-    n_iter: int = 4,
-    quantise_a: bool = False,
-    quantise_b: bool = False,
-    compressor_bits: int = 4,
-    **kwargs,
-):
+    config: SVDDecompositionConfig,
+) -> list[list[FactorPairSegment]]:
     """Decompose grouped xKV segments directly on the tensor's current device."""
-    del kwargs
+    cr = config.compression_ratio
 
     layer_segments = [[] for _ in range(tensor.size(0))]
     for batch_idx, batch_ranges in enumerate(segment_ranges):
         for start_idx, end_idx in batch_ranges:
             segment = tensor[batch_idx, ..., start_idx:end_idx, :]
-            if svd_backend == "cholqr":
+            if config.svd_backend == "cholqr":
                 rank = find_rank_wrt_cr(cr, segment.size(-2), segment.size(-1))
                 U, S, Vh = randomised_svd(
-                    segment.contiguous(), rank, n_iter=n_iter
+                    segment.contiguous(), rank, n_iter=config.n_iter
                 )
             else:
                 U, S, Vh = torch.linalg.svd(
-                    segment.to(dtype=dtype).contiguous(),
+                    segment.to(dtype=config.dtype).contiguous(),
                     full_matrices=False,
                 )
             US, Vh = _truncate_svd_factors(
@@ -148,27 +182,21 @@ def decompose_grouped_xkv_to_segment_store(
                 cr=cr,
             )
             layer_segments[batch_idx].append(
-                {
-                    "range": (start_idx, end_idx),
-                    "factors": (
-                        (
-                            quantise_factor(
-                                US.to(dtype=segment.dtype),
-                                compressor_bits,
-                            )
-                            if quantise_a
-                            else US.to(dtype=segment.dtype)
+                FactorPairSegment(
+                    token_range=(start_idx, end_idx),
+                    factors=(
+                        _maybe_quantise(
+                            US.to(dtype=segment.dtype),
+                            config.quantise_a,
+                            config.compressor_bits,
                         ),
-                        (
-                            quantise_factor(
-                                Vh.to(dtype=segment.dtype),
-                                compressor_bits,
-                            )
-                            if quantise_b
-                            else Vh.to(dtype=segment.dtype)
+                        _maybe_quantise(
+                            Vh.to(dtype=segment.dtype),
+                            config.quantise_b,
+                            config.compressor_bits,
                         ),
                     ),
-                }
+                )
             )
     return layer_segments
 
@@ -178,7 +206,7 @@ def _batch_decode_quant_factors(layer_segments):
     groups: dict[int, list] = {}
     for b_idx, batch_segs in enumerate(layer_segments):
         for s_idx, seg in enumerate(batch_segs):
-            for f_idx, factor in enumerate(seg["factors"]):
+            for f_idx, factor in enumerate(seg.factors):
                 if not is_quantised_factor(factor):
                     continue
                 p = factor.params
@@ -216,7 +244,7 @@ def _batch_decode_quant_factors(layer_segments):
 
 
 def reconstruct_segments(
-    layer_segments: list[list[dict[str, tuple]]],
+    layer_segments: list[list[FactorPairSegment]],
     suffix_tensor: torch.Tensor,
 ):
     """Reconstruct batched keys from stored factors and a live suffix.
@@ -230,7 +258,7 @@ def reconstruct_segments(
     for batch_idx, batch_segments in enumerate(layer_segments):
         recon_pieces = []
         for seg_idx, segment in enumerate(batch_segments):
-            A_raw, B_raw = segment["factors"]
+            A_raw, B_raw = segment.factors
             A_key = (batch_idx, seg_idx, 0)
             B_key = (batch_idx, seg_idx, 1)
             A = (

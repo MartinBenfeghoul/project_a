@@ -82,6 +82,86 @@ def is_quantised_factor(factor) -> bool:
     return isinstance(factor, TurboQuantFactor)
 
 
+def _params_view(params: CompressorParams, batch_slice: slice, batch: int):
+    return CompressorParams(
+        indices=params.indices[batch_slice],
+        norms=params.norms[batch_slice],
+        shape=(batch, *params.shape[1:]),
+        dtype=params.dtype,
+        bits=params.bits,
+        idx_pad=params.idx_pad,
+    )
+
+
+def pack_factors(factors: list):
+    """Stack per-batch factors of shape `[1, ...]` into one `[B, ...]` factor.
+
+    Returns the packed factor plus per-batch views onto its storage, so the
+    batched copy is the only one that stays alive.
+    """
+    if is_quantised_factor(factors[0]):
+        reference = factors[0].params
+        packed_params = CompressorParams(
+            indices=torch.stack(
+                [factor.params.indices.squeeze(0) for factor in factors]
+            ),
+            norms=torch.stack(
+                [factor.params.norms.squeeze(0) for factor in factors]
+            ),
+            shape=(len(factors), *reference.shape[1:]),
+            dtype=reference.dtype,
+            bits=reference.bits,
+            idx_pad=reference.idx_pad,
+        )
+        packed = TurboQuantFactor(params=packed_params, bits=factors[0].bits)
+        views = [
+            TurboQuantFactor(
+                params=_params_view(packed_params, slice(idx, idx + 1), 1),
+                bits=packed.bits,
+            )
+            for idx in range(len(factors))
+        ]
+        return packed, views
+
+    packed = torch.stack([factor.squeeze(0) for factor in factors])
+    return packed, [packed[idx].unsqueeze(0) for idx in range(len(factors))]
+
+
+def gather_factor_rows(factor, positions: torch.Tensor) -> torch.Tensor:
+    """Gather rows of a `[B, T, D]` factor at per-head `[B, H, S]` positions.
+
+    Quantised factors are decoded after gathering, so only the selected rows
+    are ever materialised.
+    """
+    batch, num_heads, selected_len = positions.shape
+    if not is_quantised_factor(factor):
+        return factor[:, None].expand(-1, num_heads, -1, -1).gather(
+            2,
+            positions[..., None].expand(-1, -1, -1, factor.size(-1)),
+        )
+
+    params = factor.params
+    num_groups = params.indices.size(-1)
+    indices = (
+        params.indices[:, None]
+        .expand(-1, num_heads, -1, -1)
+        .gather(2, positions[..., None].expand(-1, -1, -1, num_groups))
+    )
+    norms = params.norms[:, None].expand(-1, num_heads, -1).gather(2, positions)
+    dim = params.shape[-1]
+    compressor = get_turboquant_compressor(dim, factor.bits, indices.device)
+    return compressor.decode(
+        CompressorParams(
+            indices=indices,
+            norms=norms,
+            shape=(batch, num_heads, selected_len, dim),
+            dtype=params.dtype,
+            bits=params.bits,
+            idx_pad=params.idx_pad,
+        )
+    )
+
+
 def generate_rotation_matrix(dim, seed, device):
     generator = torch.Generator(device="cpu")
     generator.manual_seed(seed)

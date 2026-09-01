@@ -11,7 +11,6 @@ from utils import (
     LearnedLayerInit,
 )
 
-from .turboquant import TurboQuantCache
 from utils.turboquant import init_compressor
 
 
@@ -596,9 +595,3 @@ class MLPValueCache(SingleTensorCache):
         assert compressed_total != 0
 
         return original_total / compressed_total
-
-VALUE_CACHE_CLASSES = {
-    "baseline": SingleTensorCache,
-    "mlp": MLPValueCache,
-    "turboquant": TurboQuantCache,
-}

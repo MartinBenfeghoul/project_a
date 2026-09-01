@@ -1,20 +1,56 @@
 import math
+from dataclasses import dataclass, replace
 from typing import Any
 
 import torch
 
 from utils.matrix_decomposition import (
+    Factor,
+    FactorPairSegment,
+    FactorSegment,
+    SVDDecompositionConfig,
     decompose_grouped_xkv_to_segment_store,
     reconstruct_segments,
 )
 from utils.turboquant import (
+    dequantise_factor,
     factor_dtype,
     factor_nbytes,
     factor_shape,
+    gather_factor_rows,
+    is_quantised_factor,
+    pack_factors,
     quantise_factor,
 )
 from .base import SharedRopeCache, SingleTensorCache
-from .turboquant import TurboQuantCache
+
+
+@dataclass
+class XKVLayerState:
+    selective_overhead_bytes: int = 0
+    group_last_layer: int | None = None
+    compressed_len: int = 0
+    segments: list[list[FactorSegment]] | None = None
+    packed_right: Factor | None = None
+    fused_right: torch.Tensor | None = None
+    fused_chunk_size: int | None = None
+    inverse_permutation: torch.Tensor | None = None
+
+    @property
+    def is_compressed(self) -> bool:
+        return (
+            self.group_last_layer is not None
+            and self.segments is not None
+            and self.packed_right is not None
+        )
+
+
+@dataclass
+class XKVGroupState:
+    layer_indices: tuple[int, ...]
+    compressed_len: int
+    shared_segments: list[list[FactorSegment]]
+    packed_shared: Factor | None = None
 
 
 def get_expected_seq_len(cache_kwargs):
@@ -55,27 +91,19 @@ class DecomposedKeysCache(SingleTensorCache):
             ddp_cache_data=ddp_cache_data,
             rope_cache=rope_cache,
         )
-        self.r = comp_ratio
         self.unrope_keys = True
-        self.quantise_a = quantise_a
-        self.quantise_b = quantise_b
-        self.compressor_bits = compressor_bits
+        self.decomposition = SVDDecompositionConfig(
+            compression_ratio=comp_ratio,
+            quantise_a=quantise_a,
+            quantise_b=quantise_b,
+            compressor_bits=compressor_bits,
+        )
 
         self.prefill = True
-        self.lr_keys = {}
         self.comp_ratio = None
-        self.compressed_len = 0
 
     def update_events(self, *args, **kwargs):
         self.prefill = False
-
-    def _decomposition_kwargs(self):
-        return {
-            "cr": self.r,
-            "quantise_a": self.quantise_a,
-            "quantise_b": self.quantise_b,
-            "compressor_bits": self.compressor_bits,
-        }
 
 
 class XKVKeysCache(DecomposedKeysCache):
@@ -117,17 +145,23 @@ class XKVKeysCache(DecomposedKeysCache):
 
         self.layer_group_size = layer_group_size
         self.num_layers = num_layers
-        self.xkv_svd_backend = xkv_svd_backend
-        self.shared_a = {}
-        self.group_metadata = {}
-        self.packed_shared_a = {}
-        self.packed_lr_keys = {}
-        self.fused_lr_keys = {}
-        self.fused_chunk_sizes = {}
-        self.selective_bytes = {}
+        self.decomposition = replace(
+            self.decomposition, svd_backend=xkv_svd_backend
+        )
+        self.layer_states: dict[int, XKVLayerState] = {}
+        self.group_states: dict[int, XKVGroupState] = {}
         from efficiency import FusedKeyReconstructor
 
         self.fused_reconstructor = FusedKeyReconstructor()
+
+    def _layer_state(self, layer_idx: int) -> XKVLayerState:
+        return self.layer_states.setdefault(layer_idx, XKVLayerState())
+
+    def _compressed_layer_state(self, layer_idx: int) -> XKVLayerState:
+        state = self.layer_states.get(layer_idx)
+        if state is None or not state.is_compressed:
+            raise ValueError(f"No xKV state found for layer {layer_idx}.")
+        return state
 
     def reorder_cache(self, beam_idx: torch.LongTensor):
         raise NotImplementedError(
@@ -207,71 +241,69 @@ class XKVKeysCache(DecomposedKeysCache):
         ]
         return shared_segments, per_layer_segments
 
-    def _xkv_decomposition_kwargs(self):
-        decompose_kwargs = self._decomposition_kwargs()
-        quantise_a = decompose_kwargs.pop("quantise_a")
-        quantise_b = decompose_kwargs.pop("quantise_b")
-        compressor_bits = decompose_kwargs.pop("compressor_bits")
-        decompose_kwargs["svd_backend"] = self.xkv_svd_backend
-        return decompose_kwargs, quantise_a, quantise_b, compressor_bits
-
     def set_selective_overhead(self, layer_idx, nbytes):
         """Record persistent selective-key bytes for rank budgeting."""
-        self.selective_bytes[layer_idx] = nbytes
+        self._layer_state(layer_idx).selective_overhead_bytes = nbytes
 
-    def _align_fused_rank(self, decompose_kwargs, tensor, group_layers):
-        """Fit aligned xKV factors into the total key budget."""
+    def _group_decomposition_config(
+        self,
+        tensor: torch.Tensor,
+        group_layers,
+    ) -> SVDDecompositionConfig:
+        """Fit aligned xKV factors for one group into the total key budget."""
         from efficiency import adjust_rank
 
         m, n = tensor.shape[-2:]
         rank = adjust_rank(
             m,
             n,
-            decompose_kwargs["cr"],
+            self.decomposition.compression_ratio,
             sum(
-                self.selective_bytes.get(layer_idx, 0)
+                self._layer_state(layer_idx).selective_overhead_bytes
                 for layer_idx in group_layers
             ),
             tensor.size(0),
             tensor.element_size(),
         )
-        decompose_kwargs["cr"] = m * n / (rank * (m + n))
+        return replace(
+            self.decomposition,
+            compression_ratio=m * n / (rank * (m + n)),
+            quantise_b=False,
+        )
 
     def _split_grouped_xkv_segments(
         self,
-        grouped_segments,
+        grouped_segments: list[list[FactorPairSegment]],
         split_sizes,
         group_layers,
         batch_size,
-        quantise_b,
-        compressor_bits,
     ):
         shared_segments, per_layer_segments = self._empty_xkv_segments(
             batch_size, group_layers
         )
         for batch_idx, batch_segments in enumerate(grouped_segments):
             for segment in batch_segments:
-                shared_factor, grouped_right = segment["factors"]
+                shared_factor, grouped_right = segment.factors
                 shared_segments[batch_idx].append(
-                    {
-                        "range": segment["range"],
-                        "factor": shared_factor,
-                    }
+                    FactorSegment(
+                        token_range=segment.token_range,
+                        factor=shared_factor,
+                    )
                 )
                 right_factors = torch.split(grouped_right, split_sizes, dim=-1)
                 for layer_segments, right_factor in zip(
                     per_layer_segments, right_factors
                 ):
-                    if quantise_b:
+                    if self.decomposition.quantise_b:
                         right_factor = quantise_factor(
                             right_factor,
-                            compressor_bits,
+                            self.decomposition.compressor_bits,
                         )
                     layer_segments[batch_idx].append(
-                        {
-                            "range": segment["range"],
-                            "factor": right_factor,
-                        }
+                        FactorSegment(
+                            token_range=segment.token_range,
+                            factor=right_factor,
+                        )
                     )
         return shared_segments, per_layer_segments
 
@@ -282,66 +314,60 @@ class XKVKeysCache(DecomposedKeysCache):
         suffix_start,
         shared_segments,
         per_layer_segments,
-        extra_metadata=None,
     ):
-        self.shared_a[group_last_layer] = shared_segments
-        for group_layer_idx, layer_segments in zip(
-            group_layers, per_layer_segments
-        ):
-            self.lr_keys[group_layer_idx] = layer_segments
-            metadata = {
-                "group_last_layer": group_last_layer,
-                "compressed_len": suffix_start,
-            }
-            if extra_metadata:
-                metadata.update(extra_metadata)
-            self.group_metadata[group_layer_idx] = metadata
-        self.comp_ratio = self.calc_compression_ratio()
-        if not shared_segments[0]:
-            return
-        # packing avoids looping through batch elements and per-step stacking during decoding
-        self.packed_shared_a[group_last_layer] = torch.stack(
-            [segments[0]["factor"].squeeze(0) for segments in shared_segments]
+        group_state = XKVGroupState(
+            layer_indices=tuple(group_layers),
+            compressed_len=suffix_start,
+            shared_segments=shared_segments,
         )
-        for batch_idx, segments in enumerate(shared_segments):
-            segments[0]["factor"] = self.packed_shared_a[group_last_layer][
-                batch_idx
-            ].unsqueeze(0)
+        self.group_states[group_last_layer] = group_state
+        for group_layer_idx, layer_segments in zip(
+            group_layers,
+            per_layer_segments,
+        ):
+            state = self._layer_state(group_layer_idx)
+            state.group_last_layer = group_last_layer
+            state.compressed_len = suffix_start
+            state.segments = layer_segments
+        if not shared_segments[0]:
+            self.comp_ratio = self.calc_compression_ratio()
+            return
+        # Packing avoids per-batch stacking during every decode step.
+        group_state.packed_shared, shared_views = pack_factors(
+            [segments[0].factor for segments in shared_segments]
+        )
+        for segments, view in zip(shared_segments, shared_views):
+            segments[0].factor = view
         for group_layer_idx, layer_segments in zip(
             group_layers, per_layer_segments
         ):
-            self.packed_lr_keys[group_layer_idx] = torch.stack(
-                [
-                    segments[0]["factor"].squeeze(0)
-                    for segments in layer_segments
-                ]
+            state = self._layer_state(group_layer_idx)
+            state.packed_right, right_views = pack_factors(
+                [segments[0].factor for segments in layer_segments]
             )
-            for batch_idx, segments in enumerate(layer_segments):
-                segments[0]["factor"] = self.packed_lr_keys[group_layer_idx][
-                    batch_idx
-                ].unsqueeze(0)
+            for segments, view in zip(layer_segments, right_views):
+                segments[0].factor = view
+        self.comp_ratio = self.calc_compression_ratio()
 
     def calc_compression_ratio(self):
-        layers_by_group: dict[int, list[int]] = {}
-        for layer_idx, metadata in self.group_metadata.items():
-            layers_by_group.setdefault(metadata["group_last_layer"], []).append(
-                layer_idx
-            )
-
         crs = 0.0
         num_segments = 0
-        for group_last, group_layers in layers_by_group.items():
-            for batch_idx, batch_shared in enumerate(self.shared_a[group_last]):
+        for group_state in self.group_states.values():
+            for batch_idx, batch_shared in enumerate(
+                group_state.shared_segments
+            ):
                 for seg_idx, shared_segment in enumerate(batch_shared):
-                    A = shared_segment["factor"]
+                    A = shared_segment.factor
                     a_shape = factor_shape(A)
                     leading = math.prod(a_shape[:-2])
                     m = a_shape[-2]
                     n = sum(
                         factor_shape(
-                            self.lr_keys[l][batch_idx][seg_idx]["factor"]
+                            self._compressed_layer_state(layer_idx)
+                            .segments[batch_idx][seg_idx]
+                            .factor
                         )[-1]
-                        for l in group_layers
+                        for layer_idx in group_state.layer_indices
                     )
                     original = (
                         leading
@@ -354,9 +380,11 @@ class XKVKeysCache(DecomposedKeysCache):
                     )
                     compressed = factor_nbytes(A) + sum(
                         factor_nbytes(
-                            self.lr_keys[l][batch_idx][seg_idx]["factor"]
+                            self._compressed_layer_state(layer_idx)
+                            .segments[batch_idx][seg_idx]
+                            .factor
                         )
-                        for l in group_layers
+                        for layer_idx in group_state.layer_indices
                     )
                     crs += original / compressed
                     num_segments += 1
@@ -369,7 +397,6 @@ class XKVKeysCache(DecomposedKeysCache):
         batch_size = group_tensors[-1].size(0)
 
         suffix_start = group_tensors[-1].size(-2)
-        self.compressed_len = suffix_start
         if suffix_start == 0:
             shared_segments, per_layer_segments = self._empty_xkv_segments(
                 batch_size, group_layers
@@ -382,16 +409,12 @@ class XKVKeysCache(DecomposedKeysCache):
                 cache_kwargs,
             )
             segment_ranges = [[(0, suffix_start)] for _ in range(batch_size)]
-            decompose_kwargs, quantise_a, quantise_b, compressor_bits = (
-                self._xkv_decomposition_kwargs()
-            )
-            self._align_fused_rank(decompose_kwargs, group_prefix, group_layers)
             grouped_segments = decompose_grouped_xkv_to_segment_store(
                 group_prefix.unsqueeze(1),
                 segment_ranges=segment_ranges,
-                quantise_a=quantise_a,
-                compressor_bits=compressor_bits,
-                **decompose_kwargs,
+                config=self._group_decomposition_config(
+                    group_prefix, group_layers
+                ),
             )
             shared_segments, per_layer_segments = (
                 self._split_grouped_xkv_segments(
@@ -399,8 +422,6 @@ class XKVKeysCache(DecomposedKeysCache):
                     split_sizes,
                     group_layers,
                     batch_size,
-                    quantise_b,
-                    compressor_bits,
                 )
             )
 
@@ -423,29 +444,32 @@ class XKVKeysCache(DecomposedKeysCache):
         SingleTensorCache.update(self, key_states, layer_idx, cache_kwargs)
 
     def supports_selective_retrieval(self, layer_idx: int) -> bool:
-        return layer_idx in self.packed_lr_keys
+        state = self.layer_states.get(layer_idx)
+        return state is not None and state.is_compressed
 
     def _fused_right_factor(self, layer_idx, num_heads):
-        """Reshape packed_lr_keys into expected shape for kernel"""
-        right = self.fused_lr_keys.get(layer_idx)
-        if right is None:
-            packed = self.packed_lr_keys[layer_idx]
+        """Reshape the packed right factor into the kernel layout."""
+        state = self._compressed_layer_state(layer_idx)
+        if state.fused_right is None:
+            packed = state.packed_right
             batch_size, rank, flat_dim = packed.shape
             head_dim = flat_dim // num_heads
-            right = (
+            state.fused_right = (
                 packed.reshape(batch_size, rank, num_heads, head_dim)
                 .permute(0, 2, 3, 1)
                 .contiguous()
             )
-            self.fused_lr_keys[layer_idx] = right
-        return right
+        return state.fused_right
 
     def prepare_selected_chunks(self, layer_idx, chunks, chunk_size):
-        metadata = self.group_metadata[layer_idx]
-        shared = self.packed_shared_a[metadata["group_last_layer"]]
+        state = self._compressed_layer_state(layer_idx)
+        group_state = self.group_states[state.group_last_layer]
+        shared = group_state.packed_shared
         if (
             not self.unrope_keys
-            or "inverse_permutation" in metadata
+            or is_quantised_factor(shared)
+            or is_quantised_factor(state.packed_right)
+            or state.inverse_permutation is not None
             or not self.layers[layer_idx].supports_fused_rope
             or not self.fused_reconstructor.available()
         ):
@@ -455,14 +479,15 @@ class XKVKeysCache(DecomposedKeysCache):
             shared, right, chunks, chunk_size
         ):
             return None
-        self.fused_chunk_sizes[layer_idx] = chunk_size
+        state.fused_chunk_size = chunk_size
         return self.fused_reconstructor.reorder(layer_idx, chunks, chunk_size)
 
     @property
     def selective_reconstruction_nbytes(self):
         return self.fused_reconstructor.nbytes + sum(
-            tensor.numel() * tensor.element_size()
-            for tensor in self.fused_lr_keys.values()
+            state.fused_right.numel() * state.fused_right.element_size()
+            for state in self.layer_states.values()
+            if state.fused_right is not None
         )
 
     @torch.no_grad()
@@ -471,59 +496,49 @@ class XKVKeysCache(DecomposedKeysCache):
         layer_idx: int,
         positions: torch.Tensor,
     ) -> torch.Tensor:
-        metadata = self.group_metadata[layer_idx]
-        group_last = metadata["group_last_layer"]
-
-        shared = self.packed_shared_a[group_last]
-        right = self.packed_lr_keys[layer_idx]
+        state = self._compressed_layer_state(layer_idx)
+        group_state = self.group_states[state.group_last_layer]
+        shared = group_state.packed_shared
+        right = state.packed_right
         suffix = self.layers[layer_idx].tensor
         prefix_len = positions.size(-1) - suffix.size(-2)
         prefix_positions = positions[..., :prefix_len]
-        batch_size, num_heads, selected_len = prefix_positions.shape
-        rank = shared.size(-1)
-        head_dim = right.size(-1) // num_heads
-        fused_right = self.fused_lr_keys.get(layer_idx)
+        batch_size, num_heads, _ = prefix_positions.shape
+        rank = factor_shape(shared)[-1]
+        head_dim = factor_shape(right)[-1] // num_heads
         if (
-            fused_right is not None
+            state.fused_right is not None
             and layer_idx in self.fused_reconstructor.states
         ):
             packed_rope = self.layers[layer_idx]._fused_rope(
-                metadata["compressed_len"],
+                state.compressed_len,
                 shared,
             )
             keys = self.fused_reconstructor.reconstruct(
                 layer_idx,
                 shared,
-                fused_right,
+                state.fused_right,
                 packed_rope,
-                self.fused_chunk_sizes[layer_idx],
+                state.fused_chunk_size,
             )
         else:
-            selected_a = (
-                shared[:, None]
-                .expand(-1, num_heads, -1, -1)
-                .gather(
-                    2,
-                    prefix_positions[..., None].expand(
-                        -1, -1, selected_len, rank
-                    ),
-                )
+            selected_a = gather_factor_rows(shared, prefix_positions)
+            right = (
+                dequantise_factor(right)
+                .reshape(batch_size, rank, num_heads, head_dim)
+                .transpose(1, 2)
             )
-            right = right.reshape(
-                batch_size, rank, num_heads, head_dim
-            ).transpose(1, 2)
             keys = torch.matmul(selected_a, right)
             if self.unrope_keys:
                 keys = self.layers[layer_idx]._rope_selected(
                     keys,
                     prefix_positions,
-                    metadata["compressed_len"],
+                    state.compressed_len,
                     inverse=False,
                 )
-
         if suffix.size(-2):
             suffix_positions = (
-                positions[..., prefix_len:] - metadata["compressed_len"]
+                positions[..., prefix_len:] - state.compressed_len
             )
             suffix_keys = suffix.gather(
                 2,
@@ -533,20 +548,24 @@ class XKVKeysCache(DecomposedKeysCache):
         return keys
 
     def _reconstruct_keys(self, keys, layer_idx):
-        metadata = self.group_metadata.get(layer_idx)
-        if metadata is None:
-            raise ValueError(f"No xKV metadata found for layer {layer_idx}.")
-
-        shared_segments = self.shared_a[metadata["group_last_layer"]]
-        layer_segments = self.lr_keys[layer_idx]
+        state = self._compressed_layer_state(layer_idx)
+        group_state = self.group_states[state.group_last_layer]
+        shared_segments = group_state.shared_segments
+        layer_segments = state.segments
 
         paired_segments = [
             [
-                {
-                    "range": s["range"],
-                    "factors": (s["factor"], l["factor"]),
-                }
-                for s, l in zip(batch_shared, batch_layer)
+                FactorPairSegment(
+                    token_range=shared_segment.token_range,
+                    factors=(
+                        shared_segment.factor,
+                        layer_segment.factor,
+                    ),
+                )
+                for shared_segment, layer_segment in zip(
+                    batch_shared,
+                    batch_layer,
+                )
             ]
             for batch_shared, batch_layer in zip(
                 shared_segments, layer_segments
@@ -570,10 +589,26 @@ class XKVKeysCache(DecomposedKeysCache):
         if self.unrope_keys:
             prefix_keys = self.layers[layer_idx]._apply_rope(
                 prefix_keys,
-                compressed_len=metadata["compressed_len"],
+                compressed_len=state.compressed_len,
             )
         recon_keys = torch.cat([prefix_keys, keys], dim=-2)
         return recon_keys
+
+    def get_reconstructed_keys_only(
+        self,
+        layer_idx: int,
+    ) -> torch.Tensor | None:
+        """Reconstruct a layer's compressed prefix without its live suffix.
+
+        The value cache trains against the keys it will actually see at decode
+        time, so it needs the lossy reconstruction rather than the exact keys.
+        Returns None when the layer has not been decomposed yet.
+        """
+        state = self.layer_states.get(layer_idx)
+        if state is None or not state.is_compressed:
+            return None
+        suffix_keys = self.layers[layer_idx].tensor
+        return self._reconstruct_keys(suffix_keys[..., :0, :], layer_idx)
 
     def update(
         self,
@@ -595,7 +630,8 @@ class XKVKeysCache(DecomposedKeysCache):
                 self._evict(layer_idx=group_layer_idx, end_idx=suffix_start)
             return keys
 
-        if layer_idx in self.lr_keys:
+        state = self.layer_states.get(layer_idx)
+        if state is not None and state.is_compressed:
             recon_keys = self._reconstruct_keys(keys, layer_idx)
             check_recon_length(recon_keys, cache_kwargs)
             return recon_keys
@@ -606,10 +642,3 @@ class XKVKeysCache(DecomposedKeysCache):
             "group, pass num_layers through later plumbing so the group "
             "boundary is known."
         )
-
-
-KEY_CACHE_CLASSES = {
-    "baseline": SingleTensorCache,
-    "xkv": XKVKeysCache,
-    "turboquant": TurboQuantCache,
-}

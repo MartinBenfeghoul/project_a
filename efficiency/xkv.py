@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+from dataclasses import dataclass, fields
 from pathlib import Path
 
 import torch
@@ -214,21 +215,24 @@ class FusedLandmarkScorer:
         )
         self.sum = torch.empty_like(self.norm)
 
+    @staticmethod
+    def _reference_score(
+        query: torch.Tensor,
+        landmarks: torch.Tensor,
+    ) -> torch.Tensor:
+        """Portable equivalent of the fused kernel, for CPU and odd shapes."""
+        scores = torch.matmul(
+            query, landmarks.transpose(-1, -2)
+        ) * query.size(-1) ** -0.5
+        return scores.softmax(dim=-1).amax(dim=2)
+
     def score(
         self,
         query: torch.Tensor,
         landmarks: torch.Tensor,
     ) -> torch.Tensor:
         if not self.supports(query, landmarks):
-            raise RuntimeError(
-                "FusedLandmarkScorer.score: unsupported inputs for the "
-                f"fused xKV landmark kernel (ops_loaded={_load_ops()}, "
-                f"query.is_cuda={query.is_cuda}, query.dtype={query.dtype}, "
-                f"landmarks.dtype={landmarks.dtype}, "
-                f"head_dim={query.size(-1)} (must be 128), "
-                f"num_landmarks={landmarks.size(-2)} (must be a multiple "
-                "of 8)."
-            )
+            return self._reference_score(query, landmarks)
         num_landmarks = landmarks.size(-2)
         self._allocate(query, num_landmarks)
         batch_size, num_heads, num_groups, head_dim = query.shape
@@ -256,6 +260,21 @@ class FusedLandmarkScorer:
         )
 
 
+@dataclass
+class FusedReconstructorLayerState:
+    """Scratch buffers the fused kernels reuse across decode steps"""
+
+    chunks: torch.Tensor
+    chunks_i32: torch.Tensor
+    offsets: torch.Tensor
+    counts: torch.Tensor
+    keys: torch.Tensor
+
+    @property
+    def nbytes(self) -> int:
+        return sum(_tensor_nbytes(getattr(self, f.name)) for f in fields(self))
+
+
 class FusedKeyReconstructor:
     """Fuse selected-row reconstruction, RoPE, and reconstruction-cache reuse"""
 
@@ -264,7 +283,7 @@ class FusedKeyReconstructor:
         return _load_ops()
 
     def __init__(self):
-        self.states = {}
+        self.states: dict[int, FusedReconstructorLayerState] = {}
         self.output = None
 
     @staticmethod
@@ -289,23 +308,23 @@ class FusedKeyReconstructor:
         batch_size, num_heads, select_sets = chunks.shape
         shape = (batch_size, num_heads, select_sets)
         state = self.states.get(layer_idx)
-        if state is not None and state["chunks"].shape == shape:
+        if state is not None and state.chunks.shape == shape:
             return state
         device = chunks.device
-        state = {
-            "chunks": torch.full(shape, -1, device=device, dtype=torch.int64),
-            "chunks_i32": torch.empty(shape, device=device, dtype=torch.int32),
-            "offsets": torch.empty(
+        state = FusedReconstructorLayerState(
+            chunks=torch.full(shape, -1, device=device, dtype=torch.int64),
+            chunks_i32=torch.empty(shape, device=device, dtype=torch.int32),
+            offsets=torch.empty(
                 batch_size * num_heads * select_sets,
                 device=device,
                 dtype=torch.int32,
             ),
-            "counts": torch.empty(
+            counts=torch.empty(
                 batch_size * num_heads,
                 device=device,
                 dtype=torch.int32,
             ),
-            "keys": torch.empty(
+            keys=torch.empty(
                 batch_size,
                 num_heads,
                 select_sets * chunk_size,
@@ -313,7 +332,7 @@ class FusedKeyReconstructor:
                 device=device,
                 dtype=torch.bfloat16,
             ),
-        }
+        )
         self.states[layer_idx] = state
         return state
 
@@ -326,15 +345,15 @@ class FusedKeyReconstructor:
         state = self._state(layer_idx, chunks, chunk_size)
         batch_size, num_heads, select_sets = chunks.shape
         torch.ops._shadowkv.reorder_keys_and_compute_offsets(
-            state["chunks"],
+            state.chunks,
             chunks.contiguous(),
-            state["offsets"],
-            state["counts"],
+            state.offsets,
+            state.counts,
             batch_size,
             num_heads,
             select_sets,
         )
-        return state["chunks"]
+        return state.chunks
 
     def reconstruct(
         self,
@@ -345,18 +364,18 @@ class FusedKeyReconstructor:
         chunk_size: int,
     ) -> torch.Tensor:
         state = self.states[layer_idx]
-        chunks = state["chunks"]
+        chunks = state.chunks
         batch_size, num_heads, select_sets = chunks.shape
         sparse_budget = select_sets * chunk_size
         head_dim = right.size(-2)
         rank = shared.size(-1)
-        if self.output is None or self.output.shape != state["keys"].shape:
-            self.output = torch.empty_like(state["keys"])
+        if self.output is None or self.output.shape != state.keys.shape:
+            self.output = torch.empty_like(state.keys)
 
         torch.ops._shadowkv.gather_copy_d2d_with_offsets(
-            state["keys"],
-            state["offsets"],
-            state["counts"],
+            state.keys,
+            state.offsets,
+            state.counts,
             batch_size,
             num_heads,
             sparse_budget * head_dim,
@@ -364,8 +383,8 @@ class FusedKeyReconstructor:
             sparse_budget * head_dim,
             select_sets,
         )
-        state["chunks_i32"].copy_(chunks)
-        chunk_ids = state["chunks_i32"]
+        state.chunks_i32.copy_(chunks)
+        chunk_ids = state.chunks_i32
         cos_sin = packed_rope
         torch.ops._shadowkv.batch_gather_gemm(
             shared.contiguous(),
@@ -382,14 +401,14 @@ class FusedKeyReconstructor:
             sparse_budget,
             cos_sin.size(0),
             chunk_size,
-            state["counts"],
+            state.counts,
         )
         torch.ops._shadowkv.apply_rotary_pos_emb_push_cache_opt(
             self.output,
             cos_sin,
             chunk_ids,
-            state["keys"],
-            state["counts"],
+            state.keys,
+            state.counts,
             batch_size,
             num_heads,
             sparse_budget,
@@ -402,22 +421,21 @@ class FusedKeyReconstructor:
             chunk_ids.stride(0),
             chunk_ids.stride(1),
             chunk_ids.stride(2),
-            state["keys"].stride(0),
-            state["keys"].stride(1),
-            state["keys"].stride(2),
+            state.keys.stride(0),
+            state.keys.stride(1),
+            state.keys.stride(2),
             0,
             sparse_budget,
             head_dim // 2,
             chunk_size,
         )
-        return state["keys"]
+        return state.keys
 
     def hit_counts(self, layer_idx: int) -> torch.Tensor:
-        return self.states[layer_idx]["counts"]
+        return self.states[layer_idx].counts
 
     @property
     def nbytes(self) -> int:
-        tensors = [self.output]
-        for state in self.states.values():
-            tensors.extend(state.values())
-        return sum(_tensor_nbytes(tensor) for tensor in tensors)
+        return _tensor_nbytes(self.output) + sum(
+            state.nbytes for state in self.states.values()
+        )
