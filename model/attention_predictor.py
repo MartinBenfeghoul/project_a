@@ -365,11 +365,7 @@ def install_attention_predictor_hooks(
 def get_attn_predictor_hook_handles(args, model):
     attn_predictor = None
     attn_predictor_hook_handles = []
-    if args.use_attn_predictor:
-        if args.attn_predictor_path is None:
-            raise ValueError(
-                "--use_attn_predictor requires --attn_predictor_path"
-            )
+    if args.attn_predictor_path is not None:
         attn_predictor = load_attention_predictor(
             args.attn_predictor_path,
             device=next(model.parameters()).device,
@@ -401,12 +397,10 @@ def _load_attn_predictor_config(attn_predictor_path: str) -> dict:
 
 
 def apply_attn_predictor_config(args):
-    if not args.use_attn_predictor:
+    if args.attn_predictor_path is None:
         args.attn_predictor_history_step = None
         args.attn_predictor_block_size = None
         return args
-    if args.attn_predictor_path is None:
-        raise ValueError("--use_attn_predictor requires --attn_predictor_path")
 
     config = _load_attn_predictor_config(args.attn_predictor_path)
     required_keys = ("history_step", "block_size")

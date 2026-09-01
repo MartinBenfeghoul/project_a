@@ -270,15 +270,10 @@ def parse_args():
         help="Add a linear residual W_linear to the MLP, initialised as pinv(W_k) @ W_v from the model's projection weights. Use --no-use_residual to disable.",
     )
     parser.add_argument(
-        "--use_attn_predictor",
-        action="store_true",
-        help="Use a shared CNN attention predictor to guide value residual selection.",
-    )
-    parser.add_argument(
         "--attn_predictor_path",
         type=str,
         default=None,
-        help="Path to a checkpoint from train_attention_predictor.py.",
+        help="Path to a checkpoint from train_attention_predictor.py. Providing it enables the shared CNN attention predictor that guides value residual selection.",
     )
     parser.add_argument(
         "--eviction_keep_ratio",
@@ -301,9 +296,9 @@ def parse_args():
     args = apply_attn_predictor_config(args)
     if args.v_cache_type == "mlp" and args.target_cr is None:
         parser.error("--target_cr is required when --v_cache_type=mlp.")
-    if args.eviction_keep_ratio < 1 and not args.use_attn_predictor:
+    if args.eviction_keep_ratio < 1 and args.attn_predictor_path is None:
         raise ValueError(
-            "--eviction_keep_ratio < 1 requires --use_attn_predictor."
+            "--eviction_keep_ratio < 1 requires --attn_predictor_path."
         )
     if args.meta_weights_path is not None and args.value_mlp_weights_path is not None:
         raise ValueError(
