@@ -211,3 +211,81 @@ def test_residual_reconstructs_values_it_was_derived_from():
 
     assert errors[True] < 0.5 * errors[False], errors
     assert errors[True] < 0.1, errors
+
+
+@pytest.mark.parametrize("turboquant_residuals", (False, True))
+def test_selected_residual_rows_match_a_full_decode(turboquant_residuals):
+    """Selective retrieval decodes rows one by one, quantised or not.
+
+    Quantised residuals are stored as CompressorParams rather than a tensor,
+    so the row lookup has to slice the compressed store and decode that,
+    which is what this pins.
+    """
+    torch.manual_seed(25)
+    batch_size, num_heads, seq_len, head_dim = 1, 2, 256, 16
+    cos, sin = rope_cos_sin(batch_size, seq_len, head_dim)
+    keys = apply_model_rope(
+        torch.randn(batch_size, num_heads, seq_len, head_dim), cos, sin
+    )
+    values = torch.randn_like(keys)
+
+    cache = MLPValueCache(
+        # Low enough to afford a residual row for every token.
+        target_cr=1e-3,
+        num_epochs=0,
+        turboquant_residuals=turboquant_residuals,
+        compressor_bits=4,
+        rope_cache=SharedRopeCache(),
+    )
+    _prefill(cache, keys, values, cos, sin)
+
+    layer = cache.layers[0]
+    assert layer.indices.numel() > 0, "no residuals were stored"
+
+    positions = (
+        torch.arange(seq_len // 2)
+        .reshape(1, 1, -1)
+        .expand(batch_size, num_heads, -1)
+    )
+    rows, _ = layer._lookup_stored_rows(positions)
+
+    torch.testing.assert_close(
+        layer._decode_residual_rows(rows),
+        layer._decode_residuals().index_select(0, rows),
+    )
+
+
+@pytest.mark.parametrize("turboquant_residuals", (False, True))
+def test_selective_retrieval_reads_stored_residuals(turboquant_residuals):
+    """The selective decode path reaches the residual store without blowing up."""
+    torch.manual_seed(26)
+    batch_size, num_heads, seq_len, head_dim = 1, 2, 256, 16
+    cos, sin = rope_cos_sin(batch_size, seq_len, head_dim)
+    keys = apply_model_rope(
+        torch.randn(batch_size, num_heads, seq_len, head_dim), cos, sin
+    )
+    values = torch.randn_like(keys)
+
+    cache = MLPValueCache(
+        target_cr=1e-3,
+        num_epochs=0,
+        turboquant_residuals=turboquant_residuals,
+        compressor_bits=4,
+        rope_cache=SharedRopeCache(),
+    )
+    _prefill(cache, keys, values, cos, sin)
+    layer = cache.layers[0]
+    layer.prefill = False
+    assert cache.supports_selective_retrieval(0)
+    assert layer.indices.numel() > 0
+
+    selected = 32
+    positions = (
+        torch.arange(selected)
+        .reshape(1, 1, -1)
+        .expand(batch_size, num_heads, -1)
+    )
+    retrieved = cache.retrieve_selected(keys[:, :, :selected], positions, 0)
+
+    assert retrieved.shape == (batch_size, num_heads, selected, head_dim)
+    assert torch.isfinite(retrieved).all()

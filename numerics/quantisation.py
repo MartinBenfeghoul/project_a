@@ -93,6 +93,25 @@ def _params_view(params: CompressorParams, batch_slice: slice, batch: int):
     )
 
 
+def select_compressed_rows(
+    params: CompressorParams,
+    rows: torch.Tensor,
+) -> CompressorParams:
+    """Row-slice an `[N, D]` compressed store, still compressed.
+
+    Lets a caller decode only the rows it asked for instead of expanding the
+    whole store to pick a few out of it.
+    """
+    return CompressorParams(
+        indices=params.indices.index_select(0, rows),
+        norms=params.norms.index_select(0, rows),
+        shape=(rows.numel(), *params.shape[1:]),
+        dtype=params.dtype,
+        bits=params.bits,
+        idx_pad=params.idx_pad,
+    )
+
+
 def pack_factors(factors: list):
     """Stack per-batch factors of shape `[1, ...]` into one `[B, ...]` factor.
 

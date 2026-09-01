@@ -8,7 +8,7 @@ import torch
 from model.mlp import MLP
 from typing import Any, Callable
 from model.meta_learning import LearnedInit, LearnedLayerInit
-from numerics.quantisation import init_compressor
+from numerics.quantisation import init_compressor, select_compressed_rows
 
 
 class MLPValueLayer(SingleTensorDynamicLayer):
@@ -104,9 +104,15 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             return self.compressor.decode(self.value_residuals)
         return self.value_residuals
 
+    def _decode_residual_rows(self, rows: torch.Tensor) -> torch.Tensor:
+        """Decode just the stored residual rows at `rows`."""
+        if self.compressor is None:
+            return self.value_residuals.index_select(0, rows)
+        return self.compressor.decode(
+            select_compressed_rows(self.value_residuals, rows)
+        )
+
     def _empty_residuals(self):
-        # TODO: if quantisation of residual is enabled, this will break since
-        # value_residuals are CompressorParams, not tensors
         if self.compressor is not None:
             return torch.empty(
                 0,
@@ -321,9 +327,9 @@ class MLPValueLayer(SingleTensorDynamicLayer):
 
         if self.indices.numel() > 0:
             stored_rows, valid = self._lookup_stored_rows(prefix_positions)
-            stored_values = self.value_residuals.index_select(
-                0, stored_rows
-            ).to(values.dtype)
+            stored_values = self._decode_residual_rows(stored_rows).to(
+                values.dtype
+            )
             values_flat = values.reshape(-1, values.size(-1))
             values_flat.add_(stored_values * valid[:, None])
 
