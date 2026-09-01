@@ -17,20 +17,16 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from model.mlp import MLP
-from utils import (
-    Dataset,
-    collate,
-    extract_kv_linear_init,
-    generate_run_name,
-    get_model_and_tokenizer,
-    load_data,
-    save_checkpoint,
+from model.meta_learning import (
     add_grad,
-    get_rope_theta,
     inner_loop,
     prepare_kvs,
     setup_optimizer,
 )
+from utils.data import Dataset, collate, load_data
+from utils.logging import save_checkpoint
+from utils.model import extract_kv_linear_init, get_model_and_tokenizer
+from utils.rope import get_rope_theta
 
 
 def _metric_sums():
@@ -344,6 +340,11 @@ def init_mlps(model, cfg, device):
     return mlps
 
 
+def build_run_name(cfg) -> str:
+    """Name a meta-learning run after the knobs that define it."""
+    return f"seq{cfg.seq_len}_steps{cfg.inner_steps}_mlr{cfg.meta_lr}_"
+
+
 def main():
     config = load_config()
     cfg = config.training
@@ -356,7 +357,7 @@ def main():
     model_name = config.model.name
     model_dir = model_name.split("/")[-1]
 
-    run_name = generate_run_name(config)
+    run_name = build_run_name(cfg)
     if cfg.use_residual:
         run_name += "_perhead_residual"
     base_dir = os.path.join("checkpoints", model_dir, run_name)

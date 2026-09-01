@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import torch
 
-from utils.turboquant import (
+from numerics.quantisation import (
     CompressorParams,
     TurboQuantFactor,
     dequantise_factor,

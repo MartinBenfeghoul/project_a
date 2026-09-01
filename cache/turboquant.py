@@ -3,7 +3,7 @@ from typing import Any, Iterable
 import torch
 
 from .base import SharedRopeCache, SingleTensorCache, SingleTensorDynamicLayer
-from utils.turboquant import CompressorParams, MSECompressor
+from numerics.quantisation import CompressorParams, MSECompressor
 
 
 class TurboQuantLayer(SingleTensorDynamicLayer):

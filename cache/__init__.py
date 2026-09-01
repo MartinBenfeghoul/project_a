@@ -7,6 +7,7 @@ from .config import (
     SelectiveCacheConfig,
     TurboQuantCacheConfig,
     XKVCacheConfig,
+    build_cache_config,
 )
 from .lm_eval_wrapper import CompressedCacheHFLM
 
@@ -20,4 +21,5 @@ __all__ = [
     "SingleTensorCache",
     "TurboQuantCacheConfig",
     "XKVCacheConfig",
+    "build_cache_config",
 ]

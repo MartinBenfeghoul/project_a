@@ -3,19 +3,17 @@ import os
 from itertools import islice
 
 import torch
-from torch.utils.data import DataLoader
 from torch.optim import Adam
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model.mlp import MLP
-from utils import (
-    Dataset,
-    collate,
+from utils.args import add_common_training_args
+from utils.data import build_fineweb_dataloader
+from utils.model import (
     extract_kv_linear_init,
-    load_data,
-    compute_rope_cos_sin,inverse_rope
+    get_training_model_and_tokenizer,
 )
+from utils.rope import compute_rope_cos_sin, inverse_rope
 
 
 
@@ -144,19 +142,12 @@ def evaluate_mlps(mlps, val_batches, layers):
 
 
 def train(args):
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
     dtype = getattr(torch, args.dtype)
-    model = AutoModelForCausalLM.from_pretrained(
+    model, tokenizer, device = get_training_model_and_tokenizer(
         args.model_name,
         torch_dtype=dtype,
-        device_map="auto",
     )
-    model.eval()
 
-    device = next(model.parameters()).device
     rope_theta = getattr(model.config, "rope_theta", 500000.0)
     layers = list(range(model.config.num_hidden_layers))
     mlps = build_mlps(model, device, dtype)
@@ -165,21 +156,10 @@ def train(args):
         for layer_idx in layers
     }
 
-    hf_dataset = load_data(
-        dataset_path="HuggingFaceFW/fineweb-edu",
-        subset_name="sample-100BT",
-        shuffle_buffer_size=10000,
-    )
-    token_dataset = Dataset(
-        hf_dataset,
+    dataloader = build_fineweb_dataloader(
         tokenizer,
         seq_len=args.seq_len,
-        eos_id=tokenizer.eos_token_id,
-    )
-    dataloader = DataLoader(
-        token_dataset,
         batch_size=1,
-        collate_fn=collate,
     )
     dataloader_iter = iter(dataloader)
 
@@ -294,20 +274,18 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Train value-cache MLPs on FineWeb."
     )
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        default="mistralai/Mistral-7B-Instruct-v0.3",
+    add_common_training_args(
+        parser,
+        model_name="mistralai/Mistral-7B-Instruct-v0.3",
+        seq_len=4096,
+        max_batches=32,
     )
-    parser.add_argument("--seq_len", type=int, default=4096)
-    parser.add_argument("--max_batches", type=int, default=32)
     parser.add_argument(
         "--val_batches",
         type=int,
         default=2,
         help="Number of batches for validation.",
     )
-    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_epochs", type=int, default=25)
     parser.add_argument(
         "--dtype",

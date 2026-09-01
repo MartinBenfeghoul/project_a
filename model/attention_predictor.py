@@ -19,7 +19,6 @@ def _attention_backend_specs() -> list[dict]:
         {
             "name": "llama",
             "base_cls": LlamaAttention,
-            "flash_cls_name": "LlamaFlashAttention2",
             "apply_rope": llama_apply_rotary_pos_emb,
         }
     )
@@ -33,7 +32,6 @@ def _attention_backend_specs() -> list[dict]:
         {
             "name": "mistral",
             "base_cls": MistralAttention,
-            "flash_cls_name": "MistralFlashAttention2",
             "apply_rope": mistral_apply_rotary_pos_emb,
         }
     )

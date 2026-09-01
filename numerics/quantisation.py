@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from utils.lloyd_max import LloydMaxCodebook
+from numerics.lloyd_max import LloydMaxCodebook
 
 
 @dataclass

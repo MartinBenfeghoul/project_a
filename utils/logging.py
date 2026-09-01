@@ -5,23 +5,9 @@ from omegaconf import OmegaConf
 import torch
 
 
-def generate_run_name(config):
-    """Generate a run name based on config parameters."""
-    t = config.training
-
-    if t.get("run_type") == "attention_predictor":
-        return (
-            f"seq{t.seq_len}_"
-            f"maxb{t.max_batches}_"
-            f"sps{t.samples_per_sequence}_"
-            f"hist{t.history_step}_"
-            f"blk{t.block_size}_"
-            f"topk{t.topk_blocks}_"
-            f"layers{_format_run_value(t.layers)}_"
-            f"bce{t.bce_weight}"
-        )
-
-    return f"seq{t.seq_len}_" f"steps{t.inner_steps}_" f"mlr{t.meta_lr}_"
+def format_run_value(value: object) -> str:
+    """Make a config value safe to embed in a directory name."""
+    return str(value).replace("/", "-").replace(",", "-").replace(" ", "")
 
 
 def save_attention_predictor_checkpoint(
@@ -80,10 +66,6 @@ def get_output_path(output_path):
         i += 1
 
 
-def _format_run_value(value: object) -> str:
-    return str(value).replace("/", "-").replace(",", "-").replace(" ", "")
-
-
 def save_run_config(
     args,
     layers: list[int],
@@ -104,13 +86,9 @@ def save_run_config(
 def prepare_run_directory(
     args,
     layers: list[int],
+    run_name: str,
 ) -> str:
-    training = {
-        **vars(args),
-        "run_type": "attention_predictor",
-        "resolved_layers": layers,
-    }
-    run_name = generate_run_name(OmegaConf.create({"training": training}))
+    """Create the run's checkpoint directory and save its resolved config."""
     args.checkpoint_dir = os.path.join(args.output_dir, run_name)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     save_run_config(args, layers, run_name, args.checkpoint_dir)

@@ -36,6 +36,30 @@ def get_model_and_tokenizer(
     return model, tokenizer
 
 
+def get_training_model_and_tokenizer(
+    model_name,
+    torch_dtype=None,
+    attn_implementation=None,
+):
+    """Load a frozen teacher model plus its tokenizer for a training run."""
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        device_map="auto",
+        **(
+            {}
+            if attn_implementation is None
+            else {"attn_implementation": attn_implementation}
+        ),
+    )
+    model.eval()
+    return model, tokenizer, next(model.parameters()).device
+
+
 def extract_kv_linear_init(model) -> list[torch.Tensor]:
     """Pre-compute a per-KV-head W_linear for every transformer layer."""
     cfg = model.config

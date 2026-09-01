@@ -5,7 +5,7 @@ import torch
 import torch.nn.functional as F
 from torch.func import functional_call
 
-from .rope import compute_rope_cos_sin, inverse_rope
+from utils.rope import compute_rope_cos_sin, inverse_rope
 
 
 @dataclass(frozen=True)

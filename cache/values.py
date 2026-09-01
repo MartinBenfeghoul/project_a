@@ -6,12 +6,8 @@ from torch.nn.functional import mse_loss
 import torch
 from model.mlp import MLP
 from typing import Any, Callable
-from utils import (
-    LearnedInit,
-    LearnedLayerInit,
-)
-
-from utils.turboquant import init_compressor
+from model.meta_learning import LearnedInit, LearnedLayerInit
+from numerics.quantisation import init_compressor
 
 
 class MLPValueLayer(SingleTensorDynamicLayer):

@@ -3,9 +3,7 @@ from itertools import islice
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model.attention_predictor import (
     AttentionPredictor,
@@ -15,12 +13,14 @@ from model.attention_predictor import (
     max_pool_attention,
     topk_block_mask,
 )
-from utils import (
-    parse_layers,
+from utils.args import add_common_training_args, parse_layers
+from utils.data import build_fineweb_dataloader
+from utils.logging import (
+    format_run_value,
     prepare_run_directory,
     save_attention_predictor_checkpoint,
 )
-from utils import Dataset, collate, load_data
+from utils.model import get_training_model_and_tokenizer
 
 
 def sample_positions(
@@ -178,40 +178,34 @@ def train_layer_examples(
     return metrics_sum
 
 
-def train(args: argparse.Namespace) -> None:
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    dtype = getattr(torch, "bfloat16")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        attn_implementation="eager",
-        torch_dtype=dtype,
-        device_map="auto",
+def run_name(args: argparse.Namespace) -> str:
+    return (
+        f"seq{args.seq_len}_"
+        f"maxb{args.max_batches}_"
+        f"sps{args.samples_per_sequence}_"
+        f"hist{args.history_step}_"
+        f"blk{args.block_size}_"
+        f"topk{args.topk_blocks}_"
+        f"layers{format_run_value(args.layers)}_"
+        f"bce{args.bce_weight}"
     )
-    model.eval()
+
+
+def train(args: argparse.Namespace) -> None:
+    model, tokenizer, device = get_training_model_and_tokenizer(
+        args.model_name,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="eager",
+    )
     model.config.use_cache = False
 
-    device = next(model.parameters()).device
     layers = parse_layers(args.layers, model.config.num_hidden_layers)
-    prepare_run_directory(args, layers)
+    prepare_run_directory(args, layers, run_name(args))
 
-    hf_dataset = load_data(
-        dataset_path="HuggingFaceFW/fineweb-edu",
-        subset_name="sample-100BT",
-        shuffle_buffer_size=10000,
-    )
-    token_dataset = Dataset(
-        hf_dataset,
+    dataloader = build_fineweb_dataloader(
         tokenizer,
         seq_len=args.seq_len,
-        eos_id=tokenizer.eos_token_id,
-    )
-    dataloader = DataLoader(
-        token_dataset,
         batch_size=args.batch_size,
-        collate_fn=collate,
     )
 
     predictor = AttentionPredictor().to(device)
@@ -331,19 +325,18 @@ def train(args: argparse.Namespace) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train Attention Predictor.")
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        default="meta-llama/Llama-3.1-8B-Instruct",
+    add_common_training_args(
+        parser,
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        seq_len=1024,
+        max_batches=100,
+        batch_size=1,
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default="checkpoints/attention_predictor",
     )
-    parser.add_argument("--seq_len", type=int, default=1024)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--max_batches", type=int, default=100)
     parser.add_argument("--samples_per_sequence", type=int, default=128)
     parser.add_argument("--predictor_microbatch_size", type=int, default=256)
     parser.add_argument("--history_step", type=int, default=64)
@@ -355,7 +348,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="all",
         help="Comma/range layer spec, for example '0,4,8' or '8-15'.",
     )
-    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--bce_weight", type=float, default=0.1)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)

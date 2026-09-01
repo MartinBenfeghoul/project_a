@@ -20,3 +20,25 @@ def parse_layers(layer_spec: str | None, num_layers: int) -> list[int]:
     if bad:
         raise ValueError(f"Layer indices out of range: {bad}")
     return sorted(layers)
+
+
+def add_common_training_args(
+    parser,
+    *,
+    model_name: str,
+    seq_len: int,
+    max_batches: int,
+    lr: float = 1e-3,
+    batch_size: int | None = None,
+):
+    """Add the arguments every training script shares.
+
+    Defaults are per-script, so each caller passes its own.
+    """
+    parser.add_argument("--model_name", type=str, default=model_name)
+    parser.add_argument("--seq_len", type=int, default=seq_len)
+    parser.add_argument("--max_batches", type=int, default=max_batches)
+    parser.add_argument("--lr", type=float, default=lr)
+    if batch_size is not None:
+        parser.add_argument("--batch_size", type=int, default=batch_size)
+    return parser

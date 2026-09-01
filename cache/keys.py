@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 
-from utils.matrix_decomposition import (
+from numerics.matrix_decomposition import (
     Factor,
     FactorPairSegment,
     FactorSegment,
@@ -12,7 +12,7 @@ from utils.matrix_decomposition import (
     decompose_grouped_xkv_to_segment_store,
     reconstruct_segments,
 )
-from utils.turboquant import (
+from numerics.quantisation import (
     dequantise_factor,
     factor_dtype,
     factor_nbytes,

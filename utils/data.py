@@ -2,7 +2,7 @@ import torch
 
 from datasets import load_dataset
 
-from torch.utils.data import IterableDataset
+from torch.utils.data import DataLoader, IterableDataset
 
 
 def load_data(
@@ -133,3 +133,28 @@ def filter_tasks_by_min_seq_len(task_dict, tokenizer, min_seq_len):
             task, task.config.process_docs
         )
     return list(task_dict.values())
+
+def build_fineweb_dataloader(
+    tokenizer,
+    seq_len: int,
+    batch_size: int = 1,
+    dataset_path: str = "HuggingFaceFW/fineweb-edu",
+    subset_name: str | None = "sample-100BT",
+    shuffle_buffer_size: int = 10_000,
+) -> DataLoader:
+    """Stream FineWeb-Edu as fixed-length token batches for training runs."""
+    hf_dataset = load_data(
+        dataset_path=dataset_path,
+        subset_name=subset_name,
+        shuffle_buffer_size=shuffle_buffer_size,
+    )
+    return DataLoader(
+        Dataset(
+            hf_dataset,
+            tokenizer,
+            seq_len=seq_len,
+            eos_id=tokenizer.eos_token_id,
+        ),
+        batch_size=batch_size,
+        collate_fn=collate,
+    )

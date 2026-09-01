@@ -70,7 +70,9 @@ ValueCacheConfig = (
 class CompressedCacheConfig:
     key: KeyCacheConfig = field(default_factory=BaselineCacheConfig)
     value: ValueCacheConfig = field(default_factory=BaselineCacheConfig)
-    selective: SelectiveCacheConfig = field(default_factory=SelectiveCacheConfig)
+    selective: SelectiveCacheConfig = field(
+        default_factory=SelectiveCacheConfig
+    )
     eviction_keep_ratio: float = 1.0
 
 
@@ -178,3 +180,57 @@ def build_value_cache(
         cache.unrope_keys = False
         return cache, False
     raise TypeError(f"Unsupported value cache config: {type(config).__name__}")
+
+
+def _build_xkv_config(args, num_layers: int) -> XKVCacheConfig:
+    return XKVCacheConfig(
+        compression_ratio=args.comp_ratio,
+        layer_group_size=args.xkv_layer_group_size,
+        svd_backend=args.xkv_svd_backend,
+        num_layers=num_layers,
+        quantise_a=args.k_quantise_a,
+        quantise_b=args.k_quantise_b,
+        compressor_bits=args.k_compressor_bits,
+    )
+
+
+def build_key_cache_config(args, num_layers: int) -> KeyCacheConfig:
+    if args.k_cache_type == "xkv":
+        return _build_xkv_config(args, num_layers)
+    if args.k_cache_type == "turboquant":
+        return TurboQuantCacheConfig(compressor_bits=args.k_compressor_bits)
+    return BaselineCacheConfig()
+
+
+def build_value_cache_config(args, model, num_layers: int) -> ValueCacheConfig:
+    if args.v_cache_type == "mlp":
+        from utils.model import extract_kv_linear_init
+
+        return MLPValueCacheConfig(
+            target_compression_ratio=args.target_cr,
+            num_epochs=args.num_epochs,
+            meta_weights_path=args.meta_weights_path,
+            value_mlp_weights_path=args.value_mlp_weights_path,
+            use_residual=args.use_residual,
+            linear_weights=(
+                extract_kv_linear_init(model) if args.use_residual else None
+            ),
+            turboquant_residuals=args.v_turboquant_residuals,
+            compressor_bits=args.v_compressor_bits,
+        )
+    if args.v_cache_type == "turboquant":
+        return TurboQuantCacheConfig(compressor_bits=args.v_compressor_bits)
+    if args.v_cache_type == "xkv":
+        return _build_xkv_config(args, num_layers)
+    return BaselineCacheConfig()
+
+
+def build_cache_config(args, model) -> CompressedCacheConfig:
+    """Assemble the full cache config from parsed CLI arguments."""
+    num_layers = model.config.num_hidden_layers
+    return CompressedCacheConfig(
+        key=build_key_cache_config(args, num_layers),
+        value=build_value_cache_config(args, model, num_layers),
+        selective=SelectiveCacheConfig(enabled=args.selective_reconstruction),
+        eviction_keep_ratio=args.eviction_keep_ratio,
+    )

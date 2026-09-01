@@ -3,7 +3,7 @@ import torch
 from cache.base import SharedRopeCache
 from cache.keys import XKVKeysCache
 from cache.values import MLPValueCache
-from utils.turboquant import factor_nbytes
+from numerics.quantisation import factor_nbytes
 
 from tests.helpers import apply_model_rope, rope_cos_sin
 

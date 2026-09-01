@@ -17,7 +17,7 @@ from cache.config import (
     XKVCacheConfig,
 )
 from model.selective_attention import install_selective_attention
-from utils.turboquant import is_quantised_factor
+from numerics.quantisation import is_quantised_factor
 
 from tests.helpers import build_llama, install_value_importance_hooks
 
