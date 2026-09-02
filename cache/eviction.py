@@ -22,6 +22,10 @@ class EvictionPolicy:
     def enabled(self) -> bool:
         return self.keep_ratio < 1.0
 
+    @property
+    def compression_ratio(self) -> float:
+        return 1 / self.keep_ratio
+
     def set_value_importance(
         self,
         layer_idx: int,

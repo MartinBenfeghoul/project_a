@@ -521,3 +521,30 @@ def test_padding_importance_does_not_leak_across_sequences():
     score = policy._importance_score(importance, seq_len, mask)
 
     assert torch.count_nonzero(score[:pad_len]) == 0
+
+
+def test_eviction_drops_the_same_tokens_with_or_without_padding():
+    """Padding must not change which real tokens survive eviction."""
+    from cache.eviction import EvictionPolicy
+
+    torch.manual_seed(15)
+    valid_len, pad_len = 4096, 2048
+    seq_len = valid_len + pad_len
+    importance = torch.rand(1, 4, valid_len)
+
+    padded = EvictionPolicy(keep_ratio=0.25, key_cache=None)
+    padded_importance = torch.zeros(1, 4, seq_len)
+    padded_importance[..., pad_len:] = importance
+    padded.set_value_importance(0, padded_importance)
+    keys = torch.randn(1, 4, seq_len, 8)
+    padded.apply(keys, keys.clone(), 0, _left_pad_mask(1, pad_len, seq_len))
+
+    plain = EvictionPolicy(keep_ratio=0.25, key_cache=None)
+    plain.set_value_importance(0, importance)
+    unpadded = torch.randn(1, 4, valid_len, 8)
+    plain.apply(unpadded, unpadded.clone(), 0)
+
+    torch.testing.assert_close(
+        padded.kept_positions[0] - pad_len, plain.kept_positions[0]
+    )
+    assert padded.compression_ratio == plain.compression_ratio

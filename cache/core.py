@@ -328,6 +328,7 @@ class CompressedCache:
             self.value_cache,
             self.selective,
             self.rope_cache,
+            self.eviction,
         )
 
     def update_events(self, *args, **kwargs):
