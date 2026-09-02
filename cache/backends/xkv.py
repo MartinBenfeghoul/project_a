@@ -216,8 +216,9 @@ class XKVKeysCache(DecomposedKeysCache):
     ):
         prefix_tensors = []
         split_sizes = []
+        group_device = group_tensors[-1].device
         for group_layer_idx, tensor in zip(group_layers, group_tensors):
-            prefix_tensor = tensor[..., :suffix_start, :]
+            prefix_tensor = tensor[..., :suffix_start, :].to(group_device)
             if self.unrope_keys:
                 prefix_tensor = self.layers[group_layer_idx]._undo_rope(
                     prefix_tensor,
@@ -503,7 +504,12 @@ class XKVKeysCache(DecomposedKeysCache):
         right = state.packed_right
         suffix = self.layers[layer_idx].tensor
         prefix_len = positions.size(-1) - suffix.size(-2)
-        prefix_positions = positions[..., :prefix_len]
+        shared_device = (
+            shared.params.indices.device
+            if is_quantised_factor(shared)
+            else shared.device
+        )
+        prefix_positions = positions[..., :prefix_len].to(shared_device)
         batch_size, num_heads, _ = prefix_positions.shape
         rank = factor_shape(shared)[-1]
         head_dim = factor_shape(right)[-1] // num_heads
@@ -538,8 +544,10 @@ class XKVKeysCache(DecomposedKeysCache):
                     inverse=False,
                 )
         if suffix.size(-2):
+            keys = keys.to(suffix.device)
             suffix_positions = (
-                positions[..., prefix_len:] - state.compressed_len
+                positions[..., prefix_len:].to(suffix.device)
+                - state.compressed_len
             )
             suffix_keys = suffix.gather(
                 2,
@@ -573,8 +581,21 @@ class XKVKeysCache(DecomposedKeysCache):
             )
         ]
 
+        shared = group_state.packed_shared
+        factor_device = (
+            shared.params.indices.device
+            if is_quantised_factor(shared)
+            else shared.device
+        )
         flat_dim = keys.size(1) * keys.size(-1)
-        empty_suffix = keys.new_empty(keys.size(0), 1, 0, flat_dim)
+        empty_suffix = torch.empty(
+            keys.size(0),
+            1,
+            0,
+            flat_dim,
+            dtype=keys.dtype,
+            device=factor_device,
+        )
         prefix_flat = reconstruct_segments(
             paired_segments, empty_suffix
         ).squeeze(1)
@@ -586,6 +607,7 @@ class XKVKeysCache(DecomposedKeysCache):
             num_heads,
             head_dim,
         ).transpose(1, 2)
+        prefix_keys = prefix_keys.to(keys.device)
 
         if self.unrope_keys:
             prefix_keys = self.layers[layer_idx]._apply_rope(

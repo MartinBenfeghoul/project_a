@@ -146,6 +146,26 @@ def test_baseline_keys_with_mlp_values_reproduce_the_dense_cache():
     for layer in cache.value_cache.layers:
         assert not layer.prefill and layer.is_compressed
 
+def test_baseline_keys_transition_xkv_values_to_decode():
+    model = build_llama(1)
+    prompt, steps = _prompt_and_steps(62, prompt_len=8)
+    config = CompressedCacheConfig(
+        key=BaselineCacheConfig(),
+        value=XKVCacheConfig(
+            layer_group_size=1,
+            num_layers=1,
+            svd_backend="linalg",
+            compression_ratio=LOSSLESS_KEY_RATIO,
+        ),
+    )
+    cache = _make_cache(config, prompt_len=8)
+
+    outputs = _run(model, cache, prompt, steps[:1])
+
+    assert len(outputs) == 2
+    assert not cache.prefill
+    assert not cache.value_cache.prefill
+
 
 @pytest.mark.parametrize("group_size", (1, 2, 4))
 def test_selective_attention_with_a_full_budget_matches_dense(group_size):

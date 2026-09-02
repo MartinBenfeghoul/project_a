@@ -115,7 +115,8 @@ class SelectiveReconstruction:
             landmarks.unsqueeze(3),
             dim=-1,
         ).masked_fill(~valid, 1.0)
-        similarity[..., -local_chunks:, :] = torch.inf
+        if local_chunks > 0:
+            similarity[..., -local_chunks:, :] = torch.inf
         outlier_count = min(
             self.config.outlier_chunks,
             num_chunks - local_chunks,
@@ -166,7 +167,8 @@ class SelectiveReconstruction:
             landmarks.shape[:-1], device=landmarks.device, dtype=torch.bool
         )
         eligible.scatter_(2, outliers, False)
-        eligible[..., -local_chunks:] = False
+        if local_chunks > 0:
+            eligible[..., -local_chunks:] = False
         landmark_count = int(eligible[0, 0].sum().item())
         landmark_indices = (
             torch.arange(landmarks.size(2), device=landmarks.device)

@@ -51,6 +51,27 @@ def test_typed_config_builds_selective_layer_state():
     )
 
 
+def test_zero_local_tokens_leave_regular_landmarks_eligible():
+    config = CompressedCacheConfig(
+        key=BaselineCacheConfig(),
+        value=BaselineCacheConfig(),
+        selective=SelectiveCacheConfig(
+            enabled=True,
+            token_budget=16,
+            chunk_size=8,
+            local_tokens=0,
+            outlier_chunks=1,
+        ),
+    )
+    cache = CompressedCache(config=config, verbose=False)
+    keys = torch.randn(1, 2, 32, 8)
+    values = torch.randn_like(keys)
+
+    cache.selective.store_landmarks(0, keys, values)
+
+    assert cache.selective_layers[0].landmark_count == 3
+
+
 def test_xkv_grouped_and_selected_reconstruction_match():
     torch.manual_seed(2)
     batch_size, num_heads, seq_len, head_dim = 1, 2, 64, 16
@@ -91,6 +112,33 @@ def test_xkv_grouped_and_selected_reconstruction_match():
             atol=2e-5,
             rtol=2e-5,
         )
+
+
+@torch.no_grad()
+def test_xkv_group_prefixes_are_colocated_before_concatenation():
+    if torch.cuda.device_count() < 2:
+        import pytest
+
+        pytest.skip("requires two CUDA devices")
+
+    cache = XKVKeysCache(
+        layer_group_size=2,
+        num_layers=2,
+        xkv_svd_backend="linalg",
+        comp_ratio=2.0,
+    )
+    cache.unrope_keys = False
+    cache.update(torch.randn(1, 1, 8, 8, device="cuda:0"), 0)
+    cache.update(torch.randn(1, 1, 8, 8, device="cuda:1"), 1)
+
+    assert cache.group_states[1].packed_shared is not None
+    assert cache.group_states[1].packed_shared.device == torch.device("cuda:1")
+
+    cache.update_events()
+    layer0 = cache.update(torch.randn(1, 1, 1, 8, device="cuda:0"), 0)
+    layer1 = cache.update(torch.randn(1, 1, 1, 8, device="cuda:1"), 1)
+    assert layer0.device == torch.device("cuda:0")
+    assert layer1.device == torch.device("cuda:1")
 
 
 def test_mlp_value_selected_reconstruction_matches_full_reconstruction():

@@ -65,6 +65,7 @@ class CompressedCache:
 
         self._cache_context = dict(cache_context or {})
         self._deferred_value_updates: dict[int, DeferredValueUpdate] = {}
+        self.prefill = True
 
     # --- selective reconstruction -----------------------------------------
 
@@ -129,9 +130,7 @@ class CompressedCache:
     # --- the update path --------------------------------------------------
 
     def _end_prefill_on_first_decode(self, key_states: torch.Tensor) -> None:
-        if key_states.size(-2) == 1 and getattr(
-            self.key_cache, "prefill", False
-        ):
+        if key_states.size(-2) == 1 and self.prefill:
             self.update_events()
 
     def update(
@@ -222,7 +221,7 @@ class CompressedCache:
             getattr(self.value_cache, "update_prefill_group", None)
         ):
             return None
-        if not getattr(self.key_cache, "prefill", False):
+        if not self.prefill:
             return None
 
         get_group_bounds = getattr(self.key_cache, "_get_group_bounds", None)
@@ -244,7 +243,7 @@ class CompressedCache:
         keys: torch.Tensor,
     ) -> None:
         fn = getattr(self.key_cache, "get_reconstructed_keys_only", None)
-        if callable(fn) and getattr(self.key_cache, "prefill", False):
+        if callable(fn) and self.prefill:
             cache_kwargs["keys"] = fn(layer_idx)
         else:
             cache_kwargs["keys"] = keys
@@ -301,6 +300,7 @@ class CompressedCache:
         """
         Forward event updates to caches.
         """
+        self.prefill = False
         n_events = None
         if hasattr(self.key_cache, "update_events"):
             n_events = self.key_cache.update_events(*args, **kwargs)
