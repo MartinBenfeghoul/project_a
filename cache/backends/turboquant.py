@@ -19,6 +19,7 @@ class TurboQuantLayer(SingleTensorDynamicLayer):
         self.compressed_params: CompressorParams | None = None
         self.prefill = True
         self.compressed_len = 0
+        self.original_token_count: int | None = None
 
     def lazy_initialization(self, tensor_states: torch.Tensor) -> None:
         super().lazy_initialization(tensor_states)
@@ -68,6 +69,15 @@ class TurboQuantLayer(SingleTensorDynamicLayer):
             self.tensor = op(self.tensor)
         self._apply_compressed_params_batch_op(op)
 
+    @staticmethod
+    def _count_real_tokens(tensor, cache_kwargs) -> int:
+        """Prefill tokens across the batch, excluding padding."""
+        batch_size, seq_len = tensor.shape[0], tensor.shape[-2]
+        mask = (cache_kwargs or {}).get("padding_mask")
+        if mask is None:
+            return batch_size * seq_len
+        return int(mask[..., :seq_len].sum())
+
     def update(
         self,
         tensor_states: torch.Tensor,
@@ -77,6 +87,9 @@ class TurboQuantLayer(SingleTensorDynamicLayer):
 
         if self.prefill:
             self.compressed_len = tensor.shape[-2]
+            self.original_token_count = self._count_real_tokens(
+                tensor, cache_kwargs
+            )
             self.compressed_params = self.compressor.encode(tensor)
             self._evict(end_idx=self.compressed_len)
             self.prefill = False
@@ -137,11 +150,16 @@ class TurboQuantCache(SingleTensorCache):
 
             dtype_size = torch.empty((), dtype=params.dtype).element_size()
             b, h, t_compressed, d = params.shape
+            if t_compressed == 0:
+                continue
             t_suffix = layer.tensor.shape[-2] if layer.tensor.dim() == 4 else 0
-            t = t_compressed + t_suffix
-            original_total += b * h * t * d * dtype_size
+            prefill_tokens = layer.original_token_count
+            original_total += (
+                (prefill_tokens + b * t_suffix) * h * d * dtype_size
+            )
+            valid_fraction = prefill_tokens / (b * t_compressed)
             compressed_total += (
-                layer.compressor.memory_nbytes(params)
+                layer.compressor.memory_nbytes(params) * valid_fraction
                 + b * h * t_suffix * d * dtype_size
             )
 

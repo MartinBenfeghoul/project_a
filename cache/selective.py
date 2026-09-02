@@ -15,11 +15,12 @@ class SelectiveLayerState:
     landmark_indices: torch.Tensor
     landmark_count: int
     prompt_len: int
-    true_prompt_len: int
+    true_prompt_len: float
     outliers: torch.Tensor
     exact_positions: torch.Tensor
     exact_keys: torch.Tensor
     exact_values: torch.Tensor
+    landmark_valid: torch.Tensor | None = None
 
     @property
     def key_overhead_nbytes(self) -> int:
@@ -31,7 +32,9 @@ class SelectiveLayerState:
                 self.exact_positions,
                 self.outliers,
                 self.exact_keys,
+                self.landmark_valid,
             )
+            if tensor is not None
         )
 
     @property
@@ -40,7 +43,7 @@ class SelectiveLayerState:
 
     @property
     def original_key_nbytes(self) -> int:
-        return (
+        return int(
             self.exact_keys.size(0)
             * self.exact_keys.size(1)
             * self.true_prompt_len
@@ -71,6 +74,7 @@ class SelectiveReconstruction:
     def _build_chunk_landmarks(
         self,
         key_states: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build mean-key landmarks and validity masks for fixed-size chunks"""
         batch_size, num_heads, seq_len, head_dim = key_states.shape
@@ -90,9 +94,14 @@ class SelectiveReconstruction:
                 1, 1, num_chunks, chunk_size
             )
             < seq_len
-        )
+        ).expand(batch_size, num_heads, -1, -1)
+        if padding_mask is not None:
+            sequence_valid = torch.nn.functional.pad(
+                padding_mask, (0, padding)
+            ).reshape(batch_size, 1, num_chunks, chunk_size)
+            valid = valid & sequence_valid
         counts = valid.sum(dim=3, keepdim=True).clamp_min(1)
-        landmarks = padded_keys.sum(dim=3) / counts
+        landmarks = (padded_keys * valid[..., None]).sum(dim=3) / counts
         return padded_keys, landmarks, valid
 
     def _num_local_chunks(self, seq_len: int, num_chunks: int) -> int:
@@ -121,11 +130,9 @@ class SelectiveReconstruction:
             self.config.outlier_chunks,
             num_chunks - local_chunks,
         )
-        return (
-            similarity.amin(dim=3)
-            .topk(outlier_count, dim=-1, largest=False)
-            .indices
-        )
+        scores = similarity.amin(dim=3)
+        scores = scores.masked_fill(~valid.any(dim=3), torch.inf)
+        return scores.topk(outlier_count, dim=-1, largest=False).indices
 
     def _expand_chunk_positions(
         self,
@@ -152,10 +159,18 @@ class SelectiveReconstruction:
         layer_idx: int,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        true_seq_len: int | None = None,
+        true_seq_len: float | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> None:
         _, _, seq_len, head_dim = key_states.shape
-        padded_keys, landmarks, valid = self._build_chunk_landmarks(key_states)
+        if padding_mask is not None and not padding_mask[:, -1].all():
+            raise ValueError(
+                "Selective reconstruction expects left-padded sequences: the "
+                "local window is taken from the end of the prompt."
+            )
+        padded_keys, landmarks, valid = self._build_chunk_landmarks(
+            key_states, padding_mask
+        )
         outliers = self._select_outlier_chunks(
             padded_keys,
             landmarks,
@@ -176,6 +191,9 @@ class SelectiveReconstruction:
             .expand_as(eligible)[eligible]
             .reshape(landmarks.size(0), landmarks.size(1), landmark_count)
         )
+        landmark_valid = None
+        if padding_mask is not None:
+            landmark_valid = valid.any(dim=3).gather(2, landmark_indices)
         landmarks = landmarks.gather(
             2,
             landmark_indices[..., None].expand(-1, -1, -1, head_dim),
@@ -188,6 +206,10 @@ class SelectiveReconstruction:
             landmark_indices = torch.nn.functional.pad(
                 landmark_indices, (0, landmark_padding)
             )
+            if landmark_valid is not None:
+                landmark_valid = torch.nn.functional.pad(
+                    landmark_valid, (0, landmark_padding)
+                )
         outlier_positions = self._expand_chunk_positions(outliers)
         local_positions = (
             torch.arange(
@@ -213,6 +235,7 @@ class SelectiveReconstruction:
             exact_positions=positions,
             exact_keys=key_states.gather(2, gather_idx),
             exact_values=value_states.gather(2, gather_idx),
+            landmark_valid=landmark_valid,
         )
         self._record_overhead(layer_idx)
 
@@ -231,6 +254,11 @@ class SelectiveReconstruction:
         )
         scores = self._scorer.score(grouped_query, landmarks)
         scores = scores[..., : state.landmark_count]
+        if state.landmark_valid is not None:
+            scores = scores.masked_fill(
+                ~state.landmark_valid[..., : state.landmark_count],
+                -torch.inf,
+            )
         selected_chunks = math.ceil(
             self.config.token_budget / self.config.chunk_size
         )

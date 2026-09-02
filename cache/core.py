@@ -133,6 +133,30 @@ class CompressedCache:
         if key_states.size(-2) == 1 and self.prefill:
             self.update_events()
 
+    def _true_seq_len(self, full_key_states: torch.Tensor) -> float:
+        """Original tokens per sequence."""
+        mask = self._cache_context.get("padding_mask")
+        if mask is None:
+            return float(full_key_states.size(-2))
+        return mask.to(torch.bool).sum().item() / mask.size(0)
+
+    def _aligned_padding_mask(
+        self,
+        key_states: torch.Tensor,
+        keep_positions: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        mask = self._cache_context.get("padding_mask")
+        if mask is None or key_states.size(-2) == 1:
+            return None
+        mask = mask.to(device=key_states.device, dtype=torch.bool)
+        if keep_positions is not None:
+            mask = mask.index_select(1, keep_positions)
+        if mask.shape != (key_states.size(0), key_states.size(-2)):
+            raise ValueError(
+                "padding_mask must have shape [batch, sequence_length]."
+            )
+        return mask
+
     def update(
         self,
         key_states: torch.Tensor,
@@ -144,18 +168,28 @@ class CompressedCache:
 
         full_key_states, full_value_states = key_states, value_states
         key_states, value_states, keep_positions = self.eviction.apply(
-            key_states, value_states, layer_idx
+            key_states,
+            value_states,
+            layer_idx,
+            self._aligned_padding_mask(key_states, None),
         )
+        padding_mask = self._aligned_padding_mask(key_states, keep_positions)
         if self.selective.enabled and key_states.size(-2) > 1:
             self.selective.store_landmarks(
                 layer_idx,
                 key_states,
                 value_states,
-                true_seq_len=full_key_states.size(-2),
+                true_seq_len=self._true_seq_len(full_key_states),
+                padding_mask=padding_mask,
             )
         cache_kwargs = self.eviction.annotate_cache_kwargs(
             cache_kwargs, keep_positions
         )
+        if padding_mask is not None:
+            cache_kwargs = {
+                **(cache_kwargs or {}),
+                "padding_mask": padding_mask,
+            }
 
         keys = self.key_cache.update(key_states, layer_idx, cache_kwargs)
         cache_kwargs = self._value_cache_kwargs(cache_kwargs)

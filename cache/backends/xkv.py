@@ -52,6 +52,7 @@ class XKVGroupState:
     compressed_len: int
     shared_segments: list[list[FactorSegment]]
     packed_shared: Factor | None = None
+    valid_lens: torch.Tensor | None = None
 
 
 def get_expected_seq_len(cache_kwargs):
@@ -60,6 +61,24 @@ def get_expected_seq_len(cache_kwargs):
         if cache_position is not None:
             return cache_position[..., -1] + 1
     return None
+
+
+def get_padding_mask(cache_kwargs, seq_len):
+    """The prefill padding mask, when one was supplied."""
+    if cache_kwargs is None:
+        return None
+    mask = cache_kwargs.get("padding_mask")
+    if mask is None:
+        return None
+    mask = mask[..., :seq_len]
+    if mask.all():
+        return None
+    if not mask[..., -1].all():
+        raise ValueError(
+            "xKV expects left-padded sequences: the final prefill position "
+            "must be a real token in every sequence."
+        )
+    return mask
 
 
 def check_recon_length(recon_keys, cache_kwargs):
@@ -234,7 +253,13 @@ class XKVKeysCache(DecomposedKeysCache):
             prefix_tensors.append(prefix_flat)
             split_sizes.append(prefix_flat.size(-1))
 
-        return torch.cat(prefix_tensors, dim=-1), split_sizes
+        group_prefix = torch.cat(prefix_tensors, dim=-1)
+        padding_mask = get_padding_mask(cache_kwargs, suffix_start)
+        if padding_mask is not None:
+            group_prefix = group_prefix * padding_mask[..., None].to(
+                device=group_prefix.device, dtype=group_prefix.dtype
+            )
+        return group_prefix, split_sizes
 
     def _empty_xkv_segments(self, batch_size, group_layers):
         shared_segments = [[] for _ in range(batch_size)]
@@ -251,13 +276,14 @@ class XKVKeysCache(DecomposedKeysCache):
         self,
         tensor: torch.Tensor,
         group_layers,
+        valid_rows: float | None = None,
     ) -> SVDDecompositionConfig:
         """Fit aligned xKV factors for one group into the total key budget."""
         from efficiency import adjust_rank
 
         m, n = tensor.shape[-2:]
         rank = adjust_rank(
-            m,
+            m if valid_rows is None else round(valid_rows),
             n,
             self.decomposition.compression_ratio,
             sum(
@@ -316,11 +342,13 @@ class XKVKeysCache(DecomposedKeysCache):
         suffix_start,
         shared_segments,
         per_layer_segments,
+        valid_lens=None,
     ):
         group_state = XKVGroupState(
             layer_indices=tuple(group_layers),
             compressed_len=suffix_start,
             shared_segments=shared_segments,
+            valid_lens=valid_lens,
         )
         self.group_states[group_last_layer] = group_state
         for group_layer_idx, layer_segments in zip(
@@ -352,6 +380,7 @@ class XKVKeysCache(DecomposedKeysCache):
         self.comp_ratio = self.calc_compression_ratio()
 
     def calc_compression_ratio(self):
+        """Mean per-sequence ratio of the stored factors."""
         crs = 0.0
         num_segments = 0
         for group_state in self.group_states.values():
@@ -362,7 +391,12 @@ class XKVKeysCache(DecomposedKeysCache):
                     A = shared_segment.factor
                     a_shape = factor_shape(A)
                     leading = math.prod(a_shape[:-2])
-                    m = a_shape[-2]
+                    stored_rows = a_shape[-2]
+                    m = (
+                        stored_rows
+                        if group_state.valid_lens is None
+                        else int(group_state.valid_lens[batch_idx])
+                    )
                     n = sum(
                         factor_shape(
                             self._compressed_layer_state(layer_idx)
@@ -380,7 +414,7 @@ class XKVKeysCache(DecomposedKeysCache):
                             dtype=factor_dtype(A),
                         ).element_size()
                     )
-                    compressed = factor_nbytes(A) + sum(
+                    compressed = factor_nbytes(A) * m / stored_rows + sum(
                         factor_nbytes(
                             self._compressed_layer_state(layer_idx)
                             .segments[batch_idx][seg_idx]
@@ -399,6 +433,11 @@ class XKVKeysCache(DecomposedKeysCache):
         batch_size = group_tensors[-1].size(0)
 
         suffix_start = group_tensors[-1].size(-2)
+        padding_mask = get_padding_mask(cache_kwargs, suffix_start)
+        valid_lens = None if padding_mask is None else padding_mask.sum(1)
+        valid_rows = (
+            None if valid_lens is None else valid_lens.float().mean().item()
+        )
         if suffix_start == 0:
             shared_segments, per_layer_segments = self._empty_xkv_segments(
                 batch_size, group_layers
@@ -415,7 +454,7 @@ class XKVKeysCache(DecomposedKeysCache):
                 group_prefix.unsqueeze(1),
                 segment_ranges=segment_ranges,
                 config=self._group_decomposition_config(
-                    group_prefix, group_layers
+                    group_prefix, group_layers, valid_rows
                 ),
             )
             shared_segments, per_layer_segments = (
@@ -433,6 +472,7 @@ class XKVKeysCache(DecomposedKeysCache):
             suffix_start,
             shared_segments,
             per_layer_segments,
+            valid_lens,
         )
 
         return suffix_start

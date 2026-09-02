@@ -362,9 +362,6 @@ class MLPValueLayer(SingleTensorDynamicLayer):
                 device=keys.device,
                 dtype=torch.bool,
             )
-            kept_positions = cache_kwargs.get("kept_positions")
-            if kept_positions is not None:
-                padding_mask = padding_mask.index_select(1, kept_positions)
             if padding_mask.shape != (keys.size(0), keys.size(2)):
                 raise ValueError(
                     "padding_mask must have shape [batch, sequence_length]."
