@@ -76,30 +76,123 @@ def setup_optimizer(mlps, config):
     )
 
 
+@dataclass(frozen=True)
+class KeyReconstructionConfig:
+    """xKV key-cache settings mirrored from evaluation into meta-training."""
+
+    compression_ratio: float = 4.0
+    layer_group_size: int = 4
+    svd_backend: str = "cholqr"
+    quantise_a: bool = False
+    quantise_b: bool = False
+    compressor_bits: int = 4
+
+
+def _rope_cache_kwargs(
+    keys: torch.Tensor,
+    rope_theta: float,
+    padding_mask: torch.Tensor | None,
+) -> dict:
+    """The prefill cache_kwargs an xKV key cache expects from a model."""
+    seq_len, head_dim = keys.shape[2], keys.shape[-1]
+    cos, sin = compute_rope_cos_sin(
+        seq_len,
+        head_dim,
+        rope_theta,
+        keys.device,
+        keys.dtype,
+    )
+    cache_kwargs = {
+        "cos": cos[:, 0],
+        "sin": sin[:, 0],
+        "cache_position": torch.arange(seq_len, device=keys.device),
+    }
+    if padding_mask is not None:
+        cache_kwargs["padding_mask"] = padding_mask.to(
+            device=keys.device,
+            dtype=torch.bool,
+        )
+    return cache_kwargs
+
+
+@torch.no_grad()
+def reconstruct_keys_xkv(
+    cache,
+    config: KeyReconstructionConfig,
+    *,
+    rope_theta: float,
+    padding_mask: torch.Tensor | None = None,
+) -> list[torch.Tensor]:
+    from cache.backends.xkv import XKVKeysCache
+
+    num_layers = len(cache.layers)
+    key_cache = XKVKeysCache(
+        layer_group_size=config.layer_group_size,
+        num_layers=num_layers,
+        xkv_svd_backend=config.svd_backend,
+        comp_ratio=config.compression_ratio,
+        quantise_a=config.quantise_a,
+        quantise_b=config.quantise_b,
+        compressor_bits=config.compressor_bits,
+    )
+    cache_kwargs = _rope_cache_kwargs(
+        cache.layers[0].keys,
+        rope_theta,
+        padding_mask,
+    )
+    for layer_idx, layer in enumerate(cache.layers):
+        key_cache.update(layer.keys.detach(), layer_idx, cache_kwargs)
+
+    keys = []
+    for layer_idx in range(num_layers):
+        roped = key_cache.get_reconstructed_keys_only(layer_idx)
+        if roped is None:
+            raise ValueError(
+                f"xKV left layer {layer_idx} uncompressed; the whole prefill "
+                "must be decomposed before the inner loop runs."
+            )
+        keys.append(
+            key_cache.layers[layer_idx]._undo_rope(roped, prefill=True)
+        )
+    return keys
+
+
 def prepare_kvs(
     cache,
     *,
     rope_theta: float,
     dtype: torch.dtype,
+    key_config: KeyReconstructionConfig | None = None,
+    padding_mask: torch.Tensor | None = None,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """Detach, un-RoPE, and cast support KV pairs once per batch."""
-    kvs = []
-    for layer in cache.layers:
-        keys = layer.keys.detach()
-        cos, sin = compute_rope_cos_sin(
-            keys.shape[2],
-            keys.shape[-1],
-            rope_theta,
-            keys.device,
-            keys.dtype,
+    if key_config is not None:
+        keys_per_layer = reconstruct_keys_xkv(
+            cache,
+            key_config,
+            rope_theta=rope_theta,
+            padding_mask=padding_mask,
         )
-        kvs.append(
-            (
-                inverse_rope(keys, cos, sin).to(dtype=dtype),
-                layer.values.detach().to(dtype=dtype),
+    else:
+        keys_per_layer = []
+        for layer in cache.layers:
+            keys = layer.keys.detach()
+            cos, sin = compute_rope_cos_sin(
+                keys.shape[2],
+                keys.shape[-1],
+                rope_theta,
+                keys.device,
+                keys.dtype,
             )
+            keys_per_layer.append(inverse_rope(keys, cos, sin))
+
+    return [
+        (
+            keys.to(dtype=dtype),
+            layer.values.detach().to(dtype=dtype),
         )
-    return kvs
+        for keys, layer in zip(keys_per_layer, cache.layers)
+    ]
 
 
 def _predict(mlps, kvs, params, names_by_mlp) -> list[torch.Tensor]:

@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from model.mlp import MLP
 from model.meta_learning import (
+    KeyReconstructionConfig,
     add_grad,
     inner_loop,
     prepare_kvs,
@@ -59,6 +60,7 @@ def run_epoch(
     device,
     inner_dtype,
     residual_cr=None,
+    key_config=None,
 ):
     inner_lr = cfg.inner_lr
     inner_steps = cfg.inner_steps
@@ -79,10 +81,11 @@ def run_epoch(
         )
     ):
         start = time.time()
+        attention_mask = batch["attention_mask"].to(device)
         with torch.no_grad():
             output = model(
                 input_ids=batch["input_ids"].to(device),
-                attention_mask=batch["attention_mask"].to(device),
+                attention_mask=attention_mask,
                 use_cache=True,
             )
 
@@ -90,6 +93,8 @@ def run_epoch(
             output.past_key_values,
             rope_theta=rope_theta,
             dtype=inner_dtype,
+            key_config=key_config,
+            padding_mask=attention_mask,
         )
 
         meta_params, metrics = inner_loop(
@@ -149,6 +154,14 @@ def meta_train(
     model.eval()
     inner_dtype = getattr(torch, str(cfg.inner_adaptation_dtype))
     print(f"FP32 meta parameters; {inner_dtype} inner adaptation")
+    key_config = build_key_reconstruction_config(cfg)
+    if key_config is not None:
+        print(
+            "Inner loop trains on xKV-reconstructed keys "
+            f"(comp_ratio={key_config.compression_ratio}, "
+            f"layer_group_size={key_config.layer_group_size}, "
+            f"svd_backend={key_config.svd_backend})"
+        )
     residual_cr = (
         float(cfg.eval_target_cr) if cfg.meta_loss_post_residual else None
     )
@@ -171,6 +184,7 @@ def meta_train(
             device,
             inner_dtype,
             residual_cr=residual_cr,
+            key_config=key_config,
         )
 
         epoch_sec = time.time() - start
@@ -214,6 +228,30 @@ def meta_train(
                 )
 
 
+def build_key_reconstruction_config(cfg):
+    if not cfg.get("train_on_reconstructed_keys", False):
+        return None
+    return KeyReconstructionConfig(
+        compression_ratio=float(cfg.get("key_comp_ratio", 4.0)),
+        layer_group_size=int(cfg.get("xkv_layer_group_size", 4)),
+        svd_backend=str(cfg.get("xkv_svd_backend", "cholqr")),
+    )
+
+
+def build_key_cache_config(cfg, num_layers):
+    from cache import BaselineCacheConfig, XKVCacheConfig
+
+    key_config = build_key_reconstruction_config(cfg)
+    if key_config is None:
+        return BaselineCacheConfig()
+    return XKVCacheConfig(
+        compression_ratio=key_config.compression_ratio,
+        layer_group_size=key_config.layer_group_size,
+        svd_backend=key_config.svd_backend,
+        num_layers=num_layers,
+    )
+
+
 def build_value_cache_config(cfg, ckpt_path, target_cr):
     """Build inference settings that match the meta-training inner loop."""
     from cache import MLPValueCacheConfig
@@ -245,7 +283,7 @@ def eval_benchmark(
         get_device,
         get_tasks,
     )
-    from cache import BaselineCacheConfig, CompressedCacheConfig
+    from cache import CompressedCacheConfig
     target_cr = float(cfg.eval_target_cr)
     eval_batch_size = int(getattr(cfg, "eval_batch_size", 1))
     print(
@@ -256,7 +294,10 @@ def eval_benchmark(
 
     lm = CompressedCacheHFLM(
         cache_config=CompressedCacheConfig(
-            key=BaselineCacheConfig(),
+            key=build_key_cache_config(
+                cfg,
+                model.config.num_hidden_layers,
+            ),
             value=build_value_cache_config(
                 cfg,
                 ckpt_path,
@@ -342,7 +383,11 @@ def init_mlps(model, cfg, device):
 
 def build_run_name(cfg) -> str:
     """Name a meta-learning run after the knobs that define it."""
-    return f"seq{cfg.seq_len}_steps{cfg.inner_steps}_mlr{cfg.meta_lr}_"
+    name = f"seq{cfg.seq_len}_steps{cfg.inner_steps}_mlr{cfg.meta_lr}_"
+    key_config = build_key_reconstruction_config(cfg)
+    if key_config is not None:
+        name += f"xkvkeys{key_config.compression_ratio}_"
+    return name
 
 
 def main():

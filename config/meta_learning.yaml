@@ -17,7 +17,12 @@ training:
   inner_adaptation_dtype: bfloat16
 
   meta_lr: 3e-4
-  meta_loss_post_residual: false
+  meta_loss_post_residual: true
+
+  train_on_reconstructed_keys: true
+  key_comp_ratio: 4.0
+  xkv_layer_group_size: 4
+  xkv_svd_backend: cholqr
 
   use_residual: false
 
