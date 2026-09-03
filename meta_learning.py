@@ -308,12 +308,10 @@ def eval_benchmark(
     optimiser_steps=0,
 ):
     """Evaluate a benchmark with the current meta initialisation."""
-    from lm_eval import evaluator
     from lm_eval.tasks import TaskManager
     from lm_eval_script import (
         CompressedCacheHFLM,
-        GEN_KWARGS,
-        get_device,
+        evaluate_tasks,
         get_tasks,
     )
     from cache import CompressedCacheConfig
@@ -352,14 +350,10 @@ def eval_benchmark(
         max_batch_size=eval_batch_size,
     )
 
-    results = evaluator.simple_evaluate(
-        model=lm,
-        gen_kwargs=GEN_KWARGS,
-        tasks=eval_tasks,
-        num_fewshot=0,
+    results = evaluate_tasks(
+        lm,
+        eval_tasks,
         batch_size=eval_batch_size,
-        max_batch_size=eval_batch_size,
-        device=get_device(lm),
         task_manager=TaskManager(metadata={"tokenizer": name}),
         limit=samples,
     )

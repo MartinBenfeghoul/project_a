@@ -36,6 +36,30 @@ def get_tasks(tasks, print_tasks=True):
     return tasks
 
 
+def evaluate_tasks(lm, tasks, *, batch_size, task_manager, limit):
+    merged = {}
+    for task in tasks:
+        results = evaluator.simple_evaluate(
+            model=lm,
+            gen_kwargs=GEN_KWARGS,
+            tasks=[task],
+            num_fewshot=0,
+            batch_size=batch_size,
+            max_batch_size=batch_size,
+            device=get_device(lm),
+            task_manager=task_manager,
+            limit=limit,
+        )
+        for key, value in results.items():
+            if isinstance(value, dict) and isinstance(
+                merged.get(key, {}), dict
+            ):
+                merged.setdefault(key, {}).update(value)
+            else:
+                merged[key] = value
+    return merged
+
+
 @torch.no_grad()
 def main(args):
     model, tokenizer = get_model_and_tokenizer(args.model_name)
@@ -75,14 +99,10 @@ def main(args):
             task_dict, tokenizer, args.min_seq_len
         )
 
-    results = evaluator.simple_evaluate(
-        model=lm,
-        gen_kwargs=GEN_KWARGS,
-        tasks=eval_tasks,
-        num_fewshot=0,
+    results = evaluate_tasks(
+        lm,
+        eval_tasks,
         batch_size=args.batch_size,
-        max_batch_size=args.batch_size,
-        device=get_device(lm),
         task_manager=tm,
         limit=args.limit,
     )
