@@ -25,7 +25,14 @@ from model.meta_learning import (
     setup_optimizer,
 )
 from utils.data import Dataset, collate, load_data
-from utils.logging import save_checkpoint
+from utils.logging import (
+    average_metrics,
+    init_wandb,
+    log_benchmark_scores,
+    log_epoch_metrics,
+    log_step_metrics,
+    save_checkpoint,
+)
 from utils.model import extract_kv_linear_init, get_model_and_tokenizer
 from utils.rope import get_rope_theta
 
@@ -61,6 +68,8 @@ def run_epoch(
     inner_dtype,
     residual_cr,
     key_config=None,
+    wandb_run=None,
+    optimiser_steps=0,
 ):
     inner_lr = cfg.inner_lr
     inner_steps = cfg.inner_steps
@@ -70,6 +79,7 @@ def run_epoch(
     rope_theta = cfg.rope_theta
 
     sums = _metric_sums()
+    window = _metric_sums()
     batch_count = 0
     accum_count = 0
     optimizer.zero_grad()
@@ -112,12 +122,18 @@ def run_epoch(
 
         for name in sums:
             sums[name] += metrics[name]
+            window[name] += metrics[name]
         accum_count += 1
         if accum_count >= accum_steps:
             _step(
                 optimizer,
                 accum_count,
             )
+            optimiser_steps += 1
+            log_step_metrics(
+                wandb_run, window, accum_count, epoch, optimiser_steps
+            )
+            window = _metric_sums()
             accum_count = 0
 
         batch_count += 1
@@ -136,8 +152,12 @@ def run_epoch(
             optimizer,
             accum_count,
         )
+        optimiser_steps += 1
+        log_step_metrics(
+            wandb_run, window, accum_count, epoch, optimiser_steps
+        )
 
-    return sums, batch_count
+    return sums, batch_count, optimiser_steps
 
 
 def meta_train(
@@ -149,6 +169,7 @@ def meta_train(
     cfg,
     ckpt_path,
     tokenizer,
+    wandb_run=None,
 ):
     optimizer = setup_optimizer(mlps, cfg)
     model.eval()
@@ -169,9 +190,10 @@ def meta_train(
     )
 
     data_iter = iter(dataloader)
+    optimiser_steps = 0
     for epoch in range(cfg.num_meta_epochs):
         start = time.time()
-        sums, batch_count = run_epoch(
+        sums, batch_count, optimiser_steps = run_epoch(
             model,
             mlps,
             data_iter,
@@ -182,13 +204,15 @@ def meta_train(
             inner_dtype,
             residual_cr=residual_cr,
             key_config=key_config,
+            wandb_run=wandb_run,
+            optimiser_steps=optimiser_steps,
         )
 
         epoch_sec = time.time() - start
-        avgs = {
-            metric: total / max(batch_count, 1)
-            for metric, total in sums.items()
-        }
+        avgs = average_metrics(sums, batch_count)
+        log_epoch_metrics(
+            wandb_run, avgs, epoch, batch_count, optimiser_steps
+        )
         print(
             f"Epoch {epoch} complete. "
             f"Average L0: {avgs['initial_support_loss']:.6f}, "
@@ -222,6 +246,8 @@ def meta_train(
                     epoch=epoch,
                     benchmark=benchmark,
                     samples=samples,
+                    wandb_run=wandb_run,
+                    optimiser_steps=optimiser_steps,
                 )
 
 
@@ -270,6 +296,8 @@ def eval_benchmark(
     epoch,
     benchmark,
     samples,
+    wandb_run=None,
+    optimiser_steps=0,
 ):
     """Evaluate a benchmark with the current meta initialisation."""
     from lm_eval import evaluator
@@ -336,6 +364,14 @@ def eval_benchmark(
     print(
         f"{benchmark} eval epoch {epoch}: "
         f"avg={avg_score:.4f}, per-task={scores}"
+    )
+    log_benchmark_scores(
+        wandb_run,
+        benchmark,
+        avg_score,
+        scores,
+        epoch,
+        optimiser_steps,
     )
 
 
@@ -455,16 +491,21 @@ def main():
         "Starting meta-training... "
         f"(batches_per_epoch: {cfg.batches_per_epoch})"
     )
-    meta_train(
-        model=model,
-        name=model_name,
-        mlps=mlps,
-        dataloader=dataloader,
-        device=device,
-        cfg=cfg,
-        ckpt_path=ckpt_path,
-        tokenizer=tokenizer,
-    )
+    wandb_run = init_wandb(config, os.path.basename(run_dir))
+    try:
+        meta_train(
+            model=model,
+            name=model_name,
+            mlps=mlps,
+            dataloader=dataloader,
+            device=device,
+            cfg=cfg,
+            ckpt_path=ckpt_path,
+            tokenizer=tokenizer,
+            wandb_run=wandb_run,
+        )
+    finally:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

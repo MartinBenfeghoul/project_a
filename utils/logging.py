@@ -1,8 +1,122 @@
 import json
 import os
 
+from dotenv import load_dotenv
 from omegaconf import OmegaConf
 import torch
+
+
+class WandbRun:
+    def __init__(self, run=None):
+        self.run = run
+
+    @property
+    def enabled(self) -> bool:
+        return self.run is not None
+
+    def log(self, metrics: dict, step: int) -> None:
+        if self.run is not None:
+            self.run.log(metrics, step=step)
+
+    def summarise(self, **values) -> None:
+        if self.run is not None:
+            self.run.summary.update(values)
+
+    def finish(self) -> None:
+        if self.run is not None:
+            self.run.finish()
+
+
+def init_wandb(config, run_name: str) -> WandbRun:
+    wandb_config = config.get("wandb", {})
+    if not wandb_config.get("enabled", False):
+        return WandbRun()
+
+    import wandb
+
+    load_dotenv()
+    wandb_key = os.getenv("WANDB_KEY")
+    if not wandb_key:
+        raise RuntimeError(
+            "WANDB_KEY environment variable is not set. Please add it to your .env file"
+        )
+
+    wandb.login(key=wandb_key)
+
+    run = wandb.init(
+        project=wandb_config.get("project"),
+        entity=wandb_config.get("entity"),
+        name=run_name,
+        config=OmegaConf.to_container(config, resolve=True),
+    )
+
+    print(f"Logging to wandb run: {run.url or run.name}")
+    return WandbRun(run)
+
+
+def average_metrics(sums: dict, count: int) -> dict:
+    return {metric: total / max(count, 1) for metric, total in sums.items()}
+
+
+def log_step_metrics(wandb_run, window, count, epoch, optimiser_steps):
+    """Log one optimiser step, averaged over its accumulated batches."""
+    if wandb_run is None:
+        return
+    avgs = average_metrics(window, count)
+    wandb_run.log(
+        {
+            "train/initial_support_loss": avgs["initial_support_loss"],
+            "train/final_support_loss": avgs["final_support_loss"],
+            "train/meta_objective": avgs["meta_objective"],
+            "train/adaptation_improvement": (
+                avgs["final_support_loss"] - avgs["initial_support_loss"]
+            ),
+            "train/epoch": epoch,
+        },
+        step=optimiser_steps,
+    )
+
+
+def log_epoch_metrics(wandb_run, avgs, epoch, batch_count, optimiser_steps):
+    if wandb_run is None:
+        return
+    wandb_run.log(
+        {
+            "epoch/avg_initial_support_loss": avgs["initial_support_loss"],
+            "epoch/avg_final_support_loss": avgs["final_support_loss"],
+            "epoch/avg_meta_objective": avgs["meta_objective"],
+            "epoch/num_batches": batch_count,
+            "epoch/epoch": epoch,
+        },
+        step=optimiser_steps,
+    )
+    wandb_run.summarise(
+        optimiser_steps=optimiser_steps,
+        epochs=epoch + 1,
+    )
+
+
+def log_benchmark_scores(
+    wandb_run,
+    benchmark,
+    avg_score,
+    scores,
+    epoch,
+    optimiser_steps,
+):
+    if wandb_run is None:
+        return
+    wandb_run.log(
+        {
+            f"eval/{benchmark}/avg": avg_score,
+            **{
+                f"eval/{benchmark}/{task}": score
+                for task, score in scores.items()
+            },
+            "eval/epoch": epoch,
+        },
+        step=optimiser_steps,
+    )
 
 
 def format_run_value(value: object) -> str:

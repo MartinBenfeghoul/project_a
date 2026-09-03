@@ -7,3 +7,4 @@ wget-log*
 
 checkpoints/*
 results/*
+wandb/

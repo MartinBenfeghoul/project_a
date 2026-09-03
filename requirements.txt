@@ -10,6 +10,7 @@ scipy
 dotenv==0.9.9
 omegaconf
 tqdm
+wandb
 
 html2text==2025.4.15
 bs4==0.0.2
