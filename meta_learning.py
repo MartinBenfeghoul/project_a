@@ -232,7 +232,7 @@ def build_key_reconstruction_config(cfg):
     if not cfg.get("train_on_reconstructed_keys", False):
         return None
     return KeyReconstructionConfig(
-        compression_ratio=float(cfg.get("key_comp_ratio", 4.0)),
+        compression_ratio=float(cfg.eval_target_cr),
         layer_group_size=int(cfg.get("xkv_layer_group_size", 4)),
         svd_backend=str(cfg.get("xkv_svd_backend", "cholqr")),
     )
@@ -386,7 +386,7 @@ def build_run_name(cfg) -> str:
     name = f"seq{cfg.seq_len}_steps{cfg.inner_steps}_mlr{cfg.meta_lr}_"
     key_config = build_key_reconstruction_config(cfg)
     if key_config is not None:
-        name += f"xkvkeys{key_config.compression_ratio}_"
+        name += f"xkvkeys{key_config.compression_ratio}cr_"
     return name
 
 

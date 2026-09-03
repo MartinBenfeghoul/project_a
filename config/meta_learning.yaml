@@ -20,7 +20,6 @@ training:
   meta_loss_post_residual: true
 
   train_on_reconstructed_keys: true
-  key_comp_ratio: 4.0
   xkv_layer_group_size: 4
   xkv_svd_backend: cholqr
 
