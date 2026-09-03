@@ -59,7 +59,7 @@ def run_epoch(
     epoch,
     device,
     inner_dtype,
-    residual_cr=None,
+    residual_cr,
     key_config=None,
 ):
     inner_lr = cfg.inner_lr
@@ -162,14 +162,11 @@ def meta_train(
             f"layer_group_size={key_config.layer_group_size}, "
             f"svd_backend={key_config.svd_backend})"
         )
-    residual_cr = (
-        float(cfg.eval_target_cr) if cfg.meta_loss_post_residual else None
+    residual_cr = float(cfg.eval_target_cr)
+    print(
+        "Meta objective uses post-residual reconstruction loss "
+        f"(target_cr={residual_cr})"
     )
-    if residual_cr is not None:
-        print(
-            "Meta objective uses post-residual reconstruction loss "
-            f"(target_cr={residual_cr})"
-        )
 
     data_iter = iter(dataloader)
     for epoch in range(cfg.num_meta_epochs):

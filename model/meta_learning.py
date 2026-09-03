@@ -287,7 +287,7 @@ def inner_loop(
     lr,
     steps: int,
     *,
-    residual_cr: float | None = None,
+    residual_cr: float,
 ):
     """Run first-order functional Adam and return the final-only objective."""
     meta_params = [param for mlp in mlps for param in trainable_params(mlp)]
@@ -327,15 +327,11 @@ def inner_loop(
         preds = _predict(mlps, kvs, params, names_by_mlp)
         loss = _mse(preds, kvs)
     final_loss = loss
-    objective = (
-        _residual_loss(
-            mlps,
-            kvs,
-            preds,
-            residual_cr,
-        )
-        if residual_cr is not None
-        else final_loss
+    objective = _residual_loss(
+        mlps,
+        kvs,
+        preds,
+        residual_cr,
     )
 
     grads = torch.autograd.grad(
@@ -343,15 +339,10 @@ def inner_loop(
         params,
         allow_unused=True,
     )
-    initial_value = initial_loss.detach().item()
-    final_value = final_loss.detach().item()
-    objective_value = (
-        objective.detach().item() if residual_cr is not None else final_value
-    )
     return meta_params, {
-        "initial_support_loss": initial_value,
-        "final_support_loss": final_value,
-        "meta_objective": objective_value,
+        "initial_support_loss": initial_loss.detach().item(),
+        "final_support_loss": final_loss.detach().item(),
+        "meta_objective": objective.detach().item(),
         "param_grads": grads,
     }
 
