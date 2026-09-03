@@ -227,12 +227,18 @@ def meta_train(
         if (epoch + 1) % eval_every == 0 or (epoch + 1 == cfg.num_meta_epochs):
             base, ext = os.path.splitext(ckpt_path)
             epoch_ckpt = f"{base}_epoch{epoch}{ext}"
-            for benchmark, enabled, samples in (
-                ("ruler", cfg.eval_ruler, cfg.eval_ruler_samples),
+            for benchmark, enabled, samples, tasks in (
+                (
+                    "ruler",
+                    cfg.eval_ruler,
+                    cfg.eval_ruler_samples,
+                    cfg.get("eval_ruler_tasks", None),
+                ),
                 (
                     "longbench",
                     cfg.eval_longbench,
                     cfg.eval_longbench_samples,
+                    cfg.get("eval_longbench_tasks", None),
                 ),
             ):
                 if not enabled:
@@ -246,6 +252,7 @@ def meta_train(
                     epoch=epoch,
                     benchmark=benchmark,
                     samples=samples,
+                    tasks=tasks,
                     wandb_run=wandb_run,
                     optimiser_steps=optimiser_steps,
                 )
@@ -296,6 +303,7 @@ def eval_benchmark(
     epoch,
     benchmark,
     samples,
+    tasks=None,
     wandb_run=None,
     optimiser_steps=0,
 ):
@@ -311,10 +319,17 @@ def eval_benchmark(
     from cache import CompressedCacheConfig
     target_cr = float(cfg.eval_target_cr)
     eval_batch_size = int(getattr(cfg, "eval_batch_size", 1))
+    if tasks is None:
+        tasks = [benchmark]
+    elif isinstance(tasks, str):
+        tasks = [tasks]
+    else:
+        tasks = list(tasks)
+    eval_tasks = get_tasks(tasks, print_tasks=False)
     print(
         f"Running {benchmark} evaluation (epoch {epoch}, "
         f"{samples} samples per task, target_cr={target_cr}, "
-        f"batch_size={eval_batch_size})..."
+        f"batch_size={eval_batch_size}, tasks={eval_tasks})..."
     )
 
     lm = CompressedCacheHFLM(
@@ -340,7 +355,7 @@ def eval_benchmark(
     results = evaluator.simple_evaluate(
         model=lm,
         gen_kwargs=GEN_KWARGS,
-        tasks=get_tasks([benchmark]),
+        tasks=eval_tasks,
         num_fewshot=0,
         batch_size=eval_batch_size,
         max_batch_size=eval_batch_size,

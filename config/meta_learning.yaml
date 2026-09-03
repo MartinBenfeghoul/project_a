@@ -1,5 +1,5 @@
 model:
-  name: "mistralai/Mistral-7B-Instruct-v0.3"
+  name: "meta-llama/Llama-3.1-8B-Instruct"
 
 data:
   path: "HuggingFaceFW/fineweb-edu"
@@ -8,11 +8,11 @@ data:
 
 training:
   seq_len: 4096
-  batch_size: 1
+  batch_size: 4
   grad_accum_steps: 8
-  eval_batch_size: 1
+  eval_batch_size: 4
 
-  inner_steps: 10
+  inner_steps: 15
   inner_lr: 1e-3
   inner_adaptation_dtype: bfloat16
 
@@ -31,9 +31,11 @@ training:
   eval_interval: 20
   eval_target_cr: 4.0
   eval_ruler: true
-  eval_ruler_samples: 10
-  eval_longbench: true
+  eval_ruler_samples: 20
+  eval_ruler_tasks: ["ruler_niah3", "niah_multikey_3"]
+  eval_longbench: false
   eval_longbench_samples: 10
+  eval_longbench_tasks: null
 
 wandb:
   enabled: true
