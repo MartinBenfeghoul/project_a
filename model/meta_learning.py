@@ -229,11 +229,7 @@ def _compressed_rows(mlp, values: torch.Tensor, target_cr: float) -> int:
     )
     total_rows = batch_size * num_heads * num_tokens
     residual_rows = max(0, min(residual_rows, total_rows))
-    rows_per_batch = num_heads * num_tokens
-    return max(
-        1,
-        int(rows_per_batch * (1.0 - residual_rows / total_rows)),
-    )
+    return max(1, total_rows - residual_rows)
 
 
 def _residual_loss(mlps, kvs, preds, target_cr) -> torch.Tensor:
@@ -248,13 +244,12 @@ def _residual_loss(mlps, kvs, preds, target_cr) -> torch.Tensor:
     ]
     masks = []
     for error, rows in zip(row_errors, row_counts):
-        by_batch = error.flatten(start_dim=1)
         threshold = torch.topk(
-            by_batch,
+            error.flatten(),
             rows,
             largest=False,
-        ).values[:, -1]
-        masks.append(error <= threshold[:, None, None])
+        ).values[-1]
+        masks.append(error <= threshold)
     return sum(
         (error * mask.unsqueeze(-1)).mean()
         for error, mask in zip(errors, masks)
