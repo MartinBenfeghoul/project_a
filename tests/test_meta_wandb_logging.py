@@ -5,10 +5,8 @@ import torch
 from omegaconf import OmegaConf
 
 import meta_learning as ml
-from utils.logging import average_metrics, init_wandb, log_epoch_metrics
-
 from tests.helpers import build_llama
-
+from utils.logging import average_metrics, init_wandb, log_epoch_metrics
 
 NUM_LAYERS = 2
 SEQ_LEN = 64
@@ -119,12 +117,24 @@ def test_step_metrics_carry_the_adaptation_improvement(model):
             "train/final_support_loss",
             "train/meta_objective",
             "train/adaptation_improvement",
+            "train/outer_grad_norm",
             "train/epoch",
         }
         assert metrics["train/adaptation_improvement"] == (
             metrics["train/initial_support_loss"]
             - metrics["train/final_support_loss"]
         )
+        assert metrics["train/outer_grad_norm"] >= 0
+
+
+def test_outer_gradients_are_logged_after_accumulation_averaging():
+    parameter = torch.nn.Parameter(torch.zeros(2))
+    parameter.grad = torch.tensor([3.0, 4.0])
+    optimizer = torch.optim.SGD([parameter], lr=0.0)
+
+    grad_norm = ml._step(optimizer, count=2)
+
+    assert grad_norm == pytest.approx(2.5)
 
 
 def test_optimiser_steps_continue_across_epochs(model):

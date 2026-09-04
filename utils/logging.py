@@ -1,9 +1,9 @@
 import json
 import os
 
+import torch
 from dotenv import load_dotenv
 from omegaconf import OmegaConf
-import torch
 
 
 class WandbRun:
@@ -58,23 +58,29 @@ def average_metrics(sums: dict, count: int) -> dict:
     return {metric: total / max(count, 1) for metric, total in sums.items()}
 
 
-def log_step_metrics(wandb_run, window, count, epoch, optimiser_steps):
+def log_step_metrics(
+    wandb_run,
+    window,
+    count,
+    epoch,
+    optimiser_steps,
+    grad_norm,
+):
     """Log one optimiser step, averaged over its accumulated batches."""
     if wandb_run is None:
         return
     avgs = average_metrics(window, count)
-    wandb_run.log(
-        {
-            "train/initial_support_loss": avgs["initial_support_loss"],
-            "train/final_support_loss": avgs["final_support_loss"],
-            "train/meta_objective": avgs["meta_objective"],
-            "train/adaptation_improvement": (
-                avgs["initial_support_loss"] - avgs["final_support_loss"]
-            ),
-            "train/epoch": epoch,
-        },
-        step=optimiser_steps,
-    )
+    metrics = {
+        "train/initial_support_loss": avgs["initial_support_loss"],
+        "train/final_support_loss": avgs["final_support_loss"],
+        "train/meta_objective": avgs["meta_objective"],
+        "train/adaptation_improvement": (
+            avgs["initial_support_loss"] - avgs["final_support_loss"]
+        ),
+        "train/epoch": epoch,
+        "train/outer_grad_norm": grad_norm
+    }
+    wandb_run.log(metrics, step=optimiser_steps)
 
 
 def log_epoch_metrics(wandb_run, avgs, epoch, batch_count, optimiser_steps):

@@ -1,5 +1,6 @@
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
+from functools import lru_cache
 
 import torch
 import torch.nn.functional as F
@@ -31,10 +32,27 @@ class LearnedInit:
         return cls()
 
     @classmethod
+    def from_modules(cls, mlps) -> "LearnedInit":
+        """Use live, detached module weights without a checkpoint round-trip."""
+        return cls(
+            {
+                idx: LearnedLayerInit(
+                    weights={
+                        name: tensor.detach()
+                        for name, tensor in mlp.state_dict().items()
+                    }
+                )
+                for idx, mlp in enumerate(mlps)
+            }
+        )
+
+    @classmethod
+    @lru_cache(maxsize=1)
     def from_checkpoint(
         cls,
         path: str,
     ) -> "LearnedInit":
+        """Load a checkpoint once while it is in use."""
         checkpoint = torch.load(path, map_location="cpu")
         layer_weights = {
             int(key.split("_")[1]): value
@@ -47,16 +65,6 @@ class LearnedInit:
                 for idx, weights in layer_weights.items()
             }
         )
-
-    @classmethod
-    def from_value_mlp_checkpoint(cls, path: str) -> "LearnedInit":
-        checkpoint = torch.load(path, map_location="cpu")
-        layers = {
-            int(k.split("_")[1]): LearnedLayerInit(weights=v)
-            for k, v in checkpoint.items()
-            if k.startswith("layer_")
-        }
-        return cls(layers)
 
     def for_layer(self, layer_idx: int) -> LearnedLayerInit:
         return self.layers.get(layer_idx, LearnedLayerInit())

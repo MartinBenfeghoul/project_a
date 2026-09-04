@@ -1,14 +1,16 @@
 import math
+from typing import Any, Callable
+
+import torch
+from torch.nn.functional import mse_loss
+from torch.optim import Adam
+
+from model.meta_learning import LearnedInit, LearnedLayerInit
+from model.mlp import MLP
+from numerics.quantisation import init_compressor, select_compressed_rows
 
 from ..rope import SharedRopeCache
 from .tensor import SingleTensorCache, SingleTensorDynamicLayer
-from torch.optim import Adam
-from torch.nn.functional import mse_loss
-import torch
-from model.mlp import MLP
-from typing import Any, Callable
-from model.meta_learning import LearnedInit, LearnedLayerInit
-from numerics.quantisation import init_compressor, select_compressed_rows
 
 
 class MLPValueLayer(SingleTensorDynamicLayer):
@@ -80,19 +82,23 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             self._num_params = sum(p.numel() for p in self.mlp.parameters())
 
             if self.learned_init.has_weights:
-                weights = dict(self.learned_init.weights)
-                if not self.use_residual and "W_linear" in weights:
-                    weights = {
-                        k: v for k, v in weights.items() if k != "W_linear"
-                    }
+                weights = {
+                    name: tensor
+                    for name, tensor in self.learned_init.weights.items()
+                    if name != "W_linear"
+                }
+                if self.use_residual:
+                    weights["W_linear"] = self.mlp.W_linear
                 self.mlp.load_state_dict(weights)
 
-            if self.use_residual and self.W_linear_init is not None:
+            if self.use_residual and w_linear_init is not None:
                 with torch.no_grad():
-                    linear_init = self.W_linear_init.to(
-                        device=value_states.device, dtype=value_states.dtype
+                    self.mlp.W_linear.copy_(
+                        w_linear_init.to(
+                            device=value_states.device,
+                            dtype=value_states.dtype,
+                        )
                     )
-                    self.mlp.W_linear.copy_(linear_init)
 
     def _encode_residuals(self, residuals):
         if self.compressor is None:
@@ -432,6 +438,7 @@ class MLPValueCache(SingleTensorCache):
         *,
         target_cr: float,
         num_epochs: int = 5,
+        learned_init: LearnedInit | None = None,
         meta_weights_path: str | None = None,
         value_mlp_weights_path: str | None = None,
         rope_cache: SharedRopeCache | None = None,
@@ -458,22 +465,13 @@ class MLPValueCache(SingleTensorCache):
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
 
-        if meta_weights_path is not None and value_mlp_weights_path is not None:
-            raise ValueError(
-                "Use only one of meta_weights_path or value_mlp_weights_path."
-            )
-
-        self.learned_init = (
-            LearnedInit.from_value_mlp_checkpoint(value_mlp_weights_path)
-            if value_mlp_weights_path is not None
-            else (
-                LearnedInit.from_checkpoint(
-                    path=meta_weights_path,
-                )
-                if meta_weights_path is not None
-                else LearnedInit.empty()
-            )
-        )
+        checkpoint_path = meta_weights_path or value_mlp_weights_path
+        if learned_init is not None:
+            self.learned_init = learned_init
+        elif checkpoint_path is not None:
+            self.learned_init = LearnedInit.from_checkpoint(checkpoint_path)
+        else:
+            self.learned_init = LearnedInit.empty()
 
         self.checkpoint_has_w_linear = "W_linear" in (
             self.learned_init.for_layer(0).weights or {}

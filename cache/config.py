@@ -37,6 +37,7 @@ class TurboQuantCacheConfig:
 class MLPValueCacheConfig:
     target_compression_ratio: float
     num_epochs: int = 5
+    learned_init: object | None = None
     meta_weights_path: str | None = None
     value_mlp_weights_path: str | None = None
     use_residual: bool = False
@@ -146,6 +147,7 @@ def build_value_cache(
                 ddp_cache_data=ddp_cache_data,
                 target_cr=config.target_compression_ratio,
                 num_epochs=config.num_epochs,
+                learned_init=config.learned_init,
                 meta_weights_path=config.meta_weights_path,
                 value_mlp_weights_path=config.value_mlp_weights_path,
                 use_residual=config.use_residual,

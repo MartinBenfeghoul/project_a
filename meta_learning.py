@@ -16,14 +16,15 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from model.mlp import MLP
 from model.meta_learning import (
     KeyReconstructionConfig,
+    LearnedInit,
     add_grad,
     inner_loop,
     prepare_kvs,
     setup_optimizer,
 )
+from model.mlp import MLP
 from utils.data import Dataset, collate, load_data
 from utils.logging import (
     average_metrics,
@@ -45,16 +46,24 @@ def _metric_sums():
     }
 
 
-def _step(
-    optimizer,
-    count,
-):
+def _step(optimizer, count):
+    """Average the accumulated gradient and step."""
+    grads = []
     for group in optimizer.param_groups:
         for param in group["params"]:
             if param.grad is not None:
                 param.grad.div_(count)
+                grads.append(param.grad.detach())
+    grad_norm = (
+        torch.linalg.vector_norm(
+            torch.stack([torch.linalg.vector_norm(g.float()) for g in grads])
+        ).item()
+        if grads
+        else 0.0
+    )
     optimizer.step()
     optimizer.zero_grad()
+    return grad_norm
 
 
 def _batch_rope(model, cache, seq_len):
@@ -134,13 +143,15 @@ def run_epoch(
             window[name] += metrics[name]
         accum_count += 1
         if accum_count >= accum_steps:
-            _step(
-                optimizer,
-                accum_count,
-            )
+            grad_norm = _step(optimizer, accum_count)
             optimiser_steps += 1
             log_step_metrics(
-                wandb_run, window, accum_count, epoch, optimiser_steps
+                wandb_run,
+                window,
+                accum_count,
+                epoch,
+                optimiser_steps,
+                grad_norm,
             )
             window = _metric_sums()
             accum_count = 0
@@ -157,13 +168,15 @@ def run_epoch(
             )
 
     if accum_count > 0:
-        _step(
-            optimizer,
-            accum_count,
-        )
+        grad_norm = _step(optimizer, accum_count)
         optimiser_steps += 1
         log_step_metrics(
-            wandb_run, window, accum_count, epoch, optimiser_steps
+            wandb_run,
+            window,
+            accum_count,
+            epoch,
+            optimiser_steps,
+            grad_norm,
         )
 
     return sums, batch_count, optimiser_steps
@@ -197,6 +210,22 @@ def meta_train(
         "Meta objective uses post-residual reconstruction loss "
         f"(target_cr={residual_cr})"
     )
+
+    benchmark_specs = (
+        (
+            "ruler",
+            cfg.eval_ruler,
+            cfg.eval_ruler_samples,
+            cfg.get("eval_ruler_tasks", None),
+        ),
+        (
+            "longbench",
+            cfg.eval_longbench,
+            cfg.eval_longbench_samples,
+            cfg.get("eval_longbench_tasks", None),
+        ),
+    )
+    eval_runtime = None
 
     data_iter = iter(dataloader)
     optimiser_steps = 0
@@ -238,34 +267,19 @@ def meta_train(
             save_checkpoint(mlps, ckpt_path, epoch)
 
         if should_eval:
-            base, ext = os.path.splitext(ckpt_path)
-            epoch_ckpt = f"{base}_epoch{epoch}{ext}"
-            for benchmark, enabled, samples, tasks in (
-                (
-                    "ruler",
-                    cfg.eval_ruler,
-                    cfg.eval_ruler_samples,
-                    cfg.get("eval_ruler_tasks", None),
-                ),
-                (
-                    "longbench",
-                    cfg.eval_longbench,
-                    cfg.eval_longbench_samples,
-                    cfg.get("eval_longbench_tasks", None),
-                ),
-            ):
+            learned_init = LearnedInit.from_modules(mlps)
+            for benchmark, enabled, samples, tasks in benchmark_specs:
                 if not enabled:
                     continue
+                if eval_runtime is None:
+                    eval_runtime = MetaEvalRuntime(model, name, tokenizer, cfg)
                 eval_benchmark(
-                    model=model,
-                    name=name,
-                    tokenizer=tokenizer,
-                    cfg=cfg,
-                    ckpt_path=epoch_ckpt,
+                    eval_runtime,
                     epoch=epoch,
                     benchmark=benchmark,
                     samples=samples,
                     tasks=tasks,
+                    learned_init=learned_init,
                     wandb_run=wandb_run,
                     optimiser_steps=optimiser_steps,
                 )
@@ -295,87 +309,109 @@ def build_key_cache_config(cfg, num_layers):
     )
 
 
-def build_value_cache_config(cfg, ckpt_path, target_cr):
-    """Build inference settings that match the meta-training inner loop."""
-    from cache import MLPValueCacheConfig
+def _flatten_task_dict(task_dict):
+    """get_task_dict nests group tasks; evaluate_tasks wants them flat."""
+    tasks = []
+    for value in task_dict.values():
+        if isinstance(value, dict):
+            tasks.extend(_flatten_task_dict(value))
+        else:
+            tasks.append(value)
+    return tasks
 
-    return MLPValueCacheConfig(
-        target_compression_ratio=target_cr,
-        num_epochs=cfg.inner_steps,
-        meta_weights_path=ckpt_path,
-        use_residual=cfg.use_residual,
-    )
+
+class MetaEvalRuntime:
+    """lm-eval state reused across the periodic meta-training benchmarks."""
+
+    def __init__(self, model, name, tokenizer, cfg):
+        from lm_eval_script import CompressedCacheHFLM
+
+        self.model = model
+        self.name = name
+        self.cfg = cfg
+        self.batch_size = int(getattr(cfg, "eval_batch_size", 1))
+        self.target_cr = float(cfg.eval_target_cr)
+        self._resolved = {}
+        self.lm = CompressedCacheHFLM(
+            cache_config=self._cache_config(None),
+            pretrained=model,
+            tokenizer=tokenizer,
+            truncation=False,
+            trust_remote_code=True,
+            batch_size=self.batch_size,
+            max_batch_size=self.batch_size,
+        )
+
+    def _cache_config(self, learned_init):
+        from cache import CompressedCacheConfig, MLPValueCacheConfig
+
+        return CompressedCacheConfig(
+            key=build_key_cache_config(
+                self.cfg,
+                self.model.config.num_hidden_layers,
+            ),
+            value=MLPValueCacheConfig(
+                target_compression_ratio=self.target_cr,
+                num_epochs=self.cfg.inner_steps,
+                learned_init=learned_init,
+                use_residual=self.cfg.use_residual,
+            ),
+        )
+
+    def _tasks(self, benchmark, tasks):
+        """Resolve a benchmark's task objects once, then reuse them."""
+        if benchmark not in self._resolved:
+            from lm_eval.tasks import TaskManager, get_task_dict
+            from lm_eval_script import get_tasks
+
+            metadata = {"tokenizer": self.name}
+            if benchmark == "ruler":
+                metadata["max_seq_lengths"] = [
+                    int(length)
+                    for length in self.cfg.get("eval_seq_lengths", [4096])
+                ]
+            names = [benchmark] if tasks is None else tasks
+            if isinstance(names, str):
+                names = [names]
+            manager = TaskManager(metadata=metadata)
+            resolved = get_task_dict(
+                get_tasks(list(names), print_tasks=False), manager
+            )
+            self._resolved[benchmark] = (_flatten_task_dict(resolved), manager)
+        return self._resolved[benchmark]
+
+    def evaluate(self, benchmark, tasks, samples, learned_init):
+        from lm_eval_script import evaluate_tasks
+
+        eval_tasks, manager = self._tasks(benchmark, tasks)
+        self.lm.set_cache_config(self._cache_config(learned_init))
+        return evaluate_tasks(
+            self.lm,
+            eval_tasks,
+            batch_size=self.batch_size,
+            task_manager=manager,
+            limit=samples,
+        )
 
 
 def eval_benchmark(
-    model,
-    name,
-    tokenizer,
-    cfg,
-    ckpt_path,
+    eval_runtime,
     epoch,
     benchmark,
     samples,
     tasks=None,
+    learned_init=None,
     wandb_run=None,
     optimiser_steps=0,
 ):
     """Evaluate a benchmark with the current meta initialisation."""
-    from lm_eval.tasks import TaskManager
-    from lm_eval_script import (
-        CompressedCacheHFLM,
-        evaluate_tasks,
-        get_tasks,
-    )
-    from cache import CompressedCacheConfig
-    target_cr = float(cfg.eval_target_cr)
-    eval_batch_size = int(getattr(cfg, "eval_batch_size", 1))
-    if tasks is None:
-        tasks = [benchmark]
-    elif isinstance(tasks, str):
-        tasks = [tasks]
-    else:
-        tasks = list(tasks)
-    eval_tasks = get_tasks(tasks, print_tasks=False)
-
-    metadata = {"tokenizer": name}
-    if benchmark == "ruler":
-        metadata["max_seq_lengths"] = [
-            int(length) for length in cfg.get("eval_seq_lengths", [4096])
-        ]
     print(
         f"Running {benchmark} evaluation (epoch {epoch}, "
-        f"{samples} samples per task, target_cr={target_cr}, "
-        f"batch_size={eval_batch_size}, tasks={eval_tasks})..."
+        f"{samples} samples per task, target_cr={eval_runtime.target_cr}, "
+        f"batch_size={eval_runtime.batch_size}, tasks={tasks or benchmark})..."
     )
 
-    lm = CompressedCacheHFLM(
-        cache_config=CompressedCacheConfig(
-            key=build_key_cache_config(
-                cfg,
-                model.config.num_hidden_layers,
-            ),
-            value=build_value_cache_config(
-                cfg,
-                ckpt_path,
-                target_cr,
-            ),
-        ),
-        pretrained=model,
-        tokenizer=tokenizer,
-        truncation=False,
-        trust_remote_code=True,
-        batch_size=eval_batch_size,
-        max_batch_size=eval_batch_size,
-    )
-
-    results = evaluate_tasks(
-        lm,
-        eval_tasks,
-        batch_size=eval_batch_size,
-        task_manager=TaskManager(metadata=metadata),
-        limit=samples,
-    )
+    results = eval_runtime.evaluate(benchmark, tasks, samples, learned_init)
 
     scores = {}
     for task, result in results["results"].items():

@@ -1,10 +1,9 @@
 import torch
-
 from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils_hf import stop_sequences_criteria
 
-from .core import CompressedCache
 from .config import CompressedCacheConfig
+from .core import CompressedCache
 
 
 class CompressedCacheHFLM(HFLM):
@@ -20,6 +19,10 @@ class CompressedCacheHFLM(HFLM):
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self._cache_config = cache_config
+
+    def set_cache_config(self, cache_config: CompressedCacheConfig) -> None:
+        """Use a new immutable cache config for subsequent model calls."""
         self._cache_config = cache_config
 
     def _make_cache(self, cache_context=None):

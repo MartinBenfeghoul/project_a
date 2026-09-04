@@ -289,3 +289,56 @@ def test_selective_retrieval_reads_stored_residuals(turboquant_residuals):
 
     assert retrieved.shape == (batch_size, num_heads, selected, head_dim)
     assert torch.isfinite(retrieved).all()
+
+
+def _layer_with(learned_weights, *, use_residual, w_linear_init=None):
+    """Lazily initialise one value layer against a given learned init."""
+    from cache.backends.mlp_values import MLPValueLayer
+    from model.meta_learning import LearnedLayerInit
+
+    layer = MLPValueLayer(
+        target_cr=4.0,
+        learned_init=LearnedLayerInit(weights=learned_weights),
+        use_residual=use_residual,
+        W_linear_init=w_linear_init,
+    )
+    layer.lazy_initialization(torch.zeros(1, 2, 4, 8))
+    return layer
+
+
+def test_checkpoint_w_linear_wins_over_the_model_derived_one():
+    """MLPValueCache drops W_linear_init for such checkpoints; the layer has
+    to agree, or a layer built directly resolves W_linear the other way."""
+    checkpoint = MLP(num_heads=2, head_dim=8, use_residual=True).state_dict()
+    checkpoint["W_linear"] = torch.full_like(checkpoint["W_linear"], 3.0)
+    derived = torch.full_like(checkpoint["W_linear"], 7.0)
+
+    layer = _layer_with(
+        checkpoint, use_residual=True, w_linear_init=derived
+    )
+
+    torch.testing.assert_close(layer.mlp.W_linear, checkpoint["W_linear"])
+
+
+def test_a_no_residual_checkpoint_loads_under_use_residual():
+    """Meta-training with use_residual=false must still evaluate with it on."""
+    checkpoint = MLP(num_heads=2, head_dim=8, use_residual=False).state_dict()
+    assert "W_linear" not in checkpoint
+    derived = torch.full((2, 8, 8), 5.0)
+
+    layer = _layer_with(checkpoint, use_residual=True, w_linear_init=derived)
+
+    torch.testing.assert_close(layer.mlp.W_linear, derived)
+    for name, tensor in checkpoint.items():
+        torch.testing.assert_close(layer.mlp.state_dict()[name], tensor)
+
+
+def test_a_residual_checkpoint_loads_without_use_residual():
+    checkpoint = MLP(num_heads=2, head_dim=8, use_residual=True).state_dict()
+
+    layer = _layer_with(checkpoint, use_residual=False)
+
+    assert not hasattr(layer.mlp, "W_linear")
+    for name, tensor in checkpoint.items():
+        if name != "W_linear":
+            torch.testing.assert_close(layer.mlp.state_dict()[name], tensor)
