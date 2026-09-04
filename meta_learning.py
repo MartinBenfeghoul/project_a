@@ -34,7 +34,7 @@ from utils.logging import (
     save_checkpoint,
 )
 from utils.model import extract_kv_linear_init, get_model_and_tokenizer
-from utils.rope import get_rope_theta
+from utils.rope import model_rope_cos_sin
 
 
 def _metric_sums():
@@ -57,6 +57,11 @@ def _step(
     optimizer.zero_grad()
 
 
+def _batch_rope(model, cache, seq_len):
+    keys = cache.layers[0].keys
+    return model_rope_cos_sin(model, seq_len, keys.device, keys.dtype)
+
+
 def run_epoch(
     model,
     mlps,
@@ -76,7 +81,6 @@ def run_epoch(
     log_interval = cfg.log_interval
     batches_per_epoch = cfg.batches_per_epoch
     accum_steps = int(cfg.grad_accum_steps)
-    rope_theta = cfg.rope_theta
 
     sums = _metric_sums()
     window = _metric_sums()
@@ -92,16 +96,21 @@ def run_epoch(
     ):
         start = time.time()
         attention_mask = batch["attention_mask"].to(device)
+        input_ids = batch["input_ids"].to(device)
         with torch.no_grad():
             output = model(
-                input_ids=batch["input_ids"].to(device),
+                input_ids=input_ids,
                 attention_mask=attention_mask,
                 use_cache=True,
             )
 
         kvs = prepare_kvs(
             output.past_key_values,
-            rope_theta=rope_theta,
+            rope=_batch_rope(
+                model,
+                output.past_key_values,
+                input_ids.shape[1],
+            ),
             dtype=inner_dtype,
             key_config=key_config,
             padding_mask=attention_mask,
@@ -221,10 +230,14 @@ def meta_train(
             f"Time: {epoch_sec:.1f}s"
         )
 
-        save_checkpoint(mlps, ckpt_path, epoch)
-
         eval_every = max(1, int(cfg.eval_interval))
-        if (epoch + 1) % eval_every == 0 or (epoch + 1 == cfg.num_meta_epochs):
+        save_every = max(1, int(cfg.get("checkpoint_interval", 10)))
+        is_last_epoch = epoch + 1 == cfg.num_meta_epochs
+        should_eval = (epoch + 1) % eval_every == 0 or is_last_epoch
+        if (epoch + 1) % save_every == 0 or is_last_epoch or should_eval:
+            save_checkpoint(mlps, ckpt_path, epoch)
+
+        if should_eval:
             base, ext = os.path.splitext(ckpt_path)
             epoch_ckpt = f"{base}_epoch{epoch}{ext}"
             for benchmark, enabled, samples, tasks in (
@@ -324,6 +337,12 @@ def eval_benchmark(
     else:
         tasks = list(tasks)
     eval_tasks = get_tasks(tasks, print_tasks=False)
+
+    metadata = {"tokenizer": name}
+    if benchmark == "ruler":
+        metadata["max_seq_lengths"] = [
+            int(length) for length in cfg.get("eval_seq_lengths", [4096])
+        ]
     print(
         f"Running {benchmark} evaluation (epoch {epoch}, "
         f"{samples} samples per task, target_cr={target_cr}, "
@@ -354,7 +373,7 @@ def eval_benchmark(
         lm,
         eval_tasks,
         batch_size=eval_batch_size,
-        task_manager=TaskManager(metadata={"tokenizer": name}),
+        task_manager=TaskManager(metadata=metadata),
         limit=samples,
     )
 
@@ -425,11 +444,17 @@ def init_mlps(model, cfg, device):
 
 def build_run_name(cfg) -> str:
     """Name a meta-learning run after the knobs that define it."""
-    name = f"seq{cfg.seq_len}_steps{cfg.inner_steps}_mlr{cfg.meta_lr}_"
+    parts = [
+        f"seq{cfg.seq_len}",
+        f"steps{cfg.inner_steps}",
+        f"mlr{cfg.meta_lr}",
+        f"cr{float(cfg.eval_target_cr)}",
+    ]
     key_config = build_key_reconstruction_config(cfg)
     if key_config is not None:
-        name += f"xkvkeys{key_config.compression_ratio}cr_"
-    return name
+        parts.append(f"xkvkeys{key_config.compression_ratio}cr")
+    parts.append("residual" if cfg.use_residual else "noresidual")
+    return "_".join(parts)
 
 
 def main():
@@ -445,8 +470,6 @@ def main():
     model_dir = model_name.split("/")[-1]
 
     run_name = build_run_name(cfg)
-    if cfg.use_residual:
-        run_name += "_perhead_residual"
     base_dir = os.path.join("checkpoints", model_dir, run_name)
     run_dir = base_dir
     idx = 0
@@ -461,7 +484,6 @@ def main():
     num_heads = model.config.num_key_value_heads
     dim = model.config.hidden_size // model.config.num_attention_heads
     num_layers = model.config.num_hidden_layers
-    cfg.rope_theta = get_rope_theta(model.config)
 
     config_path = os.path.join(run_dir, "config.yaml")
     OmegaConf.save(config, config_path)

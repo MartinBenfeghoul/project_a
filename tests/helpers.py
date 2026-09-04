@@ -42,6 +42,15 @@ def gather_tokens(tensor: torch.Tensor, positions: torch.Tensor) -> torch.Tensor
     )
 
 
+LLAMA3_ROPE_SCALING = {
+    "rope_type": "llama3",
+    "factor": 8.0,
+    "low_freq_factor": 1.0,
+    "high_freq_factor": 4.0,
+    "original_max_position_embeddings": 32,
+}
+
+
 def build_llama(
     num_layers: int = 2,
     *,
@@ -49,6 +58,7 @@ def build_llama(
     num_key_value_heads: int = 2,
     head_dim: int = 8,
     seed: int = 0,
+    rope_scaling: dict | None = None,
 ):
     """A tiny Llama whose attention shapes are convenient for cache tests."""
     from transformers import LlamaConfig, LlamaForCausalLM
@@ -65,6 +75,7 @@ def build_llama(
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=2,
+        rope_scaling=rope_scaling,
     )
     return LlamaForCausalLM(config).eval()
 

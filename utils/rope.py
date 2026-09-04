@@ -74,3 +74,29 @@ def get_rope_theta(model_config) -> float:
     if rope_theta is None:
         raise ValueError("Model config does not define rope_theta")
     return float(rope_theta)
+
+
+def get_rotary_embedding(model):
+    """The model's own rotary embedding module."""
+    for attribute in ("model", "transformer"):
+        inner = getattr(model, attribute, None)
+        if inner is not None and hasattr(inner, "rotary_emb"):
+            return inner.rotary_emb
+    if hasattr(model, "rotary_emb"):
+        return model.rotary_emb
+    raise ValueError("Model does not expose a rotary embedding module")
+
+
+def model_rope_cos_sin(
+    model,
+    seq_len: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """RoPE cos/sin exactly as the model applies them."""
+    rotary = get_rotary_embedding(model)
+    position_ids = torch.arange(seq_len, device=device)[None]
+    reference = torch.empty(0, device=device, dtype=dtype)
+    with torch.no_grad():
+        cos, sin = rotary(reference, position_ids)
+    return cos.to(dtype=dtype), sin.to(dtype=dtype)

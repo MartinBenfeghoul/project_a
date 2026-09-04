@@ -6,7 +6,6 @@ from omegaconf import OmegaConf
 
 import meta_learning as ml
 from utils.logging import average_metrics, init_wandb, log_epoch_metrics
-from utils.rope import get_rope_theta
 
 from tests.helpers import build_llama
 
@@ -65,7 +64,6 @@ def _batches():
 
 
 def _run_epoch(model, cfg, run, epoch=0, optimiser_steps=0):
-    cfg.rope_theta = get_rope_theta(model.config)
     mlps = ml.init_mlps(model, cfg, "cpu")
     return ml.run_epoch(
         model,
@@ -124,8 +122,8 @@ def test_step_metrics_carry_the_adaptation_improvement(model):
             "train/epoch",
         }
         assert metrics["train/adaptation_improvement"] == (
-            metrics["train/final_support_loss"]
-            - metrics["train/initial_support_loss"]
+            metrics["train/initial_support_loss"]
+            - metrics["train/final_support_loss"]
         )
 
 

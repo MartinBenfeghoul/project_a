@@ -69,7 +69,7 @@ def log_step_metrics(wandb_run, window, count, epoch, optimiser_steps):
             "train/final_support_loss": avgs["final_support_loss"],
             "train/meta_objective": avgs["meta_objective"],
             "train/adaptation_improvement": (
-                avgs["final_support_loss"] - avgs["initial_support_loss"]
+                avgs["initial_support_loss"] - avgs["final_support_loss"]
             ),
             "train/epoch": epoch,
         },

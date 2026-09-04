@@ -5,7 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch.func import functional_call
 
-from utils.rope import compute_rope_cos_sin, inverse_rope
+from cache.rope import SharedRopeCache
+from utils.rope import inverse_packed_rope
 
 
 @dataclass(frozen=True)
@@ -90,21 +91,15 @@ class KeyReconstructionConfig:
 
 def _rope_cache_kwargs(
     keys: torch.Tensor,
-    rope_theta: float,
+    rope: tuple[torch.Tensor, torch.Tensor],
     padding_mask: torch.Tensor | None,
 ) -> dict:
     """The prefill cache_kwargs an xKV key cache expects from a model."""
-    seq_len, head_dim = keys.shape[2], keys.shape[-1]
-    cos, sin = compute_rope_cos_sin(
-        seq_len,
-        head_dim,
-        rope_theta,
-        keys.device,
-        keys.dtype,
-    )
+    seq_len = keys.shape[2]
+    cos, sin = rope
     cache_kwargs = {
-        "cos": cos[:, 0],
-        "sin": sin[:, 0],
+        "cos": cos.to(device=keys.device, dtype=keys.dtype),
+        "sin": sin.to(device=keys.device, dtype=keys.dtype),
         "cache_position": torch.arange(seq_len, device=keys.device),
     }
     if padding_mask is not None:
@@ -120,7 +115,7 @@ def reconstruct_keys_xkv(
     cache,
     config: KeyReconstructionConfig,
     *,
-    rope_theta: float,
+    rope: tuple[torch.Tensor, torch.Tensor],
     padding_mask: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
     from cache.backends.xkv import XKVKeysCache
@@ -137,7 +132,7 @@ def reconstruct_keys_xkv(
     )
     cache_kwargs = _rope_cache_kwargs(
         cache.layers[0].keys,
-        rope_theta,
+        rope,
         padding_mask,
     )
     for layer_idx, layer in enumerate(cache.layers):
@@ -151,16 +146,14 @@ def reconstruct_keys_xkv(
                 f"xKV left layer {layer_idx} uncompressed; the whole prefill "
                 "must be decomposed before the inner loop runs."
             )
-        keys.append(
-            key_cache.layers[layer_idx]._undo_rope(roped, prefill=True)
-        )
+        keys.append(key_cache.layers[layer_idx]._undo_rope(roped, prefill=True))
     return keys
 
 
 def prepare_kvs(
     cache,
     *,
-    rope_theta: float,
+    rope: tuple[torch.Tensor, torch.Tensor],
     dtype: torch.dtype,
     key_config: KeyReconstructionConfig | None = None,
     padding_mask: torch.Tensor | None = None,
@@ -170,21 +163,23 @@ def prepare_kvs(
         keys_per_layer = reconstruct_keys_xkv(
             cache,
             key_config,
-            rope_theta=rope_theta,
+            rope=rope,
             padding_mask=padding_mask,
         )
     else:
+        rope_cache = SharedRopeCache()
+        rope_cache.capture(*rope)
         keys_per_layer = []
         for layer in cache.layers:
             keys = layer.keys.detach()
-            cos, sin = compute_rope_cos_sin(
-                keys.shape[2],
-                keys.shape[-1],
-                rope_theta,
-                keys.device,
-                keys.dtype,
+            keys_per_layer.append(
+                inverse_packed_rope(
+                    keys,
+                    rope_cache.prefix(
+                        keys.shape[2], keys.device, keys.dtype
+                    ),
+                )
             )
-            keys_per_layer.append(inverse_rope(keys, cos, sin))
 
     return [
         (
@@ -269,7 +264,9 @@ def _adam_step(params, grads, means, variances, lr, step):
     correction2 = 1.0 - beta2**step
     next_params = [
         param
-        - lr / correction1 * mean
+        - lr
+        / correction1
+        * mean
         / (variance.sqrt() / math.sqrt(correction2) + epsilon)
         for param, mean, variance in zip(params, next_means, next_variances)
     ]
