@@ -19,10 +19,14 @@ _BUILD_DIR = (
     / _XKV_COMMIT
 )
 
+_REQUIRED_OPS = ("batch_gemm_softmax",)
+
 
 def _has_ops() -> bool:
     namespace = getattr(torch.ops, "_shadowkv", None)
-    return namespace is not None and hasattr(namespace, "batch_gemm_softmax")
+    return namespace is not None and all(
+        hasattr(namespace, name) for name in _REQUIRED_OPS
+    )
 
 
 def _clone_xkv_source() -> Path | None:
@@ -58,6 +62,16 @@ def _clone_xkv_source() -> Path | None:
     return src_dir
 
 
+_CSRC_SOURCES = (
+    "main.cu",
+    "rope.cu",
+    "rope_new.cu",
+    "gather_copy.cu",
+    "batch_gather_gemm.cu",
+    "batch_gemm_softmax.cu",
+)
+
+
 def _split_cuda_toolkit_include_dirs() -> list[str]:
     """Header dirs for CUDA libraries"""
     import importlib.util
@@ -75,14 +89,36 @@ def _split_cuda_toolkit_include_dirs() -> list[str]:
     return dirs
 
 
+def _extension_kwargs(src_dir: Path) -> dict:
+    """Compiler arguments shared by the JIT fallback and install_kernel.py"""
+    csrc = src_dir / "efficiency" / "csrc"
+    cutlass = src_dir / "3rdparty" / "cutlass"
+    return {
+        "sources": [str(csrc / name) for name in _CSRC_SOURCES],
+        "extra_include_paths": [
+            str(cutlass / "include"),
+            str(cutlass / "examples" / "common"),
+            str(cutlass / "tools" / "util" / "include"),
+            str(csrc),
+            *_split_cuda_toolkit_include_dirs(),
+        ],
+        "extra_cflags": ["-std=c++17", "-O3"],
+        "extra_cuda_cflags": [
+            "-std=c++17",
+            "--expt-relaxed-constexpr",
+            "--expt-extended-lambda",
+            "-O3",
+            "-use_fast_math",
+        ],
+    }
+
+
 def _build_from_source() -> bool:
     """Compile xKV's fused kernels for this Python/CUDA/torch build."""
     src_dir = _clone_xkv_source()
     if src_dir is None:
         return False
 
-    csrc = src_dir / "efficiency" / "csrc"
-    cutlass = src_dir / "3rdparty" / "cutlass"
     print(
         f"Prebuilt kernel unavailable, building from source "
         f"({_XKV_COMMIT[:12]}); this can take several minutes the first time..."
@@ -90,32 +126,7 @@ def _build_from_source() -> bool:
     try:
         from torch.utils.cpp_extension import load
 
-        load(
-            name="_shadowkv",
-            sources=[
-                str(csrc / "main.cu"),
-                str(csrc / "rope.cu"),
-                str(csrc / "rope_new.cu"),
-                str(csrc / "gather_copy.cu"),
-                str(csrc / "batch_gather_gemm.cu"),
-                str(csrc / "batch_gemm_softmax.cu"),
-            ],
-            extra_include_paths=[
-                str(cutlass / "include"),
-                str(cutlass / "examples" / "common"),
-                str(cutlass / "tools" / "util" / "include"),
-                str(csrc),
-                *_split_cuda_toolkit_include_dirs(),
-            ],
-            extra_cflags=["-std=c++17", "-O3"],
-            extra_cuda_cflags=[
-                "-std=c++17",
-                "--expt-relaxed-constexpr",
-                "--expt-extended-lambda",
-                "-O3",
-                "-use_fast_math",
-            ],
-        )
+        load(name="_shadowkv", **_extension_kwargs(src_dir))
     except Exception as exc:
         print(f"Building fused kernels failed ({exc}); "
               "falling back to the unfused path.")

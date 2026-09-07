@@ -342,3 +342,72 @@ def test_a_residual_checkpoint_loads_without_use_residual():
     for name, tensor in checkpoint.items():
         if name != "W_linear":
             torch.testing.assert_close(layer.mlp.state_dict()[name], tensor)
+
+
+def test_enable_decode_compilation_is_once_only():
+    """Always applied, so it must be idempotent and never wrap twice."""
+    import cache.backends.mlp_values as mlp_values
+    from cache.backends.mlp_values import MLPValueLayer
+
+    original = MLPValueLayer.retrieve_selected
+    was_compiled = mlp_values._COMPILED
+    try:
+        mlp_values._COMPILED = False
+        MLPValueLayer.retrieve_selected = original
+        applied = mlp_values.enable_decode_compilation()
+        if not torch.cuda.is_available():
+            assert applied is False
+            assert MLPValueLayer.retrieve_selected is original
+            return
+        assert applied is True
+        assert MLPValueLayer.retrieve_selected is not original
+        wrapped = MLPValueLayer.retrieve_selected
+        assert mlp_values.enable_decode_compilation() is False
+        assert MLPValueLayer.retrieve_selected is wrapped
+    finally:
+        MLPValueLayer.retrieve_selected = original
+        mlp_values._COMPILED = was_compiled
+
+
+
+def test_token_count_is_reused_from_the_budget_reduction():
+    """compress() must reuse the budget's count, and agree with the direct one."""
+    from cache.backends.mlp_values import MLPValueLayer
+
+    torch.manual_seed(31)
+    batch, heads, seq_len, head_dim = 2, 2, 16, 8
+    values = torch.randn(batch, heads, seq_len, head_dim)
+    keys = torch.randn(batch, heads, seq_len, head_dim)
+
+    padding_mask = torch.ones(batch, seq_len, dtype=torch.bool)
+    padding_mask[0, :5] = False  # left-padded first sequence
+    expected = int(padding_mask.sum())
+
+    layer = MLPValueLayer(target_cr=2.0, num_epochs=0)
+    layer.lazy_initialization(values)
+    layer.tensor = values
+    assert layer.original_token_count is None
+
+    budget = layer.compute_residual_budget(padding_mask)
+    assert layer.original_token_count == expected
+
+    layer.compress(keys, padding_mask, budget)
+    assert layer.original_token_count == expected
+
+
+def test_token_count_still_computed_when_budget_was_not_run():
+    """compress() standalone must not depend on the budget having run first."""
+    from cache.backends.mlp_values import MLPValueLayer
+
+    torch.manual_seed(32)
+    batch, heads, seq_len, head_dim = 1, 2, 16, 8
+    values = torch.randn(batch, heads, seq_len, head_dim)
+    keys = torch.randn(batch, heads, seq_len, head_dim)
+    padding_mask = torch.ones(batch, seq_len, dtype=torch.bool)
+    padding_mask[0, :3] = False
+
+    layer = MLPValueLayer(target_cr=2.0, num_epochs=0)
+    layer.lazy_initialization(values)
+    layer.tensor = values
+    layer.compress(keys, padding_mask, residual_budget=4)
+    assert layer.original_token_count == int(padding_mask.sum())

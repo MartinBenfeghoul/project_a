@@ -9,6 +9,7 @@ from lm_eval.utils import make_table
 from lm_eval.tasks import TaskManager, get_task_dict
 
 from cache import CompressedCacheHFLM, build_cache_config
+from cache.backends.mlp_values import enable_decode_compilation
 from model.attention_predictor import (
     get_attn_predictor_hook_handles,
     apply_attn_predictor_config,
@@ -63,11 +64,10 @@ def evaluate_tasks(lm, tasks, *, batch_size, task_manager, limit):
 @torch.no_grad()
 def main(args):
     model, tokenizer = get_model_and_tokenizer(args.model_name)
-    selective_handles = (
-        install_selective_attention(model)
-        if args.selective_reconstruction
-        else []
-    )
+    selective_handles = []
+    if args.selective_reconstruction:
+        enable_decode_compilation()
+        selective_handles = install_selective_attention(model)
 
     attn_predictor_hook_handles = get_attn_predictor_hook_handles(args, model)
 

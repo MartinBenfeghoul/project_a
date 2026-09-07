@@ -42,6 +42,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         self.prefill = True
         self.compressed_len = 0
         self._num_params = None
+        self.original_token_count = None
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
         self.compressor = None
@@ -200,6 +201,7 @@ class MLPValueLayer(SingleTensorDynamicLayer):
             raise ValueError(
                 "padding_mask must contain at least one valid token."
             )
+        self.original_token_count = total_valid_rows // h
 
         model_bytes = self._num_params * value_dtype_size
         original_bytes = total_valid_rows * d * value_dtype_size
@@ -214,7 +216,8 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         residual_budget: int,
     ) -> None:
         self._B, self._H, self._T, _ = keys.shape
-        self.original_token_count = int(padding_mask.sum().item())
+        if self.original_token_count is None:
+            self.original_token_count = int(padding_mask.sum().item())
 
         v_approx = self.mlp(keys)
         errors = mse_loss(self.tensor, v_approx, reduction="none").mean(dim=-1)
@@ -593,3 +596,23 @@ class MLPValueCache(SingleTensorCache):
         assert compressed_total != 0
 
         return original_total / compressed_total
+
+
+_COMPILED = False
+
+
+def enable_decode_compilation() -> bool:
+    global _COMPILED
+    if _COMPILED or not torch.cuda.is_available():
+        return False
+
+    eager = MLPValueLayer.retrieve_selected
+    try:
+        MLPValueLayer.retrieve_selected = torch.compile(eager, dynamic=True)
+    except Exception as exc:
+        MLPValueLayer.retrieve_selected = eager
+        print(f"Could not compile the decode path ({exc}); using eager.")
+        return False
+
+    _COMPILED = True
+    return True
