@@ -80,6 +80,34 @@ def build_llama(
     return LlamaForCausalLM(config).eval()
 
 
+def build_mistral(
+    num_layers: int = 2,
+    *,
+    num_attention_heads: int = 4,
+    num_key_value_heads: int = 2,
+    head_dim: int = 8,
+    seed: int = 0,
+):
+    """A tiny Mistral matching the cache-test Llama's attention shapes."""
+    from transformers import MistralConfig, MistralForCausalLM
+
+    torch.manual_seed(seed)
+    config = MistralConfig(
+        vocab_size=64,
+        hidden_size=num_attention_heads * head_dim,
+        intermediate_size=2 * num_attention_heads * head_dim,
+        num_hidden_layers=num_layers,
+        num_attention_heads=num_attention_heads,
+        num_key_value_heads=num_key_value_heads,
+        max_position_embeddings=512,
+        sliding_window=None,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    return MistralForCausalLM(config).eval()
+
+
 def install_value_importance_hooks(model) -> list:
     """Feed deterministic per-token value importance to the active cache.
 

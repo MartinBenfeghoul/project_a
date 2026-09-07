@@ -8,7 +8,6 @@ import pytest
 import torch
 from transformers import DynamicCache
 
-from cache.core import CompressedCache
 from cache.config import (
     BaselineCacheConfig,
     CompressedCacheConfig,
@@ -16,11 +15,14 @@ from cache.config import (
     SelectiveCacheConfig,
     XKVCacheConfig,
 )
+from cache.core import CompressedCache
 from model.selective_attention import install_selective_attention
 from numerics.quantisation import is_quantised_factor
-
-from tests.helpers import build_llama, install_value_importance_hooks
-
+from tests.helpers import (
+    build_llama,
+    build_mistral,
+    install_value_importance_hooks,
+)
 
 NUM_LAYERS = 4
 PROMPT_LEN = 64
@@ -182,6 +184,61 @@ def test_selective_attention_with_a_full_budget_matches_dense(group_size):
 
     assert cache.selective_layers, "selective state was never recorded"
     assert _max_deviation(dense, compressed) < 1e-4
+
+
+@pytest.mark.parametrize(
+    "model_builder",
+    (build_llama, build_mistral),
+    ids=("llama", "mistral"),
+)
+def test_full_budget_selective_attention_matches_real_eviction(model_builder):
+    """Selection is transparent when its budget covers every survivor."""
+    prompt_len = 256
+    keep_ratio = 0.5
+    model = model_builder(NUM_LAYERS)
+    prompt, steps = _prompt_and_steps(60, prompt_len=prompt_len)
+
+    eviction_cache = _make_cache(
+        _make_config(group_size=2, eviction_keep_ratio=keep_ratio),
+        prompt_len=prompt_len,
+    )
+    eviction_logits = _run(
+        model,
+        eviction_cache,
+        prompt,
+        steps,
+        evict=True,
+    )
+
+    selective_cache = _make_cache(
+        _make_config(
+            group_size=2,
+            selective=True,
+            token_budget=prompt_len,
+            eviction_keep_ratio=keep_ratio,
+        ),
+        prompt_len=prompt_len,
+    )
+    selective_logits = _run(
+        model,
+        selective_cache,
+        prompt,
+        steps,
+        selective=True,
+        evict=True,
+    )
+
+    for layer_idx in range(NUM_LAYERS):
+        eviction_positions = eviction_cache.kept_positions[layer_idx]
+        selective_positions = selective_cache.kept_positions[layer_idx]
+        assert eviction_positions.numel() == math.ceil(prompt_len * keep_ratio)
+        torch.testing.assert_close(selective_positions, eviction_positions)
+        assert (
+            selective_cache.selective_layers[layer_idx].prompt_len
+            == eviction_positions.numel()
+        )
+
+    assert _max_deviation(eviction_logits, selective_logits) < 1e-4
 
 
 @pytest.mark.parametrize("group_size", (1, 2, 4))
