@@ -521,6 +521,11 @@ class XKVKeysCache(DecomposedKeysCache):
             group_last = min(group_last, self.num_layers - 1)
         return group_start, group_last
 
+    def get_group_layers(self, layer_idx):
+        """Return the layers that must share one eviction keep-set."""
+        group_start, group_last = self._get_group_bounds(layer_idx)
+        return tuple(range(group_start, group_last + 1))
+
     def _get_decomposition_group(self, layer_idx, cache_name):
         group_start, group_last_layer = self._get_group_bounds(layer_idx)
         if group_last_layer != layer_idx:

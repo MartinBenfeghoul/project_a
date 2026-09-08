@@ -114,6 +114,7 @@ class CompressedCache:
         self._key_recon_mses = []
         self.eviction_keep_ratio = kwargs.get("eviction_keep_ratio", 1.0)
         self.kept_positions = {}
+        self._group_keep_positions = {}
         self._deferred_value_updates = {}
 
     def set_value_importance(
@@ -146,6 +147,13 @@ class CompressedCache:
 
         return keep.nonzero(as_tuple=False).flatten().sort().values
 
+    def _eviction_group_key(self, layer_idx: int) -> int:
+        get_group_layers = getattr(self.key_cache, "get_group_layers", None)
+        if get_group_layers is None:
+            return layer_idx
+        group_layers = get_group_layers(layer_idx)
+        return group_layers[0] if group_layers else layer_idx
+
     def _maybe_apply_eviction(
         self,
         key_states: torch.Tensor,
@@ -154,13 +162,27 @@ class CompressedCache:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         if self.eviction_keep_ratio == 1.0:
             return key_states, value_states, None
-        value_importance = self._temp_value_importance.get(layer_idx)
         if key_states.shape[-2] == 1:
             return key_states, value_states, None
 
-        keep_positions = self._build_keep_positions(value_importance, key_states.shape[-2]).to(
-            device=key_states.device
-        )
+        seq_len = key_states.shape[-2]
+        group_key = self._eviction_group_key(layer_idx)
+        cached = self._group_keep_positions.get(group_key)
+        if cached is not None and cached[0] == seq_len:
+            keep_positions = cached[1]
+        else:
+            value_importance = self._temp_value_importance.get(layer_idx)
+            if value_importance is None:
+                raise ValueError(
+                    f"Eviction needs value importance for layer {layer_idx}, "
+                    "but the attention-predictor hook did not set any."
+                )
+            keep_positions = self._build_keep_positions(
+                value_importance, seq_len
+            )
+            self._group_keep_positions[group_key] = (seq_len, keep_positions)
+
+        keep_positions = keep_positions.to(device=key_states.device)
         self.kept_positions[layer_idx] = keep_positions.detach().cpu()
         return (
             key_states.index_select(-2, keep_positions),
