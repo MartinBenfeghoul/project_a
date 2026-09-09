@@ -17,6 +17,9 @@ from numerics.quantisation import (
     factor_dtype,
     factor_nbytes,
     factor_shape,
+    fold_rotation,
+    folded_reconstruction,
+    get_turboquant_compressor,
     gather_factor_rows,
     is_quantised_factor,
     pack_factors,
@@ -34,6 +37,7 @@ class XKVLayerState:
     segments: list[list[FactorSegment]] | None = None
     packed_right: Factor | None = None
     fused_right: torch.Tensor | None = None
+    right_is_folded: bool = False
     fused_chunk_size: int | None = None
     inverse_permutation: torch.Tensor | None = None
 
@@ -372,9 +376,20 @@ class XKVKeysCache(DecomposedKeysCache):
             group_layers, per_layer_segments
         ):
             state = self._layer_state(group_layer_idx)
+            state.fused_right = None
             state.packed_right, right_views = pack_factors(
                 [segments[0].factor for segments in layer_segments]
             )
+            shared = group_state.packed_shared
+            state.right_is_folded = is_quantised_factor(
+                shared
+            ) and not is_quantised_factor(state.packed_right)
+            if state.right_is_folded:
+                state.packed_right = fold_rotation(shared, state.packed_right)
+                right_views = [
+                    state.packed_right[idx].unsqueeze(0)
+                    for idx in range(len(layer_segments))
+                ]
             for segments, view in zip(layer_segments, right_views):
                 segments[0].factor = view
         self.comp_ratio = self.calc_compression_ratio()
@@ -503,6 +518,21 @@ class XKVKeysCache(DecomposedKeysCache):
             )
         return state.fused_right
 
+    def _folded_reconstruction(self, shared, right, positions):
+        params = shared.params
+        rank = params.shape[-1]
+        compressor = get_turboquant_compressor(
+            rank, shared.bits, params.indices.device
+        )
+        return folded_reconstruction(
+            params.indices,
+            params.norms,
+            positions,
+            compressor.byte_table(params.dtype),
+            right,
+            rank,
+        )
+
     def prepare_selected_chunks(self, layer_idx, chunks, chunk_size):
         state = self._compressed_layer_state(layer_idx)
         group_state = self.group_states[state.group_last_layer]
@@ -568,6 +598,21 @@ class XKVKeysCache(DecomposedKeysCache):
                 packed_rope,
                 state.fused_chunk_size,
             )
+        elif state.right_is_folded:
+            keys = self._folded_reconstruction(
+                shared,
+                right.reshape(batch_size, rank, num_heads, head_dim).transpose(
+                    1, 2
+                ),
+                prefix_positions,
+            )
+            if self.unrope_keys:
+                keys = self.layers[layer_idx]._rope_selected(
+                    keys,
+                    prefix_positions,
+                    state.compressed_len,
+                    inverse=False,
+                )
         else:
             selected_a = gather_factor_rows(shared, prefix_positions)
             right = (
@@ -637,7 +682,9 @@ class XKVKeysCache(DecomposedKeysCache):
             device=factor_device,
         )
         prefix_flat = reconstruct_segments(
-            paired_segments, empty_suffix
+            paired_segments,
+            empty_suffix,
+            unrotated_left=state.right_is_folded,
         ).squeeze(1)
 
         batch_size, num_heads, _, head_dim = keys.shape

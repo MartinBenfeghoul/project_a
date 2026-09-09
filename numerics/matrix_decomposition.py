@@ -8,6 +8,7 @@ from numerics.quantisation import (
     CompressorParams,
     TurboQuantFactor,
     dequantise_factor,
+    dequantise_factor_unrotated,
     get_turboquant_compressor,
     is_quantised_factor,
     quantise_factor,
@@ -201,13 +202,13 @@ def decompose_grouped_xkv_to_segment_store(
     return layer_segments
 
 
-def _batch_decode_quant_factors(layer_segments):
+def _batch_decode_quant_factors(layer_segments, skip_factors=()):
     """Decode all TurboQuantFactor instances across all segments in one call."""
     groups: dict[int, list] = {}
     for b_idx, batch_segs in enumerate(layer_segments):
         for s_idx, seg in enumerate(batch_segs):
             for f_idx, factor in enumerate(seg.factors):
-                if not is_quantised_factor(factor):
+                if f_idx in skip_factors or not is_quantised_factor(factor):
                     continue
                 p = factor.params
                 groups.setdefault(p.shape[-1], []).append(
@@ -246,13 +247,16 @@ def _batch_decode_quant_factors(layer_segments):
 def reconstruct_segments(
     layer_segments: list[list[FactorPairSegment]],
     suffix_tensor: torch.Tensor,
+    unrotated_left: bool = False,
 ):
     """Reconstruct batched keys from stored factors and a live suffix.
 
     `layer_segments` contains per-segment factor pairs, and `suffix_tensor`
     provides any uncompressed tail that should be appended back on.
     """
-    pre_decoded = _batch_decode_quant_factors(layer_segments)
+    pre_decoded = _batch_decode_quant_factors(
+        layer_segments, skip_factors=(0,) if unrotated_left else ()
+    )
 
     recon_batches = []
     for batch_idx, batch_segments in enumerate(layer_segments):
@@ -261,10 +265,15 @@ def reconstruct_segments(
             A_raw, B_raw = segment.factors
             A_key = (batch_idx, seg_idx, 0)
             B_key = (batch_idx, seg_idx, 1)
+            decode_left = (
+                dequantise_factor_unrotated
+                if unrotated_left
+                else dequantise_factor
+            )
             A = (
                 pre_decoded[A_key]
                 if A_key in pre_decoded
-                else dequantise_factor(A_raw)
+                else decode_left(A_raw)
             )
             B = (
                 pre_decoded[B_key]

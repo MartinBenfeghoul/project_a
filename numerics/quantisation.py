@@ -83,6 +83,68 @@ def is_quantised_factor(factor) -> bool:
     return isinstance(factor, TurboQuantFactor)
 
 
+def fold_rotation(factor, right: torch.Tensor) -> torch.Tensor:
+    """Fold rotation into right factor."""
+    compressor = get_turboquant_compressor(
+        factor.params.shape[-1], factor.bits, right.device
+    )
+    return torch.matmul(compressor.rotation, right.float()).to(right.dtype)
+
+
+def gather_factor_rows_unrotated(factor, positions: torch.Tensor):
+    """Gather rows of a quantised factor."""
+    if not is_quantised_factor(factor):
+        raise TypeError(
+            "gather_factor_rows_unrotated expects a quantised factor."
+        )
+    params = factor.params
+    indices, norms = _gather_compressed_rows(params, positions)
+    compressor = get_turboquant_compressor(
+        params.shape[-1], factor.bits, indices.device
+    )
+    rows = compressor.byte_table(params.dtype)[indices.long()]
+    rows = rows.reshape(*indices.shape[:-1], -1)
+    dim = params.shape[-1]
+    return (rows[..., :dim] if compressor.idx_pad else rows), norms
+
+
+def dequantise_factor_unrotated(factor):
+    """Decode a quantised factor up to, but not including, its rotation."""
+    if not is_quantised_factor(factor):
+        return factor
+    params = factor.params
+    compressor = get_turboquant_compressor(
+        params.shape[-1], factor.bits, params.indices.device
+    )
+    rows = compressor.byte_table(params.dtype)[params.indices.long()]
+    rows = rows.reshape(*params.indices.shape[:-1], -1)
+    if compressor.idx_pad:
+        rows = rows[..., : params.shape[-1]]
+    return rows * params.norms[..., None].to(rows.dtype)
+
+
+def folded_reconstruction(
+    indices: torch.Tensor,
+    norms: torch.Tensor,
+    positions: torch.Tensor,
+    byte_table: torch.Tensor,
+    right: torch.Tensor,
+    dim: int,
+) -> torch.Tensor:
+    """Gather quantised rows and apply a right factor that carries rotation."""
+    num_heads = positions.size(1)
+    num_groups = indices.size(-1)
+    gathered = (
+        indices[:, None]
+        .expand(-1, num_heads, -1, -1)
+        .gather(2, positions[..., None].expand(-1, -1, -1, num_groups))
+    )
+    row_norms = norms[:, None].expand(-1, num_heads, -1).gather(2, positions)
+    rows = byte_table[gathered.long()]
+    rows = rows.reshape(*gathered.shape[:-1], -1)[..., :dim]
+    return torch.matmul(rows, right) * row_norms[..., None].to(rows.dtype)
+
+
 def _params_view(params: CompressorParams, batch_slice: slice, batch: int):
     return CompressorParams(
         indices=params.indices[batch_slice],
@@ -147,6 +209,19 @@ def pack_factors(factors: list):
     return packed, [packed[idx].unsqueeze(0) for idx in range(len(factors))]
 
 
+def _gather_compressed_rows(params: CompressorParams, positions: torch.Tensor):
+    """Gather the packed bytes and norms."""
+    num_heads = positions.size(1)
+    num_groups = params.indices.size(-1)
+    indices = (
+        params.indices[:, None]
+        .expand(-1, num_heads, -1, -1)
+        .gather(2, positions[..., None].expand(-1, -1, -1, num_groups))
+    )
+    norms = params.norms[:, None].expand(-1, num_heads, -1).gather(2, positions)
+    return indices, norms
+
+
 def gather_factor_rows(factor, positions: torch.Tensor) -> torch.Tensor:
     """Gather rows of a `[B, T, D]` factor at per-head `[B, H, S]` positions.
 
@@ -161,13 +236,7 @@ def gather_factor_rows(factor, positions: torch.Tensor) -> torch.Tensor:
         )
 
     params = factor.params
-    num_groups = params.indices.size(-1)
-    indices = (
-        params.indices[:, None]
-        .expand(-1, num_heads, -1, -1)
-        .gather(2, positions[..., None].expand(-1, -1, -1, num_groups))
-    )
-    norms = params.norms[:, None].expand(-1, num_heads, -1).gather(2, positions)
+    indices, norms = _gather_compressed_rows(params, positions)
     dim = params.shape[-1]
     compressor = get_turboquant_compressor(dim, factor.bits, indices.device)
     return compressor.decode(
@@ -227,6 +296,18 @@ class MSECompressor:
             dtype=torch.long,
             device=device,
         )
+        self._byte_tables: dict[torch.dtype, torch.Tensor] = {}
+
+    def byte_table(self, dtype: torch.dtype) -> torch.Tensor:
+        table = self._byte_tables.get(dtype)
+        if table is None:
+            byte_values = torch.arange(
+                256, device=self.centroids.device, dtype=torch.long
+            )
+            codes = (byte_values[:, None] >> self.idx_shifts) & self.mask
+            table = self.centroids.to(dtype)[codes]
+            self._byte_tables[dtype] = table
+        return table
 
     @torch.no_grad()
     def encode(self, tensor: torch.Tensor) -> CompressorParams:

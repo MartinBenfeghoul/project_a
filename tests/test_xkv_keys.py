@@ -5,6 +5,7 @@ import torch
 
 from cache.rope import SharedRopeCache
 from cache.backends.xkv import XKVKeysCache
+from numerics.quantisation import is_quantised_factor
 from utils.rope import inverse_rope
 
 from tests.helpers import apply_model_rope, low_rank_keys, rope_cos_sin
@@ -273,3 +274,128 @@ def test_group_members_share_one_decomposition_call(
         assert len(group_state.layer_indices) == group_size
         assert group_state.layer_indices[-1] == group_last
         assert group_state.packed_shared is not None
+
+
+def _quantised_cache(**kwargs):
+    return _build_cache(quantise_a=True, compressor_bits=4, **kwargs)
+
+
+def test_folded_rotation_matches_decoding_every_gathered_row():
+    """The folded right factor reproduces the plain dequantise-then-GEMM path.
+    """
+    from numerics.quantisation import (
+        fold_rotation,
+        gather_factor_rows,
+        gather_factor_rows_unrotated,
+    )
+
+    torch.manual_seed(21)
+    batch_size, num_heads, seq_len, head_dim, rank = 1, 2, 64, 16, 24
+    cache = _quantised_cache()
+    cos, sin = rope_cos_sin(batch_size, seq_len, head_dim)
+    keys = low_rank_keys(batch_size, num_heads, seq_len, head_dim, rank)
+    cache.update(
+        apply_model_rope(keys, cos, sin),
+        0,
+        {"cos": cos, "sin": sin, "cache_position": torch.arange(seq_len)},
+    )
+
+    shared = cache.group_states[0].packed_shared
+    right = cache.layer_states[0].packed_right
+    assert is_quantised_factor(shared)
+
+    positions = torch.randint(0, seq_len, (batch_size, num_heads, 16))
+    stored_rank = right.shape[1]
+
+    reference = torch.matmul(
+        gather_factor_rows(shared, positions),
+        right.reshape(batch_size, stored_rank, num_heads, head_dim).transpose(
+            1, 2
+        ),
+    )
+    rows, norms = gather_factor_rows_unrotated(shared, positions)
+    folded = torch.matmul(
+        rows,
+        fold_rotation(shared, right)
+        .reshape(batch_size, stored_rank, num_heads, head_dim)
+        .transpose(1, 2),
+    ) * norms[..., None].to(rows.dtype)
+
+    torch.testing.assert_close(folded, reference, atol=2e-2, rtol=2e-2)
+
+
+def test_right_factor_is_folded_in_place_without_extra_memory():
+    """The rotation replaces the stored right factor rather than joining it.
+
+    Recovering `B` from the stored `R @ B` (R is orthogonal, so
+    `B == R.T @ folded`) lets us check the folded storage against the plain
+    dequantise-then-multiply semantics it stands in for.
+    """
+    from numerics.quantisation import (
+        gather_factor_rows,
+        get_turboquant_compressor,
+    )
+
+    torch.manual_seed(23)
+    batch_size, num_heads, seq_len, head_dim, rank = 1, 2, 64, 16, 24
+    cache = _quantised_cache()
+    cos, sin = rope_cos_sin(batch_size, seq_len, head_dim)
+    keys = low_rank_keys(batch_size, num_heads, seq_len, head_dim, rank)
+    cache.update(
+        apply_model_rope(keys, cos, sin),
+        0,
+        {"cos": cos, "sin": sin, "cache_position": torch.arange(seq_len)},
+    )
+    state = cache.layer_states[0]
+    shared = cache.group_states[0].packed_shared
+    assert is_quantised_factor(shared)
+    assert state.right_is_folded
+
+    # Nothing is cached alongside the stored factors for decode.
+    assert cache.selective_reconstruction_nbytes == 0
+
+    positions = (
+        torch.arange(seq_len)
+        .reshape(1, 1, -1)
+        .expand(batch_size, num_heads, -1)
+    )
+    retrieved = cache.retrieve_selected(0, positions)
+
+    stored_rank = state.packed_right.shape[1]
+    rotation = get_turboquant_compressor(
+        stored_rank, shared.bits, state.packed_right.device
+    ).rotation
+    unfolded = torch.matmul(rotation.T, state.packed_right.float())
+    reference = torch.matmul(
+        gather_factor_rows(shared, positions).float(),
+        unfolded.reshape(batch_size, stored_rank, num_heads, head_dim)
+        .transpose(1, 2),
+    ).to(retrieved.dtype)
+    reference = cache.layers[0]._rope_selected(
+        reference, positions, state.compressed_len, inverse=False
+    )
+    torch.testing.assert_close(retrieved, reference, atol=2e-2, rtol=2e-2)
+
+
+def test_selective_and_full_reconstruction_agree_when_folded():
+    """Both decode routes read the folded factor; they must not diverge."""
+    torch.manual_seed(24)
+    batch_size, num_heads, seq_len, head_dim, rank = 1, 2, 64, 16, 24
+    cache = _quantised_cache()
+    cos, sin = rope_cos_sin(batch_size, seq_len, head_dim)
+    keys = low_rank_keys(batch_size, num_heads, seq_len, head_dim, rank)
+    kwargs = {"cos": cos, "sin": sin, "cache_position": torch.arange(seq_len)}
+    cache.update(apply_model_rope(keys, cos, sin), 0, kwargs)
+    assert cache.layer_states[0].right_is_folded
+
+    positions = (
+        torch.arange(seq_len)
+        .reshape(1, 1, -1)
+        .expand(batch_size, num_heads, -1)
+    )
+    selective = cache.retrieve_selected(0, positions)
+    # The non-selective route reconstructs through reconstruct_segments.
+    full = cache.get_reconstructed_keys_only(0)
+    torch.testing.assert_close(
+        selective, full[..., :seq_len, :], atol=2e-2, rtol=2e-2
+    )
