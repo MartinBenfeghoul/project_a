@@ -29,7 +29,8 @@ class MLP(nn.Module):
             out_dim = head_dim if i == self.num_layers - 1 else hidden_dim
 
             w = torch.empty(1, num_heads, curr_dim, out_dim)
-            nn.init.kaiming_uniform_(w, a=math.sqrt(5))
+            bound = 1 / math.sqrt(curr_dim)
+            nn.init.uniform_(w, -bound, bound)
             self.weights.append(nn.Parameter(w))
             self.biases.append(
                 nn.Parameter(torch.zeros(1, num_heads, 1, out_dim))

@@ -165,8 +165,8 @@ def test_linear_weights_are_ignored_without_use_residual():
 def test_residual_reconstructs_values_it_was_derived_from():
     """End to end: the residual carries real signal from keys to values.
 
-    The key projection is square here, so the exact residual solution exists
-    and an untrained MLP with a zero residual budget must find it.
+    The key projection is square here, so the exact residual solution exists.
+    Zero the nonlinear output to isolate it, with no stored residual rows.
     """
     torch.manual_seed(24)
     head_dim = 16
@@ -197,6 +197,9 @@ def test_residual_reconstructs_values_it_was_derived_from():
         )
         _prefill(cache, roped_keys, values, cos, sin)
         assert cache.layers[0].indices.numel() == 0
+        with torch.no_grad():
+            cache.layers[0].mlp.weights[-1].zero_()
+            cache.layers[0].mlp.biases[-1].zero_()
         predicted = cache.layers[0].decompress(
             cache.layers[0]._undo_rope(
                 roped_keys,
