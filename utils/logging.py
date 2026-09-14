@@ -1,5 +1,6 @@
 import json
 import os
+import re
 
 import torch
 from dotenv import load_dotenv
@@ -14,6 +15,11 @@ class WandbRun:
     def enabled(self) -> bool:
         return self.run is not None
 
+    @property
+    def id(self) -> str | None:
+        """The wandb run id, which a resumed run reuses to keep one chart."""
+        return self.run.id if self.run is not None else None
+
     def log(self, metrics: dict, step: int) -> None:
         if self.run is not None:
             self.run.log(metrics, step=step)
@@ -27,7 +33,7 @@ class WandbRun:
             self.run.finish()
 
 
-def init_wandb(config, run_name: str) -> WandbRun:
+def init_wandb(config, run_name: str, resume_id: str | None = None) -> WandbRun:
     wandb_config = config.get("wandb", {})
     if not wandb_config.get("enabled", False):
         return WandbRun()
@@ -47,6 +53,8 @@ def init_wandb(config, run_name: str) -> WandbRun:
         project=wandb_config.get("project"),
         entity=wandb_config.get("entity"),
         name=run_name,
+        id=resume_id,
+        resume="allow" if resume_id else None,
         config=OmegaConf.to_container(config, resolve=True),
     )
 
@@ -168,14 +176,63 @@ def save_attention_predictor_checkpoint(
         json.dump(metrics, f, indent=2)
 
 
-def save_checkpoint(layer_mlps, checkpoint_path, epoch):
+TRAINING_STATE_KEY = "training_state"
+
+
+def save_checkpoint(
+    layer_mlps,
+    checkpoint_path,
+    epoch,
+    optimizer=None,
+    optimiser_steps=0,
+    wandb_id=None,
+):
+    """Save the per-layer weights and the state needed to resume the run."""
     base, ext = os.path.splitext(checkpoint_path)
     epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
     epoch_params = {
         f"layer_{i}": mlp.state_dict() for i, mlp in enumerate(layer_mlps)
     }
+    epoch_params[TRAINING_STATE_KEY] = {
+        "epoch": epoch,
+        "optimiser_steps": optimiser_steps,
+        "wandb_id": wandb_id,
+        "optimizer": optimizer.state_dict() if optimizer is not None else None,
+    }
     torch.save(epoch_params, epoch_checkpoint_path)
     print(f"Checkpoint saved to {epoch_checkpoint_path}")
+
+
+def load_checkpoint(checkpoint_path, layer_mlps, map_location="cpu"):
+    """Restore per-layer weights in place; return the saved training state."""
+    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    saved_layers = sum(1 for key in checkpoint if key.startswith("layer_"))
+    if saved_layers != len(layer_mlps):
+        raise ValueError(
+            f"{checkpoint_path} holds {saved_layers} layers but the model has "
+            f"{len(layer_mlps)}"
+        )
+    for idx, mlp in enumerate(layer_mlps):
+        mlp.load_state_dict(checkpoint[f"layer_{idx}"])
+    return checkpoint.get(TRAINING_STATE_KEY, {})
+
+
+def epoch_checkpoints(run_dir, checkpoint_name="meta_mlps.pt"):
+    """Every epoch checkpoint in a run directory, oldest epoch first."""
+    base, ext = os.path.splitext(checkpoint_name)
+    pattern = re.compile(rf"^{re.escape(base)}_epoch(\d+){re.escape(ext)}$")
+    found = []
+    for name in os.listdir(run_dir):
+        match = pattern.match(name)
+        if match:
+            found.append((int(match.group(1)), os.path.join(run_dir, name)))
+    return [path for _, path in sorted(found)]
+
+
+def latest_checkpoint(run_dir, checkpoint_name="meta_mlps.pt"):
+    """The highest-epoch checkpoint in a run directory, or None if empty."""
+    paths = epoch_checkpoints(run_dir, checkpoint_name)
+    return paths[-1] if paths else None
 
 
 def get_output_path(output_path):

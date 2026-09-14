@@ -167,7 +167,7 @@ def test_meta_train_builds_one_runtime_for_repeated_evaluations(monkeypatch):
         ),
     )
     monkeypatch.setattr(meta, "log_epoch_metrics", lambda *args: None)
-    monkeypatch.setattr(meta, "save_checkpoint", lambda *args: None)
+    monkeypatch.setattr(meta, "save_checkpoint", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         meta,
         "eval_benchmark",

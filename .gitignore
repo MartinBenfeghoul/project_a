@@ -8,3 +8,7 @@ wget-log*
 checkpoints/*
 results/*
 wandb/
+
+slurm/*
+scripts/*
+analysis/*

@@ -259,7 +259,7 @@ def _residual_loss(mlps, kvs, preds, target_cr) -> torch.Tensor:
     )
 
 
-def _adam_step(params, grads, means, variances, lr, step):
+def _adam_step(params, grads, means, variances, lr, step, safe_sqrt=False):
     beta1, beta2, epsilon = 0.9, 0.999, 1e-8
     next_means = [
         beta1 * mean + (1.0 - beta1) * grad for mean, grad in zip(means, grads)
@@ -270,14 +270,13 @@ def _adam_step(params, grads, means, variances, lr, step):
     ]
     correction1 = 1.0 - beta1**step
     correction2 = 1.0 - beta2**step
-    next_params = [
-        param
-        - lr
-        / correction1
-        * mean
-        / (variance.sqrt() / math.sqrt(correction2) + epsilon)
-        for param, mean, variance in zip(params, next_means, next_variances)
-    ]
+    next_params = []
+    for param, mean, variance in zip(params, next_means, next_variances):
+        if safe_sqrt:
+            denominator = (variance / correction2 + epsilon * epsilon).sqrt()
+        else:
+            denominator = variance.sqrt() / math.sqrt(correction2) + epsilon
+        next_params.append(param - lr / correction1 * mean / denominator)
     return next_params, next_means, next_variances
 
 
@@ -288,14 +287,18 @@ def inner_loop(
     steps: int,
     *,
     residual_cr: float,
+    first_order: bool = True,
 ):
-    """Run first-order functional Adam and return the final-only objective."""
+    """Run functional Adam and return the final-only objective."""
     meta_params = [param for mlp in mlps for param in trainable_params(mlp)]
     dtype = kvs[0][0].dtype
-    params = [
-        param.detach().to(dtype=dtype).clone().requires_grad_(True)
-        for param in meta_params
-    ]
+    if first_order:
+        params = [
+            param.detach().to(dtype=dtype).clone().requires_grad_(True)
+            for param in meta_params
+        ]
+    else:
+        params = [param.to(dtype=dtype) for param in meta_params]
     names_by_mlp = []
     for mlp in mlps:
         names = [f"weights.{idx}" for idx in range(len(mlp.weights))]
@@ -310,7 +313,7 @@ def inner_loop(
     means = [torch.zeros_like(param) for param in params]
     variances = [torch.zeros_like(param) for param in params]
     for step in range(1, steps + 1):
-        grads = torch.autograd.grad(loss, params)
+        grads = torch.autograd.grad(loss, params, create_graph=not first_order)
         params, means, variances = _adam_step(
             params,
             grads,
@@ -318,6 +321,7 @@ def inner_loop(
             variances,
             lr,
             step,
+            safe_sqrt=not first_order,
         )
         if step < steps:
             preds = _predict(mlps, kvs, params, names_by_mlp)
@@ -336,7 +340,7 @@ def inner_loop(
 
     grads = torch.autograd.grad(
         objective,
-        params,
+        params if first_order else meta_params,
         allow_unused=True,
     )
     return meta_params, {

@@ -1,5 +1,5 @@
 """
-First-order MAML-style meta-learning for fast support-set memorisation.
+MAML-style meta-learning for fast support-set memorisation.
 
 Each per-layer MLP learns to predict value vectors from key vectors. The inner
 loop adapts MLP weights to a support KV cache; the outer loop also optimizes
@@ -29,6 +29,8 @@ from utils.data import Dataset, collate, load_data
 from utils.logging import (
     average_metrics,
     init_wandb,
+    latest_checkpoint,
+    load_checkpoint,
     log_benchmark_scores,
     log_epoch_metrics,
     log_step_metrics,
@@ -86,6 +88,7 @@ def run_epoch(
     optimiser_steps=0,
 ):
     inner_lr = cfg.inner_lr
+    first_order = bool(cfg.get("first_order", True))
     inner_steps = cfg.inner_steps
     log_interval = cfg.log_interval
     batches_per_epoch = cfg.batches_per_epoch
@@ -131,6 +134,7 @@ def run_epoch(
             inner_lr,
             inner_steps,
             residual_cr=residual_cr,
+            first_order=first_order,
         )
         del output, kvs
         batch_ms = (time.time() - start) * 1000
@@ -182,6 +186,55 @@ def run_epoch(
     return sums, batch_count, optimiser_steps
 
 
+def resolve_resume_path(cfg):
+    """The checkpoint training.resume_from names, or None to start fresh."""
+    resume_from = cfg.get("resume_from", None)
+    if not resume_from:
+        return None
+    path = str(resume_from)
+    if os.path.isdir(path):
+        resolved = latest_checkpoint(path)
+        if resolved is None:
+            raise FileNotFoundError(f"No epoch checkpoints found in {path}")
+        return resolved
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Checkpoint to resume from not found: {path}")
+    return path
+
+
+def _start_epoch(resume_state):
+    """The first epoch to run, one past the checkpoint's completed epoch."""
+    return int((resume_state or {}).get("epoch", -1)) + 1
+
+
+def restore_training_state(optimizer, resume_state):
+    """Continue the outer optimiser and its counters from a checkpoint."""
+    if not resume_state:
+        return 0, 0
+    optimizer_state = resume_state.get("optimizer")
+    if optimizer_state is None:
+        print(
+            "WARNING: checkpoint carries no optimiser state; Adam restarts "
+            "with zeroed moments"
+        )
+    if "epoch" not in resume_state:
+        print(
+            "WARNING: checkpoint predates resumable training and has no epoch "
+            "counter; epochs restart at 0 and will overwrite the checkpoints "
+            "already in the run directory"
+        )
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
+    start_epoch = _start_epoch(resume_state)
+    optimiser_steps = int(resume_state.get("optimiser_steps", 0))
+    print(
+        f"Resuming at epoch {start_epoch} after optimiser step "
+        f"{optimiser_steps}; the data stream restarts from the top of the "
+        "shuffle buffer"
+    )
+    return start_epoch, optimiser_steps
+
+
 def meta_train(
     model,
     name,
@@ -192,11 +245,34 @@ def meta_train(
     ckpt_path,
     tokenizer,
     wandb_run=None,
+    resume_state=None,
 ):
     optimizer = setup_optimizer(mlps, cfg)
+    start_epoch, optimiser_steps = restore_training_state(
+        optimizer, resume_state
+    )
+    if start_epoch >= cfg.num_meta_epochs:
+        print(
+            f"Checkpoint is already at epoch {start_epoch - 1} of "
+            f"num_meta_epochs={cfg.num_meta_epochs}; raise "
+            "training.num_meta_epochs to train further."
+        )
+        return
     model.eval()
     inner_dtype = getattr(torch, str(cfg.inner_adaptation_dtype))
     print(f"FP32 meta parameters; {inner_dtype} inner adaptation")
+    if cfg.get("first_order", True):
+        print("Meta gradient: first-order (inner loop treated as constant)")
+    else:
+        print(
+            "Meta gradient: full MAML (backpropagated through "
+            f"{cfg.inner_steps} inner steps)"
+        )
+        if inner_dtype is not torch.float32:
+            print(
+                f"WARNING: {inner_dtype} cannot carry the second-order "
+                "term; use float32"
+            )
     key_config = build_key_reconstruction_config(cfg)
     if key_config is not None:
         print(
@@ -228,8 +304,7 @@ def meta_train(
     eval_runtime = None
 
     data_iter = iter(dataloader)
-    optimiser_steps = 0
-    for epoch in range(cfg.num_meta_epochs):
+    for epoch in range(start_epoch, cfg.num_meta_epochs):
         start = time.time()
         sums, batch_count, optimiser_steps = run_epoch(
             model,
@@ -264,7 +339,14 @@ def meta_train(
         is_last_epoch = epoch + 1 == cfg.num_meta_epochs
         should_eval = (epoch + 1) % eval_every == 0 or is_last_epoch
         if (epoch + 1) % save_every == 0 or is_last_epoch or should_eval:
-            save_checkpoint(mlps, ckpt_path, epoch)
+            save_checkpoint(
+                mlps,
+                ckpt_path,
+                epoch,
+                optimizer=optimizer,
+                optimiser_steps=optimiser_steps,
+                wandb_id=getattr(wandb_run, "id", None),
+            )
 
         if should_eval:
             learned_init = LearnedInit.from_modules(mlps)
@@ -489,6 +571,8 @@ def build_run_name(cfg) -> str:
     key_config = build_key_reconstruction_config(cfg)
     if key_config is not None:
         parts.append(f"xkvkeys{key_config.compression_ratio}cr")
+    if not cfg.get("first_order", True):
+        parts.append("maml")
     parts.append("residual" if cfg.use_residual else "noresidual")
     return "_".join(parts)
 
@@ -505,14 +589,19 @@ def main():
     model_name = config.model.name
     model_dir = model_name.split("/")[-1]
 
-    run_name = build_run_name(cfg)
-    base_dir = os.path.join("checkpoints", model_dir, run_name)
-    run_dir = base_dir
-    idx = 0
-    while os.path.exists(run_dir):
-        run_dir = f"{base_dir}_{idx}"
-        idx += 1
-    os.makedirs(run_dir)
+    resume_path = resolve_resume_path(cfg)
+    if resume_path is not None:
+        run_dir = os.path.dirname(os.path.abspath(resume_path))
+        print(f"Resuming from checkpoint: {resume_path}")
+    else:
+        run_name = build_run_name(cfg)
+        base_dir = os.path.join("checkpoints", model_dir, run_name)
+        run_dir = base_dir
+        idx = 0
+        while os.path.exists(run_dir):
+            run_dir = f"{base_dir}_{idx}"
+            idx += 1
+        os.makedirs(run_dir)
     print(f"Checkpoints will be saved to: {run_dir}/")
 
     model, tokenizer = get_model_and_tokenizer(model_name)
@@ -521,16 +610,22 @@ def main():
     dim = model.config.hidden_size // model.config.num_attention_heads
     num_layers = model.config.num_hidden_layers
 
-    config_path = os.path.join(run_dir, "config.yaml")
-    OmegaConf.save(config, config_path)
-    print(f"Config saved to: {config_path}")
-
     print(
         f"Model config: {num_layers} layers, {num_heads} KV heads, "
         f"{dim} head_dim"
     )
 
     mlps = init_mlps(model, cfg, device)
+    resume_state = None
+    if resume_path is not None:
+        resume_state = load_checkpoint(resume_path, mlps)
+
+    config_name = "config.yaml"
+    if resume_state is not None:
+        config_name = f"config_resumed_epoch{_start_epoch(resume_state)}.yaml"
+    config_path = os.path.join(run_dir, config_name)
+    OmegaConf.save(config, config_path)
+    print(f"Config saved to: {config_path}")
 
     data_cfg = config.data
     print(f"Loading dataset: {data_cfg.path}")
@@ -558,7 +653,11 @@ def main():
         "Starting meta-training... "
         f"(batches_per_epoch: {cfg.batches_per_epoch})"
     )
-    wandb_run = init_wandb(config, os.path.basename(run_dir))
+    wandb_run = init_wandb(
+        config,
+        os.path.basename(run_dir),
+        resume_id=(resume_state or {}).get("wandb_id"),
+    )
     try:
         meta_train(
             model=model,
@@ -570,6 +669,7 @@ def main():
             ckpt_path=ckpt_path,
             tokenizer=tokenizer,
             wandb_run=wandb_run,
+            resume_state=resume_state,
         )
     finally:
         wandb_run.finish()
