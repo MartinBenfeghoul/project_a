@@ -4,7 +4,7 @@ import torch
 
 from ..rope import SharedRopeCache
 from .tensor import SingleTensorCache, SingleTensorDynamicLayer
-from numerics.quantisation import CompressorParams, MSECompressor
+from numerics.quantisation import CompressorParams, MSECompressor, get_turboquant_compressor
 
 
 class TurboQuantLayer(SingleTensorDynamicLayer):
@@ -23,7 +23,7 @@ class TurboQuantLayer(SingleTensorDynamicLayer):
 
     def lazy_initialization(self, tensor_states: torch.Tensor) -> None:
         super().lazy_initialization(tensor_states)
-        self.compressor = MSECompressor(
+        self.compressor = get_turboquant_compressor(
             dim=tensor_states.shape[-1],
             bits=self.bits,
             device=tensor_states.device,

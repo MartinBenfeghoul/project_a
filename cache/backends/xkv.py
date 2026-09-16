@@ -395,9 +395,9 @@ class XKVKeysCache(DecomposedKeysCache):
         self.comp_ratio = self.calc_compression_ratio()
 
     def calc_compression_ratio(self):
-        """Mean per-sequence ratio of the stored factors."""
-        crs = 0.0
-        num_segments = 0
+        """Ratio of total original to stored factor bytes, excluding padding."""
+        original_total = 0.0
+        compressed_total = 0.0
         for group_state in self.group_states.values():
             for batch_idx, batch_shared in enumerate(
                 group_state.shared_segments
@@ -437,9 +437,9 @@ class XKVKeysCache(DecomposedKeysCache):
                         )
                         for layer_idx in group_state.layer_indices
                     )
-                    crs += original / compressed
-                    num_segments += 1
-        return crs / num_segments if num_segments > 0 else 0.0
+                    original_total += original
+                    compressed_total += compressed
+        return original_total / compressed_total if compressed_total else 0.0
 
     def _decompose_keys(self, layer_idx, cache_kwargs=None):
         group_layers, group_last_layer, group_tensors = (

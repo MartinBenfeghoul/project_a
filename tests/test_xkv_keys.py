@@ -5,7 +5,7 @@ import torch
 
 from cache.rope import SharedRopeCache
 from cache.backends.xkv import XKVKeysCache
-from numerics.quantisation import is_quantised_factor
+from numerics.quantisation import factor_nbytes, is_quantised_factor
 from utils.rope import inverse_rope
 
 from tests.helpers import apply_model_rope, low_rank_keys, rope_cos_sin
@@ -43,6 +43,51 @@ def _build_cache(**kwargs) -> XKVKeysCache:
         rope_cache=SharedRopeCache(),
     )
     return XKVKeysCache(**{**defaults, **kwargs})
+
+
+@pytest.mark.parametrize("quantise_a", [False, True])
+def test_compression_ratio_aggregates_bytes_across_sequences_and_groups(quantise_a):
+    torch.manual_seed(41)
+    batch_size, num_heads, seq_len, head_dim = 2, 2, 96, 16
+    valid_lengths = [96, 24]
+    mask = torch.arange(seq_len)[None, :] >= (
+        seq_len - torch.tensor(valid_lengths)[:, None]
+    )
+    cos, sin = rope_cos_sin(batch_size, seq_len, head_dim)
+    cache = _build_cache(
+        layer_group_size=2, num_layers=3, comp_ratio=2.5,
+        quantise_a=quantise_a,
+    )
+    assert cache.calc_compression_ratio() == 0
+    for layer in range(3):
+        keys = apply_model_rope(
+            torch.randn(batch_size, num_heads, seq_len, head_dim), cos, sin
+        )
+        cache.update(keys, layer, {
+            "cos": cos, "sin": sin, "padding_mask": mask,
+        })
+
+    originals, compressed = [], []
+    for group in cache.group_states.values():
+        for batch_idx, valid in enumerate(valid_lengths):
+            originals.append(
+                valid * len(group.layer_indices) * num_heads * head_dim
+                * keys.element_size()
+            )
+            shared = group.shared_segments[batch_idx][0].factor
+            compressed.append(
+                factor_nbytes(shared) * valid / seq_len
+                + sum(
+                    factor_nbytes(
+                        cache.layer_states[layer].segments[batch_idx][0].factor
+                    ) for layer in group.layer_indices
+                )
+            )
+    expected = sum(originals) / sum(compressed)
+    old_mean = sum(o / c for o, c in zip(originals, compressed)) / len(originals)
+    assert expected != pytest.approx(old_mean)
+    assert cache.calc_compression_ratio() == pytest.approx(expected)
+    assert cache.comp_ratio == pytest.approx(expected)
 
 
 def test_keys_are_unroped_before_decomposition(monkeypatch):

@@ -376,4 +376,4 @@ class MSECompressor:
 def init_compressor(turboquant_residuals, compressor_bits, dim, device):
     if not turboquant_residuals:
         return None
-    return MSECompressor(dim=dim, bits=compressor_bits, device=device)
+    return get_turboquant_compressor(dim=dim, bits=compressor_bits, device=device)

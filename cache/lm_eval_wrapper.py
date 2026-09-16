@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import torch
 from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils_hf import stop_sequences_criteria
@@ -20,6 +22,36 @@ class CompressedCacheHFLM(HFLM):
     ):
         super().__init__(**kwargs)
         self._cache_config = cache_config
+        self.reset_compression_stats()
+
+    def reset_compression_stats(self) -> None:
+        self._original_bytes = 0
+        self._compressed_bytes = 0
+
+    @property
+    def aggregate_ratio(self) -> float | None:
+        if not self._compressed_bytes:
+            return None
+        return self._original_bytes / self._compressed_bytes
+
+    @contextmanager
+    def _record_prefill(self, cache, padding_mask):
+        record = None
+
+        def capture(module, inputs, output):
+            nonlocal record
+            if record is None:
+                record = cache.prefill_compression_stats(padding_mask)
+
+        handle = self.model.register_forward_hook(capture)
+        try:
+            yield
+        finally:
+            handle.remove()
+
+        if record is not None:
+            self._original_bytes += record["original_bytes"]
+            self._compressed_bytes += record["compressed_bytes"]
 
     def set_cache_config(self, cache_config: CompressedCacheConfig) -> None:
         """Use a new immutable cache config for subsequent model calls."""
@@ -49,7 +81,10 @@ class CompressedCacheHFLM(HFLM):
             cache = self._make_cache(
                 {"padding_mask": torch.ones_like(inps, dtype=torch.bool)}
             )
-            output = self.model(inps, past_key_values=cache)
+            with self._record_prefill(
+                cache, torch.ones_like(inps, dtype=torch.bool)
+            ):
+                output = self.model(inps, past_key_values=cache)
             return output.logits
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
@@ -72,7 +107,9 @@ class CompressedCacheHFLM(HFLM):
         stopping_criteria = stop_sequences_criteria(
             self.tokenizer, stop, context.shape[1], context.shape[0]
         )
-        with torch.autocast(
+        with self._record_prefill(
+            cache, generation_kwargs["attention_mask"]
+        ), torch.autocast(
             device_type=self.device.type,
             dtype=self.mixed_precision_dtype,
             enabled=self.mixed_precision_dtype is not None,

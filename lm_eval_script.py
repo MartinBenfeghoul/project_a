@@ -39,6 +39,7 @@ def get_tasks(tasks, print_tasks=True):
 
 def evaluate_tasks(lm, tasks, *, batch_size, task_manager, limit):
     merged = {}
+    lm.reset_compression_stats()
     for task in tasks:
         results = evaluator.simple_evaluate(
             model=lm,
@@ -110,6 +111,9 @@ def main(args):
     print(make_table(results))
 
     results["results"]["config"] = vars(args)
+    results["results"]["compression"] = {
+        "aggregate_ratio": lm.aggregate_ratio,
+    }
 
     output_dir = os.path.join(
         args.output_dir, args.model_name.replace("/", "_")

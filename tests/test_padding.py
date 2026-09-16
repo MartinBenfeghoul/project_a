@@ -384,7 +384,7 @@ def test_xkv_rejects_right_padding():
 
 
 def test_compression_ratio_uses_each_sequences_own_length():
-    """Pad lengths differ per row, so the per-batch ratios must too."""
+    """Sum padding-discounted bytes."""
     torch.manual_seed(9)
     num_heads, seq_len, head_dim = 2, 64, 16
     pads = (8, 32)
@@ -404,12 +404,12 @@ def test_compression_ratio_uses_each_sequences_own_length():
 
     rank = cache.layer_states[0].packed_right.shape[-2]
     flat_dim = num_heads * head_dim
-    expected = sum(
-        (seq_len - pad_len)
-        * flat_dim
-        / (rank * ((seq_len - pad_len) + flat_dim))
+    original = sum((seq_len - pad_len) * flat_dim for pad_len in pads)
+    compressed = sum(
+        rank * ((seq_len - pad_len) + flat_dim)
         for pad_len in pads
-    ) / len(pads)
+    )
+    expected = original / compressed
     assert cache.comp_ratio == pytest.approx(expected, rel=1e-4)
 
 

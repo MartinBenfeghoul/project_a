@@ -66,6 +66,8 @@ class CompressedCache:
         self._cache_context = dict(cache_context or {})
         self._deferred_value_updates: dict[int, DeferredValueUpdate] = {}
         self.prefill = True
+        self._prefill_input_shape: tuple[int, int] | None = None
+        self._prefill_compression_record: dict | None = None
 
     # --- selective reconstruction -----------------------------------------
 
@@ -102,6 +104,7 @@ class CompressedCache:
         cache_kwargs: dict[str, Any],
     ) -> None:
         # Selective decode bypasses update(), so end the prefill phase here.
+        self._prefill_compression_record = None
         self._end_prefill_on_first_decode(key_states)
         append_keys = getattr(self.key_cache, "append_decode", None)
         if callable(append_keys):
@@ -164,6 +167,11 @@ class CompressedCache:
         layer_idx: int,
         cache_kwargs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._prefill_input_shape is None:
+            self._prefill_input_shape = (
+                key_states.shape[0], key_states.shape[-2]
+            )
+        self._prefill_compression_record = None
         self._end_prefill_on_first_decode(key_states)
 
         full_key_states, full_value_states = key_states, value_states
@@ -318,11 +326,37 @@ class CompressedCache:
 
     # --- accounting and transformers plumbing -----------------------------
 
+    def prefill_compression_stats(self, padding_mask=None) -> dict:
+        """Snapshot prefill accounting before any decode tokens are appended."""
+        if self._prefill_compression_record is None:
+            if self._prefill_input_shape is None:
+                raise ValueError("No prefill has been recorded yet.")
+            if not self.prefill and self.get_seq_length(0) != 1:
+                raise ValueError("Capture prefill statistics before decoding.")
+            if self._deferred_value_updates:
+                raise ValueError("Finish the pending layer group before accounting.")
+            if padding_mask is None:
+                padding_mask = self._cache_context.get("padding_mask")
+            if padding_mask is None:
+                padding_mask = torch.ones(
+                    self._prefill_input_shape,
+                    dtype=torch.bool,
+                    device=self.key_cache.layers[0].tensor.device,
+                )
+            self._prefill_compression_record = accounting.prefill_storage(
+                self, padding_mask
+            )
+        return self._prefill_compression_record
+
     @property
     def comp_ratio(self) -> float | None:
         """
         Calculate compression ratios from both caches.
         """
+        if self._prefill_compression_record is not None:
+            return self._prefill_compression_record["compression_ratio"]
+        if self.prefill and self._prefill_input_shape is not None:
+            return self.prefill_compression_stats()["compression_ratio"]
         return accounting.compression_ratio(
             self.key_cache,
             self.value_cache,
