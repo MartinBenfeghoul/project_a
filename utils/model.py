@@ -5,6 +5,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _contiguous_lm_head_input(module, args):
+    return (args[0].contiguous(), *args[1:])
+
+
 def get_device(model):
     try:
         device = model.device
@@ -27,6 +32,9 @@ def get_model_and_tokenizer(
         torch_dtype=torch_dtype,
         device_map="auto",
     )
+    output_embeddings = model.get_output_embeddings()
+    if output_embeddings is not None:
+        output_embeddings.register_forward_pre_hook(_contiguous_lm_head_input)
 
     tokenizer.pad_token = (
         tokenizer.eos_token if pad_token is None else pad_token
