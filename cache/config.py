@@ -46,6 +46,7 @@ class MLPValueCacheConfig:
     ) = None
     turboquant_residuals: bool = False
     compressor_bits: int = 3
+    residual_sink_tokens: int = 0
     cache_type: Literal["mlp"] = field(default="mlp", init=False)
 
 
@@ -146,6 +147,7 @@ def build_value_cache(
             MLPValueCache(
                 ddp_cache_data=ddp_cache_data,
                 target_cr=config.target_compression_ratio,
+                residual_sink_tokens=config.residual_sink_tokens,
                 num_epochs=config.num_epochs,
                 learned_init=config.learned_init,
                 meta_weights_path=config.meta_weights_path,
@@ -210,6 +212,7 @@ def build_value_cache_config(args, model, num_layers: int) -> ValueCacheConfig:
 
         return MLPValueCacheConfig(
             target_compression_ratio=args.target_cr,
+            residual_sink_tokens=getattr(args, "v_residual_sink_tokens", 0),
             num_epochs=args.num_epochs,
             meta_weights_path=args.meta_weights_path,
             value_mlp_weights_path=args.value_mlp_weights_path,

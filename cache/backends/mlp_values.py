@@ -24,8 +24,10 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         rope_cache: SharedRopeCache | None = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
+        residual_sink_tokens: int = 0,
     ):
         super().__init__(rope_cache=rope_cache)
+        self.residual_sink_tokens = residual_sink_tokens
 
         self.target_cr = float(target_cr)
 
@@ -228,6 +230,18 @@ class MLPValueLayer(SingleTensorDynamicLayer):
         budget = int(residual_budget)
         valid_flat = valid.flatten()
         valid_indices = valid_flat.nonzero(as_tuple=False).flatten()
+        if self.residual_sink_tokens:
+            sink_tokens = padding_mask & (
+                padding_mask.long().cumsum(dim=-1) <= self.residual_sink_tokens
+            )
+            sink_mask = sink_tokens[:, None, :].expand_as(valid).clone()
+            sink_rows = int(sink_mask.sum().item())
+            if sink_rows <= budget:
+                mask = sink_mask
+                budget -= sink_rows
+                valid_indices = (valid_flat & ~mask.flatten()).nonzero(
+                    as_tuple=False
+                ).flatten()
         if budget >= valid_indices.numel():
             mask = valid.clone()
         elif budget > 0:
@@ -451,6 +465,7 @@ class MLPValueCache(SingleTensorCache):
         ) = None,
         turboquant_residuals: bool = False,
         compressor_bits: int = 3,
+        residual_sink_tokens: int = 0,
     ):
         super().__init__(
             ddp_cache_data=ddp_cache_data,
@@ -467,6 +482,7 @@ class MLPValueCache(SingleTensorCache):
         self.target_cr = target_cr
         self.turboquant_residuals = turboquant_residuals
         self.compressor_bits = compressor_bits
+        self.residual_sink_tokens = residual_sink_tokens
 
         checkpoint_path = meta_weights_path or value_mlp_weights_path
         if learned_init is not None:
@@ -509,6 +525,7 @@ class MLPValueCache(SingleTensorCache):
             W_linear_init=w_linear_init,
             turboquant_residuals=self.turboquant_residuals,
             compressor_bits=self.compressor_bits,
+            residual_sink_tokens=self.residual_sink_tokens,
         )
 
     def update(
