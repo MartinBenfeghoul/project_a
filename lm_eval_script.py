@@ -15,6 +15,7 @@ from model.attention_predictor import (
     apply_attn_predictor_config,
 )
 from model.selective_attention import install_selective_attention
+from model.unpadded_attention import install_unpadded_sdpa
 from utils.args import list_of_strings
 from utils.data import filter_tasks_by_min_seq_len
 from utils.logging import get_output_path
@@ -37,7 +38,9 @@ def get_tasks(tasks, print_tasks=True):
     return tasks
 
 
-def evaluate_tasks(lm, tasks, *, batch_size, task_manager, limit):
+def evaluate_tasks(
+    lm, tasks, *, batch_size, task_manager, limit, log_samples=False
+):
     merged = {}
     lm.reset_compression_stats()
     for task in tasks:
@@ -51,6 +54,7 @@ def evaluate_tasks(lm, tasks, *, batch_size, task_manager, limit):
             device=get_device(lm),
             task_manager=task_manager,
             limit=limit,
+            log_samples=log_samples,
         )
         for key, value in results.items():
             if isinstance(value, dict) and isinstance(
@@ -65,6 +69,8 @@ def evaluate_tasks(lm, tasks, *, batch_size, task_manager, limit):
 @torch.no_grad()
 def main(args):
     model, tokenizer = get_model_and_tokenizer(args.model_name)
+    if args.unpadded_sdpa:
+        install_unpadded_sdpa(model)
     selective_handles = []
     if args.selective_reconstruction:
         enable_decode_compilation()
@@ -153,6 +159,11 @@ def parse_args():
     )
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument(
+        "--unpadded_sdpa",
+        action="store_true",
+        help="Attend each left-padded sequence separately instead of building a dense [batch, 1, seq, seq] mask. Needed for batch_size > 1 at long context.",
+    )
+    parser.add_argument(
         "--max_seq_lengths",
         type=int,
         nargs="+",
@@ -211,6 +222,12 @@ def parse_args():
         help="sets MLP target compression ratio.",
     )
     parser.add_argument("--num_epochs", type=int, default=50)
+    parser.add_argument(
+        "--v_residual_sink_tokens",
+        type=int,
+        default=0,
+        help="Reserve MLP residual rows for the first N non-padding tokens per sequence and KV head.",
+    )
     parser.add_argument("--meta_weights_path", type=str, default=None)
     parser.add_argument(
         "--value_mlp_weights_path",
