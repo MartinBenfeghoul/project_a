@@ -4,7 +4,7 @@ import os
 import pytest
 import torch
 
-from efficiency.xkv import FusedKeyReconstructor
+from efficiency.xkv import FusedKeyReconstructor, FusedLandmarkScorer
 
 from tests.helpers import rope_cos_sin
 
@@ -204,3 +204,17 @@ def test_selective_retrieval_on_the_fused_path(quantise):
     selected, expected = selected.float(), expected.float()
     error = (selected - expected).norm() / expected.norm()
     assert error < 5e-2, f"selected keys deviate by {error:.4f}"
+
+
+def test_landmark_scorer_handles_prompts_without_landmarks():
+    """Short prompts can be all local window and outliers, leaving no
+    landmarks; the fused kernel would launch an empty grid and exit."""
+    _requires_fused_ops()
+
+    device = torch.device("cuda:0")
+    query = torch.randn(2, 8, 4, 128, device=device, dtype=torch.bfloat16)
+    landmarks = torch.empty(2, 8, 0, 128, device=device, dtype=torch.bfloat16)
+
+    scores = FusedLandmarkScorer().score(query, landmarks)
+
+    assert scores.shape == (2, 8, 0)

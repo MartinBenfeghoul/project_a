@@ -204,6 +204,7 @@ class FusedLandmarkScorer:
             and query.dtype == torch.bfloat16
             and landmarks.dtype == torch.bfloat16
             and query.size(-1) == 128
+            and landmarks.size(-2) > 0
             and landmarks.size(-2) % 8 == 0
         )
 
