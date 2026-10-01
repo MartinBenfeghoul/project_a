@@ -1,0 +1,45 @@
+model:
+  name: meta-llama/Llama-3.1-8B-Instruct
+data:
+  path: HuggingFaceFW/fineweb-edu
+  subset: sample-100BT
+  shuffle_buffer_size: 50000
+training:
+  seq_len: 4096
+  batch_size: 4
+  grad_accum_steps: 8
+  eval_batch_size: 4
+  inner_steps: 2
+  inner_lr: 0.001
+  first_order: true
+  inner_adaptation_dtype: bfloat16
+  meta_lr: 0.0003
+  train_on_reconstructed_keys: true
+  xkv_layer_group_size: 4
+  xkv_svd_backend: cholqr
+  use_residual: true
+  num_meta_epochs: 200
+  log_interval: 10
+  batches_per_epoch: 200
+  checkpoint_interval: 10
+  resume_from: null
+  eval_interval: 10
+  eval_seq_lengths:
+  - 4096
+  eval_target_cr: 4.0
+  eval_ruler: true
+  eval_ruler_samples: 30
+  eval_ruler_tasks:
+  - niah_single_3
+  - niah_multikey_3
+  - ruler_qa_squad
+  - ruler_cwe
+  eval_longbench: true
+  eval_longbench_samples: 30
+  eval_longbench_tasks:
+  - longbench_trec
+  - longbench_lcc
+wandb:
+  enabled: true
+  project: gist_vs_details
+  entity: mixture_of_titans
