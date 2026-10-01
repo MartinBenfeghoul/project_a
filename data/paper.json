@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "source": "LowRAM paper, Table 11",
+  "model": "mistralai/Mistral-7B-Instruct-v0.3",
+  "benchmark": "LongBench subset with prompts longer than 10000 tokens",
+  "score_definition": "100 * method score / corresponding uncompressed baseline score",
+  "compression_definition": "Original KV bytes divided by compressed KV bytes; not whole-model GPU memory",
+  "setting": "Full adaptation",
+  "long_context": {
+    "LowRAM": [[3,99.6],[4,97.2],[6,95.2],[7,93.4],[8,91.9],[9,90.7],[10,89.0]],
+    "LowRAM-EQ": [[9.2,99.2],[17.8,98.0],[22.1,96.2],[26.9,94.5]],
+    "Quantisation": [[3.9,100.0],[5.1,99.3],[7.5,92.3],[14.2,33.4]],
+    "Eviction": [[3,98.1],[4,97.8],[8,93.9],[10,91.6]]
+  }
+}
