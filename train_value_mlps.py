@@ -265,9 +265,13 @@ def train(args):
             }
         )
     model_name = args.model_name.replace("/", "--")
-    output_path = f"checkpoints/value_mlps/{model_name}/value_mlps_{args.max_batches}batches_{args.num_epochs}epochs_{args.seq_len}seqlen.pt"
+    output_path = (
+        args.output_path
+        or f"checkpoints/value_mlps/{model_name}/value_mlps_{args.max_batches}batches_{args.num_epochs}epochs_{args.seq_len}seqlen.pt"
+    )
     save_checkpoint(output_path, mlps, args, layers, metrics)
     print(f"Saved value MLP checkpoint to {output_path}")
+    return output_path
 
 
 def build_arg_parser():
@@ -291,6 +295,11 @@ def build_arg_parser():
         "--dtype",
         choices=["float16", "bfloat16", "float32"],
         default="float32",
+    )
+    parser.add_argument(
+        "--output_path",
+        default=None,
+        help="Where to save the checkpoint. Default: a name built from the run settings.",
     )
     return parser
 
