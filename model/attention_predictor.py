@@ -288,7 +288,9 @@ def install_attention_predictor_hooks(
     """
     attention_specs = _attention_backend_specs()
 
-    handles = []
+    from .eviction_attention import install_eviction_attention_hooks
+
+    handles = install_eviction_attention_hooks(model)
     found_attention = 0
 
     def hook(module, args, kwargs):
@@ -351,7 +353,9 @@ def install_attention_predictor_hooks(
         found_attention += 1
         handles.append(module.register_forward_pre_hook(hook, with_kwargs=True))
 
-    if not handles:
+    if not found_attention:
+        for handle in handles:
+            handle.remove()
         raise RuntimeError(
             f"No attention predictor hooks installed. Found {found_attention} "
             "supported attention modules."

@@ -45,6 +45,7 @@ def prefill_storage(cache, padding_mask) -> dict:
     payload = []
     quantizers = []
     metadata = []
+    metadata.append(getattr(cache, "_retained_padding_masks", {}))
     policy = getattr(cache, "eviction", None)
     if policy is not None:
         metadata.extend([policy.kept_positions, policy._group_keep_positions,

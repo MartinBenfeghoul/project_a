@@ -68,6 +68,10 @@ class CompressedCache:
         self.prefill = True
         self._prefill_input_shape: tuple[int, int] | None = None
         self._prefill_compression_record: dict | None = None
+        self._retained_padding_masks: dict[int, torch.Tensor | None] = {}
+        self._generation_attention_mask: torch.Tensor | None = None
+        self._decode_suffix_mask: torch.Tensor | None = None
+        self._decode_suffix_prepared = False
 
     # --- selective reconstruction -----------------------------------------
 
@@ -130,6 +134,44 @@ class CompressedCache:
     ) -> None:
         self.eviction.set_value_importance(layer_idx, value_importance)
 
+    def set_generation_attention_mask(self, mask: torch.Tensor | None) -> None:
+        """Capture the original mask before Transformers truncates it."""
+        if mask is not None and mask.ndim != 2:
+            raise ValueError("Eviction requires a 2D generation padding mask.")
+        self._generation_attention_mask = mask
+        self._decode_suffix_prepared = False
+        if self._prefill_input_shape is None and mask is not None:
+            self._cache_context.setdefault("padding_mask", mask)
+
+    def eviction_decode_mask(self, layer_idx: int) -> torch.Tensor | None:
+        """Mask in physical KV-row order, including the next decode token."""
+        prefix = self._retained_padding_masks[layer_idx]
+        kept_len = self.kept_positions[layer_idx].numel()
+        suffix_len = self.key_cache.get_seq_length(layer_idx) - kept_len + 1
+        if not self._decode_suffix_prepared:
+            mask = self._generation_attention_mask
+            suffix = None
+            if mask is not None:
+                prompt_len = self._prefill_input_shape[1]
+                suffix = mask[:, prompt_len:].bool()
+                if suffix.shape[-1] != suffix_len:
+                    raise ValueError(
+                        "Generation mask must describe the original prompt "
+                        "and all decoded tokens."
+                    )
+                if bool(suffix.all()):
+                    suffix = None
+            self._decode_suffix_mask = suffix
+            self._decode_suffix_prepared = True
+        suffix = self._decode_suffix_mask
+        if prefix is None and suffix is None:
+            return None
+        if prefix is None:
+            prefix = suffix.new_ones((suffix.shape[0], kept_len))
+        if suffix is None:
+            suffix = prefix.new_ones((prefix.shape[0], suffix_len))
+        return torch.cat((prefix, suffix.to(prefix.device)), dim=-1)
+
     # --- the update path --------------------------------------------------
 
     def _end_prefill_on_first_decode(self, key_states: torch.Tensor) -> None:
@@ -182,6 +224,12 @@ class CompressedCache:
             self._aligned_padding_mask(key_states, None),
         )
         padding_mask = self._aligned_padding_mask(key_states, keep_positions)
+        if keep_positions is not None:
+            self._retained_padding_masks[layer_idx] = (
+                padding_mask
+                if padding_mask is not None and not bool(padding_mask.all())
+                else None
+            )
         if self.selective.enabled and key_states.size(-2) > 1:
             self.selective.store_landmarks(
                 layer_idx,
