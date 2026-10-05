@@ -134,7 +134,7 @@ python -m examples.lowram_demo
 python -m benchmarks.compare \
   --methods baseline fast lowram \
   --meta-weights /path/to/meta_mlps.pt \
-  --contexts 65536 --batch-sizes 1 2 4 --unpadded-sdpa \
+  --contexts 65536 --batch-sizes 1 2 4 \
   --ratios 4 --samples 4 --repeats 2 --warmup 1 \
   --decode-tokens 48 \
   --output results/demo/comparison-64k.json</pre>
