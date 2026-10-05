@@ -15,7 +15,7 @@ from model.attention_predictor import (
     apply_attn_predictor_config,
 )
 from model.selective_attention import install_selective_attention
-from model.unpadded_attention import install_unpadded_sdpa
+from model.unpadded_attention import attention_for_batch
 from utils.args import list_of_strings
 from utils.data import filter_tasks_by_min_seq_len
 from utils.logging import get_output_path
@@ -43,34 +43,33 @@ def evaluate_tasks(
 ):
     merged = {}
     lm.reset_compression_stats()
-    for task in tasks:
-        results = evaluator.simple_evaluate(
-            model=lm,
-            gen_kwargs=GEN_KWARGS,
-            tasks=[task],
-            num_fewshot=0,
-            batch_size=batch_size,
-            max_batch_size=batch_size,
-            device=get_device(lm),
-            task_manager=task_manager,
-            limit=limit,
-            log_samples=log_samples,
-        )
-        for key, value in results.items():
-            if isinstance(value, dict) and isinstance(
-                merged.get(key, {}), dict
-            ):
-                merged.setdefault(key, {}).update(value)
-            else:
-                merged[key] = value
+    with attention_for_batch(lm.model, batch_size):
+        for task in tasks:
+            results = evaluator.simple_evaluate(
+                model=lm,
+                gen_kwargs=GEN_KWARGS,
+                tasks=[task],
+                num_fewshot=0,
+                batch_size=batch_size,
+                max_batch_size=batch_size,
+                device=get_device(lm),
+                task_manager=task_manager,
+                limit=limit,
+                log_samples=log_samples,
+            )
+            for key, value in results.items():
+                if isinstance(value, dict) and isinstance(
+                    merged.get(key, {}), dict
+                ):
+                    merged.setdefault(key, {}).update(value)
+                else:
+                    merged[key] = value
     return merged
 
 
 @torch.no_grad()
 def main(args):
     model, tokenizer = get_model_and_tokenizer(args.model_name)
-    if args.unpadded_sdpa:
-        install_unpadded_sdpa(model)
     selective_handles = []
     if args.selective_reconstruction:
         enable_decode_compilation()
@@ -158,11 +157,6 @@ def parse_args():
         help="Max number of samples per task.",
     )
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument(
-        "--unpadded_sdpa",
-        action="store_true",
-        help="Attend each left-padded sequence separately instead of building a dense [batch, 1, seq, seq] mask. Needed for batch_size > 1 at long context.",
-    )
     parser.add_argument(
         "--max_seq_lengths",
         type=int,

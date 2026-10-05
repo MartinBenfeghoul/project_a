@@ -4,7 +4,7 @@ from pathlib import Path
 CHECKPOINTS = Path(__file__).resolve().parents[1] / "checkpoints"
 
 
-def load_model(model_name, dtype="bfloat16", unpadded_sdpa=False):
+def load_model(model_name, dtype="bfloat16"):
     import torch
     from utils.model import get_model_and_tokenizer
 
@@ -19,10 +19,6 @@ def load_model(model_name, dtype="bfloat16", unpadded_sdpa=False):
         raise ValueError(
             "This demo currently supports Llama and Mistral architectures."
         )
-    if unpadded_sdpa:
-        from model.unpadded_attention import install_unpadded_sdpa
-
-        install_unpadded_sdpa(model)
     return model, tokenizer
 
 
