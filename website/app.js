@@ -248,7 +248,7 @@ $("copy-command").onclick = async () => {
   catch { text("copy-command", "Select text to copy"); }
 };
 async function getJSON(path) { const response = await fetch(path, {cache: "no-store"}); if (!response.ok) throw new Error(`Could not load ${path}`); return response.json(); }
-getJSON("data/comparison-64k.json").then(acceptReport).catch(() => {
+getJSON("data/comparison.json").then(acceptReport).catch(() => {
   text("run-label", "Results unavailable");
   $("load-error").hidden = false;
   text("load-error", "The recorded results could not be loaded. Refresh this page; if the problem persists, check that the website is served over HTTP with its data folder.");
