@@ -1,18 +1,28 @@
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from huggingface_hub import snapshot_download
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
 
-def download_model_to_hub(model_name, **kwargs):
-    snapshot_download(model_name, **kwargs)
+def _contiguous_lm_head_input(module, args):
+    return (args[0].contiguous(), *args[1:])
+
+
+def get_device(model):
+    try:
+        device = model.device
+    except AttributeError:
+        try:
+            device = model.model.device
+        except AttributeError:
+            device = "cuda:0"
+    return device
 
 
 def get_model_and_tokenizer(
-    model_name, device, pad_token=None, pad_token_side="left", torch_dtype=None
+    model_name, pad_token=None, pad_token_side="left", torch_dtype=None
 ):
     print(f"Loading model and tokenizer for {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -22,6 +32,9 @@ def get_model_and_tokenizer(
         torch_dtype=torch_dtype,
         device_map="auto",
     )
+    output_embeddings = model.get_output_embeddings()
+    if output_embeddings is not None:
+        output_embeddings.register_forward_pre_hook(_contiguous_lm_head_input)
 
     tokenizer.pad_token = (
         tokenizer.eos_token if pad_token is None else pad_token
@@ -31,14 +44,32 @@ def get_model_and_tokenizer(
     return model, tokenizer
 
 
-def extract_kv_linear_init(model, per_head=False) -> list[torch.Tensor]:
-    """
-    Pre-compute W_linear for every transformer layer.
+def get_training_model_and_tokenizer(
+    model_name,
+    torch_dtype=None,
+    attn_implementation=None,
+):
+    """Load a frozen teacher model plus its tokenizer for a training run."""
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
-    Args:
-        per_head: if True, compute the pseudo-inverse independently per KV head.
-                  If False (default), invert the full W_k jointly.
-    """
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        device_map="auto",
+        **(
+            {}
+            if attn_implementation is None
+            else {"attn_implementation": attn_implementation}
+        ),
+    )
+    model.eval()
+    return model, tokenizer, next(model.parameters()).device
+
+
+def extract_kv_linear_init(model) -> list[torch.Tensor]:
+    """Pre-compute a per-KV-head W_linear for every transformer layer."""
     cfg = model.config
     num_kv_heads = cfg.num_key_value_heads
     head_dim = cfg.hidden_size // cfg.num_attention_heads
@@ -55,30 +86,10 @@ def extract_kv_linear_init(model, per_head=False) -> list[torch.Tensor]:
     W_k = W_k_raw.transpose(-1, -2).float()
     W_v = W_v_raw.transpose(-1, -2).float()
 
-    if per_head:
-        W_k = W_k.view(len(layers), -1, num_kv_heads, head_dim).permute(
-            0, 2, 1, 3
-        )
-        W_v = W_v.view(len(layers), -1, num_kv_heads, head_dim).permute(
-            0, 2, 1, 3
-        )
-        W_linear = (torch.linalg.pinv(W_k) @ W_v).to(
-            W_k_raw.dtype
-        )  # [layers, num_kv_heads, head_dim, head_dim]
-    else:
-        W_linear = (torch.linalg.pinv(W_k) @ W_v).to(W_k_raw.dtype)
-        W_linear = W_linear.view(
-            len(layers), num_kv_heads, head_dim, num_kv_heads, head_dim
-        )
+    W_k = W_k.view(len(layers), -1, num_kv_heads, head_dim).permute(0, 2, 1, 3)
+    W_v = W_v.view(len(layers), -1, num_kv_heads, head_dim).permute(0, 2, 1, 3)
+    W_linear = (torch.linalg.pinv(W_k) @ W_v).to(
+        W_k_raw.dtype
+    )  # [layers, num_kv_heads, head_dim, head_dim]
 
     return [W_linear[i] for i in range(len(layers))]
-
-
-def clone_mlp_params(layer_mlps):
-    return [[p.clone() for p in mlp.parameters()] for mlp in layer_mlps]
-
-
-def load_mlp_params(layer_mlps, params_list):
-    for mlp, params in zip(layer_mlps, params_list):
-        for p, saved_p in zip(mlp.parameters(), params):
-            p.data.copy_(saved_p.data)

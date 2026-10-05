@@ -3,25 +3,24 @@ from itertools import islice
 
 import torch
 import torch.nn.functional as F
-import wandb
-from torch.utils.data import DataLoader
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from model.attention_predictor import (
     AttentionPredictor,
+    _attention_backend_specs,
+    _get_attention_backend,
     attention_targets_to_distribution,
     max_pool_attention,
     topk_block_mask,
 )
-from utils import (
-    attention_predictor_config,
-    init_wandb,
-    parse_layers,
+from utils.args import add_common_training_args, parse_layers
+from utils.data import build_fineweb_dataloader
+from utils.logging import (
+    format_run_value,
     prepare_run_directory,
     save_attention_predictor_checkpoint,
 )
-from utils.dataloader import Dataset, collate, load_data
+from utils.model import get_training_model_and_tokenizer
 
 
 def sample_positions(
@@ -179,45 +178,34 @@ def train_layer_examples(
     return metrics_sum
 
 
-def train(args: argparse.Namespace) -> None:
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    dtype = getattr(torch, "bfloat16")
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        attn_implementation="eager",
-        torch_dtype=dtype,
-        device_map="auto",
+def run_name(args: argparse.Namespace) -> str:
+    return (
+        f"seq{args.seq_len}_"
+        f"maxb{args.max_batches}_"
+        f"sps{args.samples_per_sequence}_"
+        f"hist{args.history_step}_"
+        f"blk{args.block_size}_"
+        f"topk{args.topk_blocks}_"
+        f"layers{format_run_value(args.layers)}_"
+        f"bce{args.bce_weight}"
     )
-    model.eval()
-    model.config.output_attentions = True
+
+
+def train(args: argparse.Namespace) -> None:
+    model, tokenizer, device = get_training_model_and_tokenizer(
+        args.model_name,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="eager",
+    )
     model.config.use_cache = False
 
-    device = next(model.parameters()).device
     layers = parse_layers(args.layers, model.config.num_hidden_layers)
-    wandb_config = attention_predictor_config(args, layers)
-    wandb_config.wandb.run_name = prepare_run_directory(args, layers)
-    if init_wandb(wandb_config):
-        wandb.define_metric("train/step")
-        wandb.define_metric("train/*", step_metric="train/step")
+    prepare_run_directory(args, layers, run_name(args))
 
-    hf_dataset = load_data(
-        dataset_path="HuggingFaceFW/fineweb-edu",
-        subset_name="sample-100BT",
-        shuffle_buffer_size=10000,
-    )
-    token_dataset = Dataset(
-        hf_dataset,
+    dataloader = build_fineweb_dataloader(
         tokenizer,
         seq_len=args.seq_len,
-        eos_id=tokenizer.eos_token_id,
-    )
-    dataloader = DataLoader(
-        token_dataset,
         batch_size=args.batch_size,
-        collate_fn=collate,
     )
 
     predictor = AttentionPredictor().to(device)
@@ -236,6 +224,41 @@ def train(args: argparse.Namespace) -> None:
     }
     num_updates = 0
 
+    train_state = {"positions": None, "batch_metrics": None}
+
+    def capture_attention_hook(module, module_args, output):
+        attn_weights = output[1]
+        histories, targets = build_training_examples(
+            attn=attn_weights,
+            positions=train_state["positions"],
+            history_step=args.history_step,
+            block_size=args.block_size,
+        )
+        with torch.enable_grad():
+            metrics = train_layer_examples(
+                predictor=predictor,
+                histories=histories,
+                targets=targets,
+                topk_blocks=args.topk_blocks,
+                bce_weight=args.bce_weight,
+                loss_scale=1.0 / len(layers),
+                microbatch_size=args.predictor_microbatch_size,
+            )
+        for key, value in metrics.items():
+            train_state["batch_metrics"][key] += value / len(layers)
+
+    attention_specs = _attention_backend_specs()
+    hook_handles = [
+        module.register_forward_hook(capture_attention_hook)
+        for module in model.modules()
+        if _get_attention_backend(module, attention_specs) is not None
+        and getattr(module, "layer_idx", None) in layers
+    ]
+    if not hook_handles:
+        raise RuntimeError(
+            "No attention modules matched --layers for capture hooks."
+        )
+
     progress = tqdm(
         islice(dataloader, args.max_batches),
         total=args.max_batches,
@@ -246,18 +269,7 @@ def train(args: argparse.Namespace) -> None:
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
 
-        with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_attentions=True,
-                use_cache=False,
-            )
-
-        if outputs.attentions is None:
-            raise RuntimeError("Model did not return attentions.")
-
-        positions = sample_positions(
+        train_state["positions"] = sample_positions(
             seq_len=input_ids.shape[-1],
             history_step=args.history_step,
             block_size=args.block_size,
@@ -265,30 +277,18 @@ def train(args: argparse.Namespace) -> None:
             samples_per_sequence=args.samples_per_sequence,
             device=device,
         )
+        train_state["batch_metrics"] = {key: 0.0 for key in running}
 
         optimizer.zero_grad(set_to_none=True)
-        batch_metrics = {key: 0.0 for key in running}
 
-        for layer_idx in layers:
-            histories, targets = build_training_examples(
-                attn=outputs.attentions[layer_idx],
-                positions=positions,
-                history_step=args.history_step,
-                block_size=args.block_size,
+        with torch.no_grad():
+            model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
             )
 
-            metrics = train_layer_examples(
-                predictor=predictor,
-                histories=histories,
-                targets=targets,
-                topk_blocks=args.topk_blocks,
-                bce_weight=args.bce_weight,
-                loss_scale=1.0 / len(layers),
-                microbatch_size=args.predictor_microbatch_size,
-            )
-
-            for key, value in metrics.items():
-                batch_metrics[key] += value / len(layers)
+        batch_metrics = train_state["batch_metrics"]
 
         torch.nn.utils.clip_grad_norm_(
             predictor.parameters(), args.max_grad_norm
@@ -308,23 +308,9 @@ def train(args: argparse.Namespace) -> None:
                 mass=f"{averaged['recovered_mass']:.4f}",
                 recall=f"{averaged['recall_at_k']:.4f}",
             )
-            if args.use_wandb:
-                wandb.log(
-                    {
-                        "train/step": batch_idx,
-                        "train/loss": averaged["loss"],
-                        "train/kl_loss": averaged["kl_loss"],
-                        "train/bce_loss": averaged["bce_loss"],
-                        "train/recovered_mass": averaged["recovered_mass"],
-                        "train/recall_at_k": averaged["recall_at_k"],
-                        "train/batch_loss": batch_metrics["loss"],
-                        "train/batch_recovered_mass": batch_metrics[
-                            "recovered_mass"
-                        ],
-                        "train/batch_recall_at_k": batch_metrics["recall_at_k"],
-                        "train/lr": optimizer.param_groups[0]["lr"],
-                    }
-                )
+
+    for handle in hook_handles:
+        handle.remove()
 
     save_attention_predictor_checkpoint(
         args,
@@ -335,25 +321,22 @@ def train(args: argparse.Namespace) -> None:
         running,
         num_updates,
     )
-    if args.use_wandb:
-        wandb.finish()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train Attention Predictor.")
-    parser.add_argument(
-        "--model_name",
-        type=str,
-        default="meta-llama/Llama-3.1-8B-Instruct",
+    add_common_training_args(
+        parser,
+        model_name="meta-llama/Llama-3.1-8B-Instruct",
+        seq_len=1024,
+        max_batches=100,
+        batch_size=1,
     )
     parser.add_argument(
         "--output_dir",
         type=str,
         default="checkpoints/attention_predictor",
     )
-    parser.add_argument("--seq_len", type=int, default=1024)
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--max_batches", type=int, default=100)
     parser.add_argument("--samples_per_sequence", type=int, default=128)
     parser.add_argument("--predictor_microbatch_size", type=int, default=256)
     parser.add_argument("--history_step", type=int, default=64)
@@ -365,14 +348,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="all",
         help="Comma/range layer spec, for example '0,4,8' or '8-15'.",
     )
-    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=0.01)
     parser.add_argument("--bce_weight", type=float, default=0.1)
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--log_every", type=int, default=1)
-    parser.add_argument("--use_wandb", action="store_true")
-    parser.add_argument("--wandb_project", type=str, default="gist_vs_details")
-    parser.add_argument("--wandb_entity", type=str, default="mixture_of_titans")
     return parser
 
 

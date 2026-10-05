@@ -19,7 +19,6 @@ def _attention_backend_specs() -> list[dict]:
         {
             "name": "llama",
             "base_cls": LlamaAttention,
-            "flash_cls_name": "LlamaFlashAttention2",
             "apply_rope": llama_apply_rotary_pos_emb,
         }
     )
@@ -33,7 +32,6 @@ def _attention_backend_specs() -> list[dict]:
         {
             "name": "mistral",
             "base_cls": MistralAttention,
-            "flash_cls_name": "MistralFlashAttention2",
             "apply_rope": mistral_apply_rotary_pos_emb,
         }
     )
@@ -290,7 +288,9 @@ def install_attention_predictor_hooks(
     """
     attention_specs = _attention_backend_specs()
 
-    handles = []
+    from .eviction_attention import install_eviction_attention_hooks
+
+    handles = install_eviction_attention_hooks(model)
     found_attention = 0
 
     def hook(module, args, kwargs):
@@ -353,7 +353,9 @@ def install_attention_predictor_hooks(
         found_attention += 1
         handles.append(module.register_forward_pre_hook(hook, with_kwargs=True))
 
-    if not handles:
+    if not found_attention:
+        for handle in handles:
+            handle.remove()
         raise RuntimeError(
             f"No attention predictor hooks installed. Found {found_attention} "
             "supported attention modules."
@@ -365,11 +367,7 @@ def install_attention_predictor_hooks(
 def get_attn_predictor_hook_handles(args, model):
     attn_predictor = None
     attn_predictor_hook_handles = []
-    if args.use_attn_predictor:
-        if args.attn_predictor_path is None:
-            raise ValueError(
-                "--use_attn_predictor requires --attn_predictor_path"
-            )
+    if args.attn_predictor_path is not None:
         attn_predictor = load_attention_predictor(
             args.attn_predictor_path,
             device=next(model.parameters()).device,
@@ -401,12 +399,10 @@ def _load_attn_predictor_config(attn_predictor_path: str) -> dict:
 
 
 def apply_attn_predictor_config(args):
-    if not args.use_attn_predictor:
+    if args.attn_predictor_path is None:
         args.attn_predictor_history_step = None
         args.attn_predictor_block_size = None
         return args
-    if args.attn_predictor_path is None:
-        raise ValueError("--use_attn_predictor requires --attn_predictor_path")
 
     config = _load_attn_predictor_config(args.attn_predictor_path)
     required_keys = ("history_step", "block_size")

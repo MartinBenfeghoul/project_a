@@ -2,23 +2,13 @@
 __pycache__
 wget-log*
 
-*.out
-*.pt
 .env
-
-wandb/*
+*.so
 
 checkpoints/*
-*.json
-*.jsonl
-*.png
-*.pdf
-.env
+results/*
+wandb/
 
-scripts/lazy_runs
-data/NIAH
-results
-slurm
-AGENTS.md
-CLAUDE.md
-*.codex
+slurm/*
+scripts/*
+analysis/*

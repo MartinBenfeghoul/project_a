@@ -1,9 +1,10 @@
 """
-First-order MAML-style meta-learning for per-layer MLP KV-cache compressors.
+MAML-style meta-learning for fast support-set memorisation.
 
-Each MLP learns to predict value vectors from key vectors. The inner loop adapts
-MLP weights to a support set of KV pairs; the outer (meta) loop optimises the
-initial weights so that adapted MLPs generalise to the query set.
+Each per-layer MLP learns to predict value vectors from key vectors. The inner
+loop adapts MLP weights to a support KV cache; the outer loop also optimizes
+post-adaptation support loss, so the learned initialization is selected for
+rapid memorisation of the same sequence.
 """
 
 import itertools
@@ -11,958 +12,668 @@ import os
 import time
 
 import torch
-import torch.nn.functional as F
 from omegaconf import OmegaConf
-from torch import nn
-from torch.func import functional_call
 from torch.utils.data import DataLoader
-
-from utils.logging import init_wandb
-import wandb
-
 from tqdm import tqdm
 
-from utils import (
-    get_model_and_tokenizer,
-    Dataset,
-    PairedDataset,
-    load_data,
-    collate_pairs,
-    get_loss_func,
-    generate_run_name,
-    save_checkpoint,
-    log_batch,
-    Logger,
+from model.meta_learning import (
+    KeyReconstructionConfig,
+    LearnedInit,
+    add_grad,
+    inner_loop,
+    prepare_kvs,
+    setup_optimizer,
 )
 from model.mlp import MLP
-from utils import inverse_rope, compute_rope_cos_sin
+from utils.data import Dataset, collate, load_data
+from utils.logging import (
+    average_metrics,
+    init_wandb,
+    latest_checkpoint,
+    load_checkpoint,
+    log_benchmark_scores,
+    log_epoch_metrics,
+    log_step_metrics,
+    save_checkpoint,
+)
+from utils.model import extract_kv_linear_init, get_model_and_tokenizer
+from utils.rope import model_rope_cos_sin
 
-from dotenv import load_dotenv
 
-load_dotenv()
+def _metric_sums():
+    return {
+        "initial_support_loss": 0.0,
+        "final_support_loss": 0.0,
+        "meta_objective": 0.0,
+    }
 
 
-def unrope(keys: torch.Tensor, rope_theta: float) -> torch.Tensor:
-    """Un-rope keys extracted from the KV cache."""
-    T = keys.shape[2]
-    cos, sin = compute_rope_cos_sin(
-        T, keys.shape[-1], rope_theta, keys.device, keys.dtype
+def _step(optimizer, count):
+    """Average the accumulated gradient and step."""
+    grads = []
+    for group in optimizer.param_groups:
+        for param in group["params"]:
+            if param.grad is not None:
+                param.grad.div_(count)
+                grads.append(param.grad.detach())
+    grad_norm = (
+        torch.linalg.vector_norm(
+            torch.stack([torch.linalg.vector_norm(g.float()) for g in grads])
+        ).item()
+        if grads
+        else 0.0
     )
-    return inverse_rope(keys, cos, sin)
+    optimizer.step()
+    optimizer.zero_grad()
+    return grad_norm
 
 
-def _cache_support_kvs(kv_cache, un_rope, rope_theta):
-    """Pre-compute (keys, values) for each layer once before the inner loop."""
-    kvs = []
-    for layer in kv_cache.layers:
-        k = layer.keys.float()
-        if un_rope:
-            k = unrope(k, rope_theta)
-        kvs.append((k, layer.values.float()))
-    return kvs
-
-
-def _support_loss(layer_mlps, cached_kvs, phi, loss_fn):
-    total = 0.0
-    for layer_idx, (k, v) in enumerate(cached_kvs):
-        weights, biases = phi[layer_idx]
-        v_hat = functional_mlp_forward(
-            layer_mlps[layer_idx], k, weights, biases
-        )
-        total = total + loss_fn(v_hat, v)
-    return total
-
-
-def _phi_from_flat(flat, layer_param_counts):
-    phi, idx = [], 0
-    for n_w, n_b in layer_param_counts:
-        phi.append((flat[idx : idx + n_w], flat[idx + n_w : idx + n_w + n_b]))
-        idx += n_w + n_b
-    return phi
-
-
-def _sgd_update(phi, grads, inner_lr):
-    g_iter = iter(grads)
-    lr_iter = iter(inner_lr) if isinstance(inner_lr, list) else None
-    return [
-        (
-            [
-                p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter)
-                for p in w
-            ],
-            [
-                p - (next(lr_iter) if lr_iter else inner_lr) * next(g_iter)
-                for p in b
-            ],
-        )
-        for w, b in phi
-    ]
-
-
-def _adam_update(phi_flat, grads, inner_lr, step, m1, m2, beta1, beta2, eps):
-    t = step + 1
-    updated = []
-    for i, (p, g) in enumerate(zip(phi_flat, grads)):
-        m1[i] = beta1 * m1[i] + (1 - beta1) * g.detach()
-        m2[i] = beta2 * m2[i] + (1 - beta2) * g.detach().pow(2)
-        m_hat = m1[i] / (1 - beta1**t)
-        v_hat = m2[i] / (1 - beta2**t)
-        lr = inner_lr[i] if isinstance(inner_lr, list) else inner_lr
-        updated.append(p - lr * m_hat / (v_hat.sqrt() + eps))
-    return updated
-
-
-def inner_loop_functional(
-    layer_mlps,
-    kv_cache,
-    inner_lr,
-    inner_steps,
-    loss_fn=F.mse_loss,
-    track_losses=False,
-    un_rope=False,
-    rope_theta=None,
-    inner_optimizer="sgd",
-    inner_adam_beta1=0.9,
-    inner_adam_beta2=0.999,
-    inner_adam_eps=1e-8,
-):
-    theta = [
-        p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)
-    ]
-    phi = [
-        (
-            [p.detach().clone().requires_grad_(True) for p in mlp.weights],
-            [p.detach().clone().requires_grad_(True) for p in mlp.biases],
-        )
-        for mlp in layer_mlps
-    ]
-    layer_param_counts = [
-        (len(mlp.weights), len(mlp.biases)) for mlp in layer_mlps
-    ]
-
-    adam_state = None
-    if inner_optimizer == "adam":
-        phi_flat0 = [p for w, b in phi for p in w + b]
-        adam_state = (
-            [torch.zeros_like(p.detach()) for p in phi_flat0],
-            [torch.zeros_like(p.detach()) for p in phi_flat0],
-        )
-
-    cached_kvs = _cache_support_kvs(kv_cache, un_rope, rope_theta)
-    inner_losses = [] if track_losses else None
-
-    for step in range(inner_steps):
-        total_loss = _support_loss(layer_mlps, cached_kvs, phi, loss_fn)
-
-        if track_losses:
-            inner_losses.append(float(total_loss.detach().cpu()))
-
-        phi_flat = [p for w, b in phi for p in w + b]
-        grads = torch.autograd.grad(
-            total_loss, phi_flat, create_graph=False, retain_graph=False
-        )
-
-        if inner_optimizer == "adam":
-            m1, m2 = adam_state
-            updated_flat = _adam_update(
-                phi_flat,
-                grads,
-                inner_lr,
-                step,
-                m1,
-                m2,
-                inner_adam_beta1,
-                inner_adam_beta2,
-                inner_adam_eps,
-            )
-            phi = _phi_from_flat(updated_flat, layer_param_counts)
-        else:
-            phi = _sgd_update(phi, grads, inner_lr)
-
-    final_support_loss = None
-    if track_losses:
-        with torch.no_grad():
-            final_support_loss = _support_loss(
-                layer_mlps, cached_kvs, phi, loss_fn
-            ).item()
-
-    return (
-        theta,
-        phi,
-        {
-            "inner_losses": inner_losses,
-            "final_support_loss": final_support_loss,
-        },
-    )
-
-
-def functional_mlp_forward(mlp, x, weights, biases):
-    # x: [B, H, T, D]
-    params = {f"weights.{i}": w for i, w in enumerate(weights)}
-    params |= {f"biases.{i}": b for i, b in enumerate(biases)}
-    return functional_call(mlp, params, (x,))
-
-
-def compute_loss_functional(
-    layer_mlps,
-    kv_cache,
-    phi,
-    loss_fn=F.mse_loss,
-    track_per_layer=False,
-    un_rope=False,
-    rope_theta=None,
-):
-    total_loss = 0
-    per_layer_losses = [] if track_per_layer else None
-
-    for layer_idx, layer in enumerate(kv_cache.layers):
-        k = layer.keys.float()
-        if un_rope:
-            k = unrope(k, rope_theta)
-        v = layer.values.float()
-
-        mlp = layer_mlps[layer_idx]
-        weights, biases = phi[layer_idx]
-        v_hat = functional_mlp_forward(mlp, k.float(), weights, biases)
-
-        layer_loss = loss_fn(v_hat, v)
-        total_loss += layer_loss
-
-        if track_per_layer:
-            per_layer_losses.append(layer_loss.item())
-
-    return total_loss, per_layer_losses
-
-
-def compute_query_loss(
-    layer_mlps,
-    kv_cache,
-    phi,
-    loss_fn=F.mse_loss,
-    target_perc_params=None,
-    tau=0.01,
-    lambda_compression=0.0,
-    track_per_layer=False,
-    un_rope=False,
-    rope_theta=None,
-):
-    if target_perc_params is not None:
-        return compute_compressed_loss(
-            layer_mlps,
-            kv_cache,
-            phi,
-            target_perc_params,
-            tau=tau,
-            lambda_compression=lambda_compression,
-            track_per_layer=track_per_layer,
-            un_rope=un_rope,
-            rope_theta=rope_theta,
-        )
-    return compute_loss_functional(
-        layer_mlps,
-        kv_cache,
-        phi,
-        loss_fn,
-        track_per_layer=track_per_layer,
-        un_rope=un_rope,
-        rope_theta=rope_theta,
-    )
-
-
-def get_differentiable_thresh(mse_per_token, index_perc):
-    B, H, T = mse_per_token.shape
-    sorted_errors, _ = torch.sort(mse_per_token.detach().view(B, -1), dim=1)
-    k_lo = index_perc.detach().long().clamp(0, H * T - 2)
-    frac = index_perc - k_lo.float()
-    thresh = torch.lerp(
-        sorted_errors[:, k_lo], sorted_errors[:, k_lo + 1], frac
-    ).view(B, 1, 1)
-    return thresh
-
-
-def compute_compressed_loss(
-    layer_mlps,
-    kv_cache,
-    phi,
-    target_perc_params,
-    tau=0.01,
-    lambda_compression=0.0,
-    track_per_layer=False,
-    un_rope=False,
-    rope_theta=None,
-):
-    total_loss = 0
-    per_layer_losses = [] if track_per_layer else None
-
-    for layer_idx, layer in enumerate(kv_cache.layers):
-        k_q = layer.keys.float()
-        if un_rope:
-            k_q = unrope(k_q, rope_theta)
-        v_q = layer.values.float()
-
-        mlp = layer_mlps[layer_idx]
-        weights, biases = phi[layer_idx]
-        v_hat_q = functional_mlp_forward(mlp, k_q, weights, biases)
-
-        B, H, T, _ = v_q.shape
-        N = H * T
-
-        mse_per_token = (v_q - v_hat_q).pow(2).mean(dim=-1)
-
-        perc = target_perc_params[layer_idx].clamp(0.0, 1.0)
-        index_perc = (perc * N).clamp(1.0, float(N - 1))
-        thresh = get_differentiable_thresh(mse_per_token, index_perc)
-
-        soft_mask = torch.sigmoid((mse_per_token.detach() - thresh) / tau)
-        layer_loss = ((1.0 - soft_mask) * mse_per_token).mean()
-
-        # penalisation to prevent trivial perc
-        layer_loss = layer_loss + lambda_compression * (1.0 - perc)
-
-        total_loss = total_loss + layer_loss
-
-        if track_per_layer:
-            per_layer_losses.append(layer_loss.item())
-
-    return total_loss, per_layer_losses
-
-
-def setup_optimizer(layer_mlps, target_perc_params, config, device):
-    theta = [
-        p for mlp in layer_mlps for p in list(mlp.weights) + list(mlp.biases)
-    ]
-    learn_inner_lr = config.get("learn_inner_lr", False)
-    learn_target_perc = config.get("learn_target_perc", False)
-
-    meta_params = list(theta)
-    if learn_target_perc and target_perc_params is not None:
-        meta_params = meta_params + list(target_perc_params)
-
-    if (
-        learn_inner_lr
-    ):  # TODO: maybe try doing this per head or per layer rather than per parameter
-        inner_lr_params = [
-            nn.Parameter(
-                torch.tensor(
-                    config.inner_lr, dtype=torch.float32, device=device
-                )
-            )
-            for _ in theta
-        ]
-        meta_optimizer = torch.optim.Adam(
-            meta_params + inner_lr_params, lr=config.meta_lr
-        )
-        print(
-            f"Meta-learning inner LR: {len(inner_lr_params)} learnable LR params (init={config.inner_lr})"
-        )
-    else:
-        inner_lr_params = None
-        meta_optimizer = torch.optim.Adam(meta_params, lr=config.meta_lr)
-    return theta, inner_lr_params, meta_optimizer
-
-
-def meta_step(
-    model,
-    layer_mlps,
-    batch,
-    inner_lr,
-    inner_steps,
-    loss_fn,
-    inner_lr_params,
-    target_perc_params,
-    tau,
-    lambda_compression,
-    should_log,
-    device,
-    un_rope=False,
-    rope_theta=None,
-    inner_optimizer="sgd",
-    inner_adam_beta1=0.9,
-    inner_adam_beta2=0.999,
-    inner_adam_eps=1e-8,
-):
-    batch_start_time = time.time()
-
-    with torch.no_grad():
-        support_out = model(
-            input_ids=batch["support_input_ids"].to(device),
-            attention_mask=batch["support_attention_mask"].to(device),
-            use_cache=True,
-        )
-        support_kv = support_out.past_key_values
-
-    theta_list, phi, inner_metrics = (
-        inner_loop_functional(  # phi = adapted_params
-            layer_mlps,
-            support_kv,
-            inner_lr_params if inner_lr_params is not None else inner_lr,
-            inner_steps,
-            loss_fn,
-            track_losses=should_log,
-            un_rope=un_rope,
-            rope_theta=rope_theta,
-            inner_optimizer=inner_optimizer,
-            inner_adam_beta1=inner_adam_beta1,
-            inner_adam_beta2=inner_adam_beta2,
-            inner_adam_eps=inner_adam_eps,
-        )
-    )
-    del support_kv
-
-    with torch.no_grad():
-        query_out = model(
-            input_ids=batch["query_input_ids"].to(device),
-            attention_mask=batch["query_attention_mask"].to(device),
-            use_cache=True,
-        )
-        query_kv = query_out.past_key_values
-
-    query_loss, per_layer_losses = compute_query_loss(
-        layer_mlps,
-        query_kv,
-        phi,
-        loss_fn=loss_fn,
-        target_perc_params=target_perc_params,
-        tau=tau,
-        lambda_compression=lambda_compression,
-        track_per_layer=should_log,
-        un_rope=un_rope,
-        rope_theta=rope_theta,
-    )
-
-    del query_kv
-    batch_time_ms = (time.time() - batch_start_time) * 1000
-    return (
-        query_loss,
-        theta_list,
-        phi,
-        inner_metrics,
-        per_layer_losses,
-        batch_time_ms,
-    )
-
-
-def accumulate_gradients(
-    query_loss, theta_list, phi, inner_lr_params, target_perc_params, scale
-):
-    phi_flat = [p for w, b in phi for p in w + b]
-
-    learnable_perc = (
-        [p for p in target_perc_params if p.requires_grad]
-        if target_perc_params
-        else []
-    )
-
-    extra_params = []
-    if inner_lr_params is not None:
-        extra_params.extend(inner_lr_params)
-    extra_params.extend(learnable_perc)
-
-    all_grads = torch.autograd.grad(
-        query_loss,
-        phi_flat + extra_params,
-        create_graph=False,
-        retain_graph=False,
-    )
-    g_phi = all_grads[: len(phi_flat)]
-    g_extra = all_grads[len(phi_flat) :]
-
-    for p_theta, g in zip(theta_list, g_phi):
-        if g is None:
-            continue
-        if p_theta.grad is None:
-            p_theta.grad = g.detach() * scale
-        else:
-            p_theta.grad.add_(g.detach() * scale)
-
-    offset = 0
-    if inner_lr_params is not None:
-        for lr_param, g in zip(
-            inner_lr_params, g_extra[: len(inner_lr_params)]
-        ):
-            if lr_param.grad is None:
-                lr_param.grad = g.detach() * scale
-            else:
-                lr_param.grad.add_(g.detach() * scale)
-        offset += len(inner_lr_params)
-
-    if learnable_perc:
-        for perc_param, g in zip(
-            learnable_perc, g_extra[offset : offset + len(learnable_perc)]
-        ):
-            if perc_param.grad is None:
-                perc_param.grad = g.detach() * scale
-            else:
-                perc_param.grad.add_(g.detach() * scale)
+def _batch_rope(model, cache, seq_len):
+    keys = cache.layers[0].keys
+    return model_rope_cos_sin(model, seq_len, keys.device, keys.dtype)
 
 
 def run_epoch(
     model,
-    layer_mlps,
+    mlps,
     data_iter,
-    meta_optimizer,
-    inner_lr_params,
-    target_perc_params,
-    config,
+    optimizer,
+    cfg,
     epoch,
-    global_step,
-    loss_fn,
     device,
-    use_wandb,
+    inner_dtype,
+    residual_cr,
+    key_config=None,
+    wandb_run=None,
+    optimiser_steps=0,
 ):
-    inner_lr = config.inner_lr
-    inner_steps = config.inner_steps
-    log_interval = config.get("log_interval", 10)
-    batches_per_epoch = config.batches_per_epoch
-    grad_accum_steps = config.get("grad_accum_steps", 1)
-    tau = config.get("tau", 0.01)
-    lambda_compression = config.get("lambda_compression", 0.0)
-    un_rope = config.get("un_rope", False)
-    rope_theta = config.get("rope_theta", 500_000.0)
-    inner_optimizer = config.get("inner_optimizer", "sgd")
-    inner_adam_beta1 = config.get("inner_adam_beta1", 0.9)
-    inner_adam_beta2 = config.get("inner_adam_beta2", 0.999)
-    inner_adam_eps = config.get("inner_adam_eps", 1e-8)
+    inner_lr = cfg.inner_lr
+    first_order = bool(cfg.get("first_order", True))
+    inner_steps = cfg.inner_steps
+    log_interval = cfg.log_interval
+    batches_per_epoch = cfg.batches_per_epoch
+    accum_steps = int(cfg.grad_accum_steps)
 
-    epoch_loss = 0
-    num_batches = 0
+    sums = _metric_sums()
+    window = _metric_sums()
+    batch_count = 0
     accum_count = 0
-    meta_optimizer.zero_grad()
+    optimizer.zero_grad()
 
-    batch_iter = itertools.islice(data_iter, batches_per_epoch)
     for batch_idx, batch in enumerate(
-        tqdm(batch_iter, total=batches_per_epoch)
+        tqdm(
+            itertools.islice(data_iter, batches_per_epoch),
+            total=batches_per_epoch,
+        )
     ):
-        should_log = batch_idx % log_interval == 0
-
-        (
-            query_loss,
-            theta_list,
-            phi,
-            inner_metrics,
-            per_layer_losses,
-            batch_time_ms,
-        ) = meta_step(
-            model,
-            layer_mlps,
-            batch,
-            inner_lr,
-            inner_steps,
-            loss_fn,
-            inner_lr_params,
-            target_perc_params,
-            tau,
-            lambda_compression,
-            should_log,
-            device,
-            un_rope=un_rope,
-            rope_theta=rope_theta,
-            inner_optimizer=inner_optimizer,
-            inner_adam_beta1=inner_adam_beta1,
-            inner_adam_beta2=inner_adam_beta2,
-            inner_adam_eps=inner_adam_eps,
-        )
-
-        accumulate_gradients(
-            query_loss,
-            theta_list,
-            phi,
-            inner_lr_params,
-            target_perc_params,
-            scale=1.0 / grad_accum_steps,
-        )
-
-        accum_count += 1
-        if accum_count >= grad_accum_steps:  # gradient update every 32 batches
-            meta_optimizer.step()
-            if target_perc_params is not None:
-                for p in target_perc_params:
-                    if p.requires_grad:
-                        p.data.clamp_(0.0, 1.0)
-            meta_optimizer.zero_grad()
-            global_step += 1
-            accum_count = 0
-
-        epoch_loss += float(query_loss.detach().cpu())
-        num_batches += 1
-
-        if should_log:
-            log_batch(
-                epoch,
-                batch_idx,
-                float(query_loss.detach().cpu()),
-                inner_metrics,
-                per_layer_losses,
-                inner_lr_params,
-                batch_time_ms,
-                global_step,
-                use_wandb,
-                target_perc_params=target_perc_params,
+        start = time.time()
+        attention_mask = batch["attention_mask"].to(device)
+        input_ids = batch["input_ids"].to(device)
+        with torch.no_grad():
+            output = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=True,
             )
 
-    # Flush any remaining accumulated gradients at end of epoch
+        kvs = prepare_kvs(
+            output.past_key_values,
+            rope=_batch_rope(
+                model,
+                output.past_key_values,
+                input_ids.shape[1],
+            ),
+            dtype=inner_dtype,
+            key_config=key_config,
+            padding_mask=attention_mask,
+        )
+
+        meta_params, metrics = inner_loop(
+            mlps,
+            kvs,
+            inner_lr,
+            inner_steps,
+            residual_cr=residual_cr,
+            first_order=first_order,
+        )
+        del output, kvs
+        batch_ms = (time.time() - start) * 1000
+
+        for param, grad in zip(meta_params, metrics["param_grads"]):
+            add_grad(param, grad)
+
+        for name in sums:
+            sums[name] += metrics[name]
+            window[name] += metrics[name]
+        accum_count += 1
+        if accum_count >= accum_steps:
+            grad_norm = _step(optimizer, accum_count)
+            optimiser_steps += 1
+            log_step_metrics(
+                wandb_run,
+                window,
+                accum_count,
+                epoch,
+                optimiser_steps,
+                grad_norm,
+            )
+            window = _metric_sums()
+            accum_count = 0
+
+        batch_count += 1
+
+        if batch_idx % log_interval == 0:
+            print(
+                f"Epoch {epoch}, Batch {batch_idx}, "
+                f"L0: {metrics['initial_support_loss']:.6f}, "
+                f"L{inner_steps}: {metrics['final_support_loss']:.6f}, "
+                f"Meta Objective: {metrics['meta_objective']:.6f}, "
+                f"Time: {batch_ms:.1f}ms"
+            )
+
     if accum_count > 0:
-        meta_optimizer.step()
-        if target_perc_params is not None:
-            for p in target_perc_params:
-                if p.requires_grad:
-                    p.data.clamp_(0.0, 1.0)
-        meta_optimizer.zero_grad()
-        global_step += 1
+        grad_norm = _step(optimizer, accum_count)
+        optimiser_steps += 1
+        log_step_metrics(
+            wandb_run,
+            window,
+            accum_count,
+            epoch,
+            optimiser_steps,
+            grad_norm,
+        )
 
-    return epoch_loss, num_batches, global_step
+    return sums, batch_count, optimiser_steps
 
 
-def evaluate_ruler(
-    model,
-    model_name,
-    tokenizer,
-    target_perc_params,
-    training_config,
-    epoch_checkpoint_path,
-    device,
-    epoch,
-    global_step,
-    use_wandb,
-    num_samples=10,
-):
-    """Run RULER benchmark with current MLP weights and log average score to wandb."""
-    from lm_eval import evaluator
-    from lm_eval.tasks import TaskManager
-    from lm_eval_script import (
-        CompressedCacheHFLM,
-        get_tasks,
-        get_device,
-        GEN_KWARGS,
-    )
+def resolve_resume_path(cfg):
+    """The checkpoint training.resume_from names, or None to start fresh."""
+    resume_from = cfg.get("resume_from", None)
+    if not resume_from:
+        return None
+    path = str(resume_from)
+    if os.path.isdir(path):
+        resolved = latest_checkpoint(path)
+        if resolved is None:
+            raise FileNotFoundError(f"No epoch checkpoints found in {path}")
+        return resolved
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Checkpoint to resume from not found: {path}")
+    return path
 
-    print(f"Running RULER evaluation (epoch {epoch}, {num_samples} samples)...")
 
-    num_layers = model.config.num_hidden_layers
-    num_kv_heads = model.config.num_key_value_heads
+def _start_epoch(resume_state):
+    """The first epoch to run, one past the checkpoint's completed epoch."""
+    return int((resume_state or {}).get("epoch", -1)) + 1
 
-    if target_perc_params is not None:
-        target_perc = [
-            p.clamp(0.0, 1.0).item() * 100 for p in target_perc_params
-        ]
-    else:
-        default_perc = training_config.get("target_perc", 50.0)
-        target_perc = [default_perc] * num_layers
 
-    logger = Logger()
-    logger.prefill_events = []
-    logger.decode_events = []
-
-    key_cache_kwargs = {
-        "cache_type": "baseline",
-        "decomposition_method": "svd",
-        "comp_ratio": 1.0,
-        "energy_threshold": 1.0,
-        "rank_selection": "comp_ratio",
-        "lr": 1e-2,
-        "decomp_n_iter": 3,
-        "gamma": 3.0,
-        "min_size": 8.0,
-        "unrope_keys": training_config.get("un_rope", False),
-        "rope_theta": training_config.get("rope_theta", 500_000.0),
-    }
-
-    value_cache_kwargs = {
-        "cache_type": "mlp",
-        "num_layers_per_mlp": [training_config.mlp_num_layers] * num_layers,
-        "hidden_factors_per_mlp": [training_config.mlp_hidden_factor]
-        * num_layers,
-        "num_heads_per_mlp": [num_kv_heads] * num_layers,
-        "per_sequence": False,
-        "target_perc": target_perc,
-        "target_model_num_heads": num_kv_heads,
-        "lr": training_config.inner_lr,
-        "device": device,
-        "optimizer": training_config.get("inner_optimizer", "sgd"),
-        "loss_func": training_config.get("loss_func", "mse"),
-        "num_epochs": training_config.inner_steps,
-        "meta_weights_path": epoch_checkpoint_path,
-        "un_rope": training_config.get("un_rope", False),
-        "rope_theta": training_config.get("rope_theta", 500_000.0),
-    }
-
-    lm = CompressedCacheHFLM(
-        key_cache_kwargs=key_cache_kwargs,
-        value_cache_kwargs=value_cache_kwargs,
-        logger=logger,
-        pretrained=model,
-        tokenizer=tokenizer,
-        truncation=False,
-        trust_remote_code=True,
-    )
-
-    ruler_tasks = get_tasks(["ruler"])
-    metadata = {"tokenizer": model_name}
-    tm = TaskManager(metadata=metadata)
-
-    results = evaluator.simple_evaluate(
-        model=lm,
-        gen_kwargs=GEN_KWARGS,
-        tasks=ruler_tasks,
-        num_fewshot=0,
-        batch_size=1,
-        device=get_device(lm),
-        task_manager=tm,
-        limit=num_samples,
-    )
-
-    task_scores = {}
-    for task_name, task_results in results["results"].items():
-        for key, val in task_results.items():
-            if (
-                isinstance(val, (int, float))
-                and "stderr" not in key
-                and key not in ("alias", "samples")
-            ):
-                task_scores[task_name] = val
-                break
-
-    avg_score = (
-        sum(task_scores.values()) / len(task_scores) if task_scores else 0.0
-    )
+def restore_training_state(optimizer, resume_state):
+    """Continue the outer optimiser and its counters from a checkpoint."""
+    if not resume_state:
+        return 0, 0
+    optimizer_state = resume_state.get("optimizer")
+    if optimizer_state is None:
+        print(
+            "WARNING: checkpoint carries no optimiser state; Adam restarts "
+            "with zeroed moments"
+        )
+    if "epoch" not in resume_state:
+        print(
+            "WARNING: checkpoint predates resumable training and has no epoch "
+            "counter; epochs restart at 0 and will overwrite the checkpoints "
+            "already in the run directory"
+        )
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
+    start_epoch = _start_epoch(resume_state)
+    optimiser_steps = int(resume_state.get("optimiser_steps", 0))
     print(
-        f"RULER eval epoch {epoch}: avg={avg_score:.4f}, per-task={task_scores}"
+        f"Resuming at epoch {start_epoch} after optimiser step "
+        f"{optimiser_steps}; the data stream restarts from the top of the "
+        "shuffle buffer"
     )
-
-    if use_wandb:
-        log_data = {"benchmark/ruler_avg": avg_score, "epoch/epoch": epoch}
-        for task_name, score in task_scores.items():
-            log_data[f"benchmark/{task_name}"] = score
-        wandb.log(log_data)
-
-    return avg_score
+    return start_epoch, optimiser_steps
 
 
 def meta_train(
     model,
-    model_name,
-    layer_mlps,
+    name,
+    mlps,
     dataloader,
     device,
-    config,
-    checkpoint_path,
-    tokenizer=None,
-    target_perc_params=None,
-    loss_fn=F.mse_loss,
-    use_wandb=False,
+    cfg,
+    ckpt_path,
+    tokenizer,
+    wandb_run=None,
+    resume_state=None,
 ):
-    _, inner_lr_params, meta_optimizer = setup_optimizer(
-        layer_mlps, target_perc_params, config, device
+    optimizer = setup_optimizer(mlps, cfg)
+    start_epoch, optimiser_steps = restore_training_state(
+        optimizer, resume_state
     )
-    model.eval()
-    global_step = 0
-    data_iter = iter(dataloader)
-
-    if use_wandb:
-        wandb.define_metric("benchmark/*", step_metric="epoch/epoch")
-
-    for epoch in range(config.num_meta_epochs):
-        epoch_start_time = time.time()
-
-        epoch_loss, num_batches, global_step = run_epoch(
-            model,
-            layer_mlps,
-            data_iter,
-            meta_optimizer,
-            inner_lr_params,
-            target_perc_params,
-            config,
-            epoch,
-            global_step,
-            loss_fn,
-            device,
-            use_wandb,
-        )
-
-        epoch_time_sec = time.time() - epoch_start_time
-        avg_loss = epoch_loss / max(num_batches, 1)
+    if start_epoch >= cfg.num_meta_epochs:
         print(
-            f"Epoch {epoch} complete. Average Query Loss: {avg_loss:.6f}, Time: {epoch_time_sec:.1f}s"
+            f"Checkpoint is already at epoch {start_epoch - 1} of "
+            f"num_meta_epochs={cfg.num_meta_epochs}; raise "
+            "training.num_meta_epochs to train further."
         )
-
-        if use_wandb:
-            wandb.log(
-                {
-                    "epoch/avg_query_loss": avg_loss,
-                    "epoch/epoch": epoch,
-                    "epoch/num_batches": num_batches,
-                    "perf/epoch_time_sec": epoch_time_sec,
-                },
-                step=global_step,
+        return
+    model.eval()
+    inner_dtype = getattr(torch, str(cfg.inner_adaptation_dtype))
+    print(f"FP32 meta parameters; {inner_dtype} inner adaptation")
+    if cfg.get("first_order", True):
+        print("Meta gradient: first-order (inner loop treated as constant)")
+    else:
+        print(
+            "Meta gradient: full MAML (backpropagated through "
+            f"{cfg.inner_steps} inner steps)"
+        )
+        if inner_dtype is not torch.float32:
+            print(
+                f"WARNING: {inner_dtype} cannot carry the second-order "
+                "term; use float32"
             )
+    key_config = build_key_reconstruction_config(cfg)
+    if key_config is not None:
+        print(
+            "Inner loop trains on xKV-reconstructed keys "
+            f"(comp_ratio={key_config.compression_ratio}, "
+            f"layer_group_size={key_config.layer_group_size}, "
+            f"svd_backend={key_config.svd_backend})"
+        )
+    residual_cr = float(cfg.eval_target_cr)
+    print(
+        "Meta objective uses post-residual reconstruction loss "
+        f"(target_cr={residual_cr})"
+    )
 
-        save_checkpoint(
-            layer_mlps,
-            inner_lr_params,
-            checkpoint_path,
+    benchmark_specs = (
+        (
+            "ruler",
+            cfg.eval_ruler,
+            cfg.eval_ruler_samples,
+            cfg.get("eval_ruler_tasks", None),
+        ),
+        (
+            "longbench",
+            cfg.eval_longbench,
+            cfg.eval_longbench_samples,
+            cfg.get("eval_longbench_tasks", None),
+        ),
+    )
+    eval_runtime = None
+
+    data_iter = iter(dataloader)
+    for epoch in range(start_epoch, cfg.num_meta_epochs):
+        start = time.time()
+        sums, batch_count, optimiser_steps = run_epoch(
+            model,
+            mlps,
+            data_iter,
+            optimizer,
+            cfg,
             epoch,
-            target_perc_params,
+            device,
+            inner_dtype,
+            residual_cr=residual_cr,
+            key_config=key_config,
+            wandb_run=wandb_run,
+            optimiser_steps=optimiser_steps,
         )
 
-        eval_ruler = config.get("eval_ruler", True)
-        if eval_ruler and tokenizer is not None:
-            base, ext = os.path.splitext(checkpoint_path)
-            epoch_checkpoint_path = f"{base}_epoch{epoch}{ext}"
-            evaluate_ruler(
-                model=model,
-                model_name=model_name,
-                tokenizer=tokenizer,
-                target_perc_params=target_perc_params,
-                training_config=config,
-                epoch_checkpoint_path=epoch_checkpoint_path,
-                device=device,
-                epoch=epoch,
-                global_step=global_step,
-                use_wandb=use_wandb,
-                num_samples=config.get("eval_ruler_samples", 10),
+        epoch_sec = time.time() - start
+        avgs = average_metrics(sums, batch_count)
+        log_epoch_metrics(
+            wandb_run, avgs, epoch, batch_count, optimiser_steps
+        )
+        print(
+            f"Epoch {epoch} complete. "
+            f"Average L0: {avgs['initial_support_loss']:.6f}, "
+            f"Average L{cfg.inner_steps}: {avgs['final_support_loss']:.6f}, "
+            f"Average Meta Objective: {avgs['meta_objective']:.6f}, "
+            f"Time: {epoch_sec:.1f}s"
+        )
+
+        eval_every = max(1, int(cfg.eval_interval))
+        save_every = max(1, int(cfg.get("checkpoint_interval", 10)))
+        is_last_epoch = epoch + 1 == cfg.num_meta_epochs
+        should_eval = (epoch + 1) % eval_every == 0 or is_last_epoch
+        if (epoch + 1) % save_every == 0 or is_last_epoch or should_eval:
+            save_checkpoint(
+                mlps,
+                ckpt_path,
+                epoch,
+                optimizer=optimizer,
+                optimiser_steps=optimiser_steps,
+                wandb_id=getattr(wandb_run, "id", None),
             )
 
-    return layer_mlps, inner_lr_params, target_perc_params
+        if should_eval:
+            learned_init = LearnedInit.from_modules(mlps)
+            for benchmark, enabled, samples, tasks in benchmark_specs:
+                if not enabled:
+                    continue
+                if eval_runtime is None:
+                    eval_runtime = MetaEvalRuntime(model, name, tokenizer, cfg)
+                eval_benchmark(
+                    eval_runtime,
+                    epoch=epoch,
+                    benchmark=benchmark,
+                    samples=samples,
+                    tasks=tasks,
+                    learned_init=learned_init,
+                    wandb_run=wandb_run,
+                    optimiser_steps=optimiser_steps,
+                )
+
+
+def build_key_reconstruction_config(cfg):
+    if not cfg.get("train_on_reconstructed_keys", False):
+        return None
+    return KeyReconstructionConfig(
+        compression_ratio=float(cfg.eval_target_cr),
+        layer_group_size=int(cfg.get("xkv_layer_group_size", 4)),
+        svd_backend=str(cfg.get("xkv_svd_backend", "cholqr")),
+    )
+
+
+def build_key_cache_config(cfg, num_layers):
+    from cache import BaselineCacheConfig, XKVCacheConfig
+
+    key_config = build_key_reconstruction_config(cfg)
+    if key_config is None:
+        return BaselineCacheConfig()
+    return XKVCacheConfig(
+        compression_ratio=key_config.compression_ratio,
+        layer_group_size=key_config.layer_group_size,
+        svd_backend=key_config.svd_backend,
+        num_layers=num_layers,
+    )
+
+
+def _flatten_task_dict(task_dict):
+    """get_task_dict nests group tasks; evaluate_tasks wants them flat."""
+    tasks = []
+    for value in task_dict.values():
+        if isinstance(value, dict):
+            tasks.extend(_flatten_task_dict(value))
+        else:
+            tasks.append(value)
+    return tasks
+
+
+class MetaEvalRuntime:
+    """lm-eval state reused across the periodic meta-training benchmarks."""
+
+    def __init__(self, model, name, tokenizer, cfg):
+        from lm_eval_script import CompressedCacheHFLM
+
+        self.model = model
+        self.name = name
+        self.cfg = cfg
+        self.batch_size = int(getattr(cfg, "eval_batch_size", 1))
+        self.target_cr = float(cfg.eval_target_cr)
+        self._resolved = {}
+        self.lm = CompressedCacheHFLM(
+            cache_config=self._cache_config(None),
+            pretrained=model,
+            tokenizer=tokenizer,
+            truncation=False,
+            trust_remote_code=True,
+            batch_size=self.batch_size,
+            max_batch_size=self.batch_size,
+        )
+
+    def _cache_config(self, learned_init):
+        from cache import CompressedCacheConfig, MLPValueCacheConfig
+
+        return CompressedCacheConfig(
+            key=build_key_cache_config(
+                self.cfg,
+                self.model.config.num_hidden_layers,
+            ),
+            value=MLPValueCacheConfig(
+                target_compression_ratio=self.target_cr,
+                num_epochs=self.cfg.inner_steps,
+                learned_init=learned_init,
+                use_residual=self.cfg.use_residual,
+            ),
+        )
+
+    def _tasks(self, benchmark, tasks):
+        """Resolve a benchmark's task objects once, then reuse them."""
+        if benchmark not in self._resolved:
+            from lm_eval.tasks import TaskManager, get_task_dict
+            from lm_eval_script import get_tasks
+
+            metadata = {"tokenizer": self.name}
+            if benchmark == "ruler":
+                metadata["max_seq_lengths"] = [
+                    int(length)
+                    for length in self.cfg.get("eval_seq_lengths", [4096])
+                ]
+            names = [benchmark] if tasks is None else tasks
+            if isinstance(names, str):
+                names = [names]
+            manager = TaskManager(metadata=metadata)
+            resolved = get_task_dict(
+                get_tasks(list(names), print_tasks=False), manager
+            )
+            self._resolved[benchmark] = (_flatten_task_dict(resolved), manager)
+        return self._resolved[benchmark]
+
+    def evaluate(self, benchmark, tasks, samples, learned_init):
+        from lm_eval_script import evaluate_tasks
+
+        eval_tasks, manager = self._tasks(benchmark, tasks)
+        self.lm.set_cache_config(self._cache_config(learned_init))
+        return evaluate_tasks(
+            self.lm,
+            eval_tasks,
+            batch_size=self.batch_size,
+            task_manager=manager,
+            limit=samples,
+        )
+
+
+def eval_benchmark(
+    eval_runtime,
+    epoch,
+    benchmark,
+    samples,
+    tasks=None,
+    learned_init=None,
+    wandb_run=None,
+    optimiser_steps=0,
+):
+    """Evaluate a benchmark with the current meta initialisation."""
+    print(
+        f"Running {benchmark} evaluation (epoch {epoch}, "
+        f"{samples} samples per task, target_cr={eval_runtime.target_cr}, "
+        f"batch_size={eval_runtime.batch_size}, tasks={tasks or benchmark})..."
+    )
+
+    results = eval_runtime.evaluate(benchmark, tasks, samples, learned_init)
+
+    scores = {}
+    for task, result in results["results"].items():
+        for key, value in result.items():
+            if (
+                isinstance(value, (int, float))
+                and "stderr" not in key
+                and key not in ("alias", "samples")
+            ):
+                scores[task] = value
+                break
+
+    avg_score = sum(scores.values()) / len(scores) if scores else 0.0
+    print(
+        f"{benchmark} eval epoch {epoch}: "
+        f"avg={avg_score:.4f}, per-task={scores}"
+    )
+    log_benchmark_scores(
+        wandb_run,
+        benchmark,
+        avg_score,
+        scores,
+        epoch,
+        optimiser_steps,
+    )
 
 
 def load_config():
     """
     CLI args use dotlist notation, e.g.:
-        python meta_learning.py training.batch_size=4 training.inner_lr=0.001
+        python meta_learning.py training.batch_size=4
     """
-    base_config = OmegaConf.load("config/meta_learning.yaml")
+    config_path = os.environ.get("META_CONFIG", "config/meta_learning.yaml")
+    base_config = OmegaConf.load(config_path)
     cli_config = OmegaConf.from_cli()
-    config = OmegaConf.merge(base_config, cli_config)
-    return config
+    return OmegaConf.merge(base_config, cli_config)
+
+
+def init_mlps(model, cfg, device):
+    num_heads = model.config.num_key_value_heads
+    dim = model.config.hidden_size // model.config.num_attention_heads
+    num_layers = model.config.num_hidden_layers
+    linear_init = (
+        extract_kv_linear_init(model)
+        if cfg.use_residual
+        else [None] * num_layers
+    )
+    mlps = []
+    for layer_idx in range(num_layers):
+        mlp = MLP(
+            num_heads=num_heads,
+            head_dim=dim,
+            use_residual=cfg.use_residual,
+        ).to(device=device)
+        if cfg.use_residual:
+            with torch.no_grad():
+                mlp.W_linear.copy_(
+                    linear_init[layer_idx].to(
+                        device=device,
+                        dtype=mlp.W_linear.dtype,
+                    )
+                )
+        mlps.append(mlp)
+    return mlps
+
+
+def build_run_name(cfg) -> str:
+    """Name a meta-learning run after the knobs that define it."""
+    parts = [
+        f"seq{cfg.seq_len}",
+        f"steps{cfg.inner_steps}",
+        f"mlr{cfg.meta_lr}",
+        f"cr{float(cfg.eval_target_cr)}",
+    ]
+    key_config = build_key_reconstruction_config(cfg)
+    if key_config is not None:
+        parts.append(f"xkvkeys{key_config.compression_ratio}cr")
+    if not cfg.get("first_order", True):
+        parts.append("maml")
+    parts.append("residual" if cfg.use_residual else "noresidual")
+    return "_".join(parts)
 
 
 def main():
     config = load_config()
-    training_config = config.training
+    cfg = config.training
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    use_wandb = init_wandb(config)
-    if use_wandb:
-        print("wandb logging enabled")
 
     print(f"Using device: {device}")
     print(f"Loading model: {config.model.name}")
 
     model_name = config.model.name
-    model_folder = model_name.split("/")[-1]
+    model_dir = model_name.split("/")[-1]
 
-    run_name = generate_run_name(config)
-    checkpoint_dir_base = os.path.join("checkpoints", model_folder, run_name)
-    checkpoint_dir = checkpoint_dir_base
-    idx = 0
-    while os.path.exists(checkpoint_dir):
-        checkpoint_dir = f"{checkpoint_dir_base}_{idx}"
-        idx += 1
-    os.makedirs(checkpoint_dir)
-    print(f"Checkpoints will be saved to: {checkpoint_dir}/")
+    resume_path = resolve_resume_path(cfg)
+    if resume_path is not None:
+        run_dir = os.path.dirname(os.path.abspath(resume_path))
+        print(f"Resuming from checkpoint: {resume_path}")
+    else:
+        run_name = build_run_name(cfg)
+        base_dir = os.path.join("checkpoints", model_dir, run_name)
+        run_dir = base_dir
+        idx = 0
+        while os.path.exists(run_dir):
+            run_dir = f"{base_dir}_{idx}"
+            idx += 1
+        os.makedirs(run_dir)
+    print(f"Checkpoints will be saved to: {run_dir}/")
 
-    config_save_path = os.path.join(checkpoint_dir, "config.yaml")
-    OmegaConf.save(config, config_save_path)
-    print(f"Config saved to: {config_save_path}")
+    model, tokenizer = get_model_and_tokenizer(model_name)
 
-    model, tokenizer = get_model_and_tokenizer(
-        model_name, device
-    )  # TODO: check torch_dtype=torch.bfloat16
-
-    num_kv_heads = model.config.num_key_value_heads
-    head_dim = model.config.hidden_size // model.config.num_attention_heads
+    num_heads = model.config.num_key_value_heads
+    dim = model.config.hidden_size // model.config.num_attention_heads
     num_layers = model.config.num_hidden_layers
 
     print(
-        f"Model config: {num_layers} layers, {num_kv_heads} KV heads, {head_dim} head_dim"
+        f"Model config: {num_layers} layers, {num_heads} KV heads, "
+        f"{dim} head_dim"
     )
 
-    if use_wandb:
-        wandb.config.update(
-            {
-                "model/num_layers": num_layers,
-                "model/num_kv_heads": num_kv_heads,
-                "model/head_dim": head_dim,
-            }
-        )
+    mlps = init_mlps(model, cfg, device)
+    resume_state = None
+    if resume_path is not None:
+        resume_state = load_checkpoint(resume_path, mlps)
 
-    mlp_num_layers = training_config.get("mlp_num_layers", 4)
-    mlp_hidden_factor = training_config.get("mlp_hidden_factor", 2)
-    layer_mlps = [
-        MLP(
-            num_heads=num_kv_heads,
-            head_dim=head_dim,
-            num_layers=mlp_num_layers,
-            hidden_factor=mlp_hidden_factor,
-        ).to(device)
-        for _ in range(num_layers)
-    ]
+    config_name = "config.yaml"
+    if resume_state is not None:
+        config_name = f"config_resumed_epoch{_start_epoch(resume_state)}.yaml"
+    config_path = os.path.join(run_dir, config_name)
+    OmegaConf.save(config, config_path)
+    print(f"Config saved to: {config_path}")
 
-    learn_target_perc = training_config.get("learn_target_perc", False)
-    default_perc = training_config.get("target_perc", 75.0) / 100.0
-    if learn_target_perc:
-        target_perc_params = [
-            nn.Parameter(
-                torch.tensor(default_perc, dtype=torch.float32, device=device)
-            )
-            for _ in range(num_layers)
-        ]
-        print(
-            f"Meta-learning target_perc: {num_layers} per-layer params "
-            f"(init={default_perc * 100:.1f}%)"
-        )
-    else:
-        target_perc_params = [
-            torch.tensor(default_perc, dtype=torch.float32, device=device)
-            for _ in range(num_layers)
-        ]
-        print(
-            f"Fixed target_perc: {default_perc * 100:.1f}% (not meta-learned)"
-        )
+    data_cfg = config.data
+    print(f"Loading dataset: {data_cfg.path}")
+    stream = load_data(
+        dataset_path=data_cfg.path,
+        subset_name=data_cfg.subset,
+        shuffle_buffer_size=data_cfg.shuffle_buffer_size,
+    )
 
-    print("Loading dataset...")
-    hf_dataset = load_data()
-
-    meta_dataset = PairedDataset(
-        Dataset(
-            hf_dataset,
-            tokenizer,
-            seq_len=training_config.seq_len,
-            eos_id=tokenizer.eos_token_id,
-        )
+    dataset = Dataset(
+        stream,
+        tokenizer,
+        seq_len=cfg.seq_len,
+        eos_id=tokenizer.eos_token_id,
     )
 
     dataloader = DataLoader(
-        meta_dataset,
-        batch_size=training_config.batch_size,
-        collate_fn=collate_pairs,
+        dataset,
+        batch_size=cfg.batch_size,
+        collate_fn=collate,
     )
 
-    checkpoint_path = os.path.join(checkpoint_dir, "meta_learned_mlps.pt")
-    loss_fn = get_loss_func(training_config.get("loss_func", "mse"))
+    ckpt_path = os.path.join(run_dir, "meta_mlps.pt")
     print(
-        f"Starting meta-training... (batches_per_epoch: {training_config.batches_per_epoch})"
+        "Starting meta-training... "
+        f"(batches_per_epoch: {cfg.batches_per_epoch})"
     )
-    layer_mlps, inner_lr_params, target_perc_params = meta_train(
-        model=model,
-        model_name=model_name,
-        layer_mlps=layer_mlps,
-        dataloader=dataloader,
-        device=device,
-        config=training_config,
-        checkpoint_path=checkpoint_path,
-        tokenizer=tokenizer,
-        target_perc_params=target_perc_params,
-        loss_fn=loss_fn,
-        use_wandb=use_wandb,
+    wandb_run = init_wandb(
+        config,
+        os.path.basename(run_dir),
+        resume_id=(resume_state or {}).get("wandb_id"),
     )
-
-    if use_wandb:
-        wandb.finish()
-
-    return layer_mlps, inner_lr_params, target_perc_params
+    try:
+        meta_train(
+            model=model,
+            name=model_name,
+            mlps=mlps,
+            dataloader=dataloader,
+            device=device,
+            cfg=cfg,
+            ckpt_path=ckpt_path,
+            tokenizer=tokenizer,
+            wandb_run=wandb_run,
+            resume_state=resume_state,
+        )
+    finally:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
-    layer_mlps, inner_lr_params, target_perc_params = main()
+    main()

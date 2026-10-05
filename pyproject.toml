@@ -1,2 +1,8 @@
 [tool.black]
 line-length = 80
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "cuda: requires a CUDA device and the fused xKV extension",
+]

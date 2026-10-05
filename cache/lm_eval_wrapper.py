@@ -1,9 +1,11 @@
-import torch
+from contextlib import contextmanager
 
+import torch
 from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils_hf import stop_sequences_criteria
 
-from .cache import CompressedCache
+from .config import CompressedCacheConfig
+from .core import CompressedCache
 
 
 class CompressedCacheHFLM(HFLM):
@@ -15,34 +17,52 @@ class CompressedCacheHFLM(HFLM):
 
     def __init__(
         self,
-        key_cache_kwargs,
-        value_cache_kwargs,
-        logger,
-        adjust_key_value_comp_ratio=False,
+        cache_config: CompressedCacheConfig,
         **kwargs,
     ):
         super().__init__(**kwargs)
-        self._key_cache_kwargs = key_cache_kwargs
-        self._value_cache_kwargs = value_cache_kwargs
-        self._adjust_key_value_comp_ratio = adjust_key_value_comp_ratio
-        self._logger = logger
+        self._cache_config = cache_config
+        self.reset_compression_stats()
+
+    def reset_compression_stats(self) -> None:
+        self._original_bytes = 0
+        self._compressed_bytes = 0
+
+    @property
+    def aggregate_ratio(self) -> float | None:
+        if not self._compressed_bytes:
+            return None
+        return self._original_bytes / self._compressed_bytes
+
+    @contextmanager
+    def _record_prefill(self, cache, padding_mask):
+        record = None
+
+        def capture(module, inputs, output):
+            nonlocal record
+            if record is None:
+                record = cache.prefill_compression_stats(padding_mask)
+
+        handle = self.model.register_forward_hook(capture)
+        try:
+            yield
+        finally:
+            handle.remove()
+
+        if record is not None:
+            self._original_bytes += record["original_bytes"]
+            self._compressed_bytes += record["compressed_bytes"]
+
+    def set_cache_config(self, cache_config: CompressedCacheConfig) -> None:
+        """Use a new immutable cache config for subsequent model calls."""
+        self._cache_config = cache_config
 
     def _make_cache(self, cache_context=None):
         return CompressedCache(
-            config=self.model.config,
-            key_cache_kwargs=self._key_cache_kwargs,
-            value_cache_kwargs=self._value_cache_kwargs,
-            adjust_key_value_comp_ratio=self._adjust_key_value_comp_ratio,
+            config=self._cache_config,
             cache_context=cache_context,
             verbose=False,
         )
-
-    def generate_until(self, requests, disable_tqdm=False):
-        self._current_task_name = requests[0].task_name if requests else None
-        try:
-            return super().generate_until(requests, disable_tqdm=disable_tqdm)
-        finally:
-            self._current_task_name = None
 
     def _model_call(self, inps, attn_mask=None, labels=None):
         with (
@@ -58,16 +78,20 @@ class CompressedCacheHFLM(HFLM):
                 return self.model(
                     input_ids=inps, attention_mask=attn_mask, labels=labels
                 ).logits
-            return self.model(inps, past_key_values=self._make_cache()).logits
+            cache = self._make_cache(
+                {"padding_mask": torch.ones_like(inps, dtype=torch.bool)}
+            )
+            with self._record_prefill(
+                cache, torch.ones_like(inps, dtype=torch.bool)
+            ):
+                output = self.model(inps, past_key_values=cache)
+            return output.logits
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
-        self._logger.recorded_cr = False
-        self._logger.recorded_k_timing = False
-        task_name = getattr(self, "_current_task_name", None)
-        cache_context = (
-            {"task_name": task_name} if task_name is not None else None
+        cache = self._make_cache(
+            {"padding_mask": generation_kwargs["attention_mask"]}
         )
-        generation_kwargs["past_key_values"] = self._make_cache(cache_context)
+        generation_kwargs["past_key_values"] = cache
         generation_kwargs["temperature"] = generation_kwargs.get(
             "temperature", 0.0
         )
@@ -83,15 +107,18 @@ class CompressedCacheHFLM(HFLM):
         stopping_criteria = stop_sequences_criteria(
             self.tokenizer, stop, context.shape[1], context.shape[0]
         )
-        with torch.autocast(
+        with self._record_prefill(
+            cache, generation_kwargs["attention_mask"]
+        ), torch.autocast(
             device_type=self.device.type,
             dtype=self.mixed_precision_dtype,
             enabled=self.mixed_precision_dtype is not None,
         ):
-            return self.model.generate(
+            output = self.model.generate(
                 input_ids=context,
                 max_length=max_length,
                 stopping_criteria=stopping_criteria,
                 pad_token_id=self.tokenizer.pad_token_id,
                 **generation_kwargs,
             )
+        return output
